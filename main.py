@@ -21,9 +21,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--split", choices=("official", "seeded_scene"), default="official")
     parser.add_argument("--max-epochs", type=int, default=10)
-    parser.add_argument("--train-max-batches", type=int, default=256)
-    parser.add_argument("--val-max-batches", type=int, default=64)
-    parser.add_argument("--test-max-batches", type=int, default=64)
+    parser.add_argument("--train-max-samples", type=int, default=2048)
+    parser.add_argument("--val-max-samples", type=int, default=512)
+    parser.add_argument("--test-max-samples", type=int, default=512)
     parser.add_argument("--checkpoint-dir", type=Path, default=Path("checkpoints"))
     parser.add_argument("--resume", type=Path, default=None)
     parser.add_argument("--run-test", action="store_true")
@@ -280,9 +280,9 @@ def main() -> None:
         metrics=metrics,
         config=TrainerConfig(
             max_epochs=args.max_epochs,
-            train_max_batches=args.train_max_batches,
-            val_max_batches=args.val_max_batches,
-            test_max_batches=args.test_max_batches,
+            train_max_samples=args.train_max_samples,
+            val_max_samples=args.val_max_samples,
+            test_max_samples=args.test_max_samples,
             checkpoint_dir=args.checkpoint_dir,
         ),
         train_loader=train_loader,
