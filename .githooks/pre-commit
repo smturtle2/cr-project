@@ -1,0 +1,17 @@
+#!/bin/sh
+
+branch_name="$(git branch --show-current)"
+staged_files="$(git diff --cached --name-only --diff-filter=ACMR)"
+
+if [ "$branch_name" = "main" ]; then
+  exit 0
+fi
+
+for file in main.py main.ipynb; do
+  echo "$staged_files" | grep -qx "$file" || continue
+  echo "pre-commit: '$file' 는 main 브랜치에서만 커밋할 수 있습니다." >&2
+  echo "현재 브랜치: $branch_name" >&2
+  exit 1
+done
+
+exit 0
