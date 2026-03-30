@@ -23,6 +23,7 @@ dist/
 *.egg-info/
 pip-wheel-metadata/
 checkpoints/
+tmp_main.py
 
 # OS and editor files
 .DS_Store
