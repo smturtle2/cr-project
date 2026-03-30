@@ -42,7 +42,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--train-max-samples", type=int, default=2048)
     parser.add_argument("--val-max-samples", type=int, default=512)
     parser.add_argument("--test-max-samples", type=int, default=512)
-    parser.add_argument("--checkpoint-dir", type=Path, default=Path("checkpoints"))
+    parser.add_argument(
+        "--checkpoint-dir",
+        type=Path,
+        default=Path("artifacts/checkpoints"),
+    )
     parser.add_argument("--resume", type=Path, default=None)
     parser.add_argument("--run-test", action="store_true")
     parser.add_argument("--num-examples", type=int, default=4)
@@ -298,6 +302,7 @@ def main() -> None:
     args = parse_args()
     seed_everything(args.seed)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    artifact_dir = args.checkpoint_dir.parent
     print_hf_auth_status()
 
     # 최신 cr-train은 loader 동작을 개별 옵션으로 직접 제어한다.
@@ -348,7 +353,7 @@ def main() -> None:
         print(format_row(row))
 
     print_history(history)
-    save_history_plot(history, args.checkpoint_dir / "history.png")
+    save_history_plot(history, artifact_dir / "history.png")
 
     if args.run_test:
         test_row = {f"test_{name}": float(value) for name, value in trainer.test().items()}
@@ -368,7 +373,7 @@ def main() -> None:
         model=model,
         dataloader=example_loader,
         device=device,
-        output_dir=args.checkpoint_dir / "examples",
+        output_dir=artifact_dir / "examples",
         num_examples=args.num_examples,
         stage=args.example_stage,
     )

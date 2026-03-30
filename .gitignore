@@ -22,7 +22,7 @@ build/
 dist/
 *.egg-info/
 pip-wheel-metadata/
-checkpoints/
+artifacts/
 tmp_main.py
 
 # OS and editor files
