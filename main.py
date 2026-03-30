@@ -4,6 +4,7 @@ import argparse
 import random
 from pathlib import Path
 
+import matplotlib.pyplot as plt
 import numpy as np
 import torch
 from torch import nn
@@ -11,8 +12,11 @@ from torch import nn
 from cr_train import MAE, Trainer, TrainerConfig, build_sen12mscr_loaders
 
 
+RGB_CHANNELS = (3, 2, 1)
+
+
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Minimal cr-train entry point.")
+    parser = argparse.ArgumentParser(description="SEN12MS-CR 학습 엔트리 포인트")
     parser.add_argument("--batch-size", type=int, default=4)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--split", choices=("official", "seeded_scene"), default="official")
@@ -23,10 +27,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--checkpoint-dir", type=Path, default=Path("checkpoints"))
     parser.add_argument("--resume", type=Path, default=None)
     parser.add_argument("--run-test", action="store_true")
+    parser.add_argument("--num-examples", type=int, default=4)
+    parser.add_argument("--example-stage", choices=("val", "test"), default="val")
     return parser.parse_args()
 
 
 def seed_everything(seed: int) -> None:
+    # 실험 재현성을 위해 파이썬, 넘파이, 파이토치 시드를 함께 고정한다.
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
@@ -35,26 +42,27 @@ def seed_everything(seed: int) -> None:
 
 
 def build_model() -> nn.Module:
-    # Trainer will call model(sar, cloudy), so build your model to accept two tensors.
-    raise NotImplementedError("Replace build_model() with your project model.")
+    # Trainer는 model(sar, cloudy)를 호출하므로 입력 시그니처를 맞춰 구현한다.
+    raise NotImplementedError("프로젝트 모델로 build_model()을 교체하세요.")
 
 
 def build_optimizer(model: nn.Module) -> torch.optim.Optimizer:
-    # Keep this aligned with build_model().
-    raise NotImplementedError("Replace build_optimizer() with your optimizer.")
+    # build_model()에서 만든 파라미터와 함께 사용할 optimizer를 정의한다.
+    raise NotImplementedError("프로젝트 optimizer로 build_optimizer()를 교체하세요.")
 
 
 def build_criterion() -> nn.Module:
-    # Replace this if you want a different training loss.
+    # 기본 복원 손실은 L1로 둔다.
     return nn.L1Loss()
 
 
 def build_metrics() -> list[nn.Module]:
-    # Add or replace metrics here.
+    # Trainer가 epoch 평균을 집계할 metric 목록이다.
     return [MAE()]
 
 
 def flatten_record(record: dict) -> dict[str, int | float]:
+    # Trainer가 stage별로 나눠 주는 로그를 한 줄짜리 dict로 평탄화한다.
     row: dict[str, int | float] = {
         "epoch": int(record["epoch"]),
         "global_step": int(record["global_step"]),
@@ -109,11 +117,6 @@ def save_history_plot(history: list[dict[str, int | float]], path: Path) -> None
     if not history:
         return
 
-    try:
-        import matplotlib.pyplot as plt
-    except ImportError:
-        return
-
     metric_keys = sorted(
         {key for row in history for key in row if key not in {"epoch", "global_step"}}
     )
@@ -147,12 +150,118 @@ def save_history_plot(history: list[dict[str, int | float]], path: Path) -> None
     print(f"\nsaved plot: {path}")
 
 
+def select_rgb(image: torch.Tensor) -> torch.Tensor:
+    # 13채널 Sentinel-2 계열은 일반적으로 B4, B3, B2를 RGB로 본다.
+    return image[list(RGB_CHANNELS)]
+
+
+def normalize_rgb_triplet(
+    cloudy: torch.Tensor,
+    prediction: torch.Tensor,
+    target: torch.Tensor,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    rgb_tensors = [select_rgb(tensor).detach().cpu().float() for tensor in (cloudy, prediction, target)]
+    merged = np.concatenate(
+        [tensor.permute(1, 2, 0).reshape(-1, 3).numpy() for tensor in rgb_tensors],
+        axis=0,
+    )
+    low = np.quantile(merged, 0.02, axis=0)
+    high = np.quantile(merged, 0.98, axis=0)
+    scale = np.maximum(high - low, 1e-6)
+
+    images: list[np.ndarray] = []
+    for tensor in rgb_tensors:
+        image = tensor.permute(1, 2, 0).numpy()
+        image = np.clip((image - low) / scale, 0.0, 1.0)
+        images.append(image ** (1.0 / 2.2))
+    return images[0], images[1], images[2]
+
+
+def normalize_map(image: torch.Tensor) -> np.ndarray:
+    array = image.detach().cpu().float().numpy()
+    low, high = np.quantile(array, [0.02, 0.98])
+    return np.clip((array - low) / max(high - low, 1e-6), 0.0, 1.0)
+
+
+def save_restoration_examples(
+    model: nn.Module,
+    dataloader,
+    device: torch.device,
+    output_dir: Path,
+    num_examples: int,
+    stage: str,
+) -> list[Path]:
+    # 학습 후 cloudy / prediction / target / SAR / error를 한 장에 묶어 저장한다.
+    if num_examples <= 0:
+        return []
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+    was_training = model.training
+    model.eval()
+
+    saved_paths: list[Path] = []
+    with torch.no_grad():
+        for batch in dataloader:
+            sar, cloudy = batch["inputs"]
+            target = batch["target"]
+            metadata = batch["metadata"]
+            prediction = model(sar.to(device), cloudy.to(device)).cpu()
+
+            for index in range(prediction.shape[0]):
+                cloudy_rgb, prediction_rgb, target_rgb = normalize_rgb_triplet(
+                    cloudy[index],
+                    prediction[index],
+                    target[index],
+                )
+                sar_map = normalize_map(sar[index].mean(dim=0))
+                error_map = normalize_map((prediction[index] - target[index]).abs().mean(dim=0))
+
+                title = (
+                    f"{stage} example {len(saved_paths) + 1} | "
+                    f"{metadata['season'][index]}/scene_{metadata['scene'][index]}/patch_{metadata['patch'][index]}"
+                )
+
+                fig, axes = plt.subplots(1, 5, figsize=(18, 4))
+                fig.suptitle(title, fontsize=11)
+                panels = (
+                    ("Cloudy RGB", cloudy_rgb, None),
+                    ("Prediction RGB", prediction_rgb, None),
+                    ("Target RGB", target_rgb, None),
+                    ("SAR Mean", sar_map, "gray"),
+                    ("Abs Error", error_map, "magma"),
+                )
+
+                for ax, (panel_title, image, cmap) in zip(axes, panels):
+                    if cmap is None:
+                        ax.imshow(image)
+                    else:
+                        ax.imshow(image, cmap=cmap)
+                    ax.set_title(panel_title)
+                    ax.axis("off")
+
+                fig.tight_layout()
+                fig.subplots_adjust(top=0.80)
+                path = output_dir / f"{stage}_example_{len(saved_paths) + 1:02d}.png"
+                fig.savefig(path, dpi=180, bbox_inches="tight")
+                plt.close(fig)
+                saved_paths.append(path)
+
+                if len(saved_paths) == num_examples:
+                    model.train(was_training)
+                    print(f"\nsaved examples: {output_dir}")
+                    return saved_paths
+
+    model.train(was_training)
+    print(f"\nsaved examples: {output_dir}")
+    return saved_paths
+
+
 def main() -> None:
     args = parse_args()
     seed_everything(args.seed)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    # cr-train already knows how to build the streaming SEN12MS-CR loaders.
+    # cr-train이 SEN12MS-CR 스트리밍 로더 구성을 이미 제공한다.
     train_loader, val_loader, test_loader = build_sen12mscr_loaders(
         batch_size=args.batch_size,
         seed=args.seed,
@@ -181,10 +290,10 @@ def main() -> None:
         test_loader=test_loader,
     )
 
-    # Resume first, then keep iterating the epoch records from Trainer.step().
     if args.resume is not None:
         trainer.load_checkpoint(args.resume)
 
+    # epoch별 로그를 모아 표와 그래프로 다시 본다.
     history: list[dict[str, int | float]] = []
     for record in trainer.step():
         row = flatten_record(record)
@@ -197,7 +306,25 @@ def main() -> None:
     if args.run_test:
         test_row = {f"test_{name}": float(value) for name, value in trainer.test().items()}
         print("\ntest")
-        print(format_row({"epoch": trainer.state.epoch, "global_step": trainer.state.global_step, **test_row}))
+        print(
+            format_row(
+                {
+                    "epoch": trainer.state.epoch,
+                    "global_step": trainer.state.global_step,
+                    **test_row,
+                }
+            )
+        )
+
+    example_loader = test_loader if args.example_stage == "test" else val_loader
+    save_restoration_examples(
+        model=model,
+        dataloader=example_loader,
+        device=device,
+        output_dir=args.checkpoint_dir / "examples",
+        num_examples=args.num_examples,
+        stage=args.example_stage,
+    )
 
 
 if __name__ == "__main__":
