@@ -335,7 +335,7 @@ requires-dist = [
 [[package]]
 name = "cr-train"
 version = "0.1.0"
-source = { git = "https://github.com/smturtle2/cr-train.git#c4386724646b55a8c9629b9016bc18d11ad1dc86" }
+source = { git = "https://github.com/smturtle2/cr-train.git#9852c6824404f5979b525dcb820e71310d330986" }
 dependencies = [
     { name = "datasets" },
     { name = "fsspec" },
@@ -343,8 +343,6 @@ dependencies = [
     { name = "pyarrow" },
     { name = "rich" },
     { name = "torch" },
-    { name = "tqdm" },
-    { name = "typing-extensions" },
 ]
 
 [[package]]

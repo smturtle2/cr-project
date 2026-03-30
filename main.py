@@ -8,18 +8,36 @@ import numpy as np
 import torch
 from torch import nn
 
-from cr_train import MAE, Trainer, TrainerConfig, build_sen12mscr_loaders
+from cr_train import MAE, Trainer, TrainerConfig, build_sen12mscr_loaders, hf_token_status
 
 
 RGB_CHANNELS = (3, 2, 1)
-
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="SEN12MS-CR 학습 엔트리 포인트")
     parser.add_argument("--batch-size", type=int, default=8)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--split", choices=("official", "seeded_scene"), default="official")
-    parser.add_argument("--io-profile", choices=("smooth", "conservative"), default="smooth")
+    parser.add_argument(
+        "--streaming",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Hugging Face에서 parquet shard를 바로 스트리밍할지 여부",
+    )
+    parser.add_argument("--shuffle-buffer-size", type=int, default=64)
+    parser.add_argument("--num-workers", type=int, default=None)
+    parser.add_argument(
+        "--pin-memory",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+    )
+    parser.add_argument("--timeout", type=float, default=0.0)
+    parser.add_argument("--prefetch-factor", type=int, default=None)
+    parser.add_argument(
+        "--persistent-workers",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+    )
     parser.add_argument("--max-epochs", type=int, default=10)
     parser.add_argument("--train-max-samples", type=int, default=2048)
     parser.add_argument("--val-max-samples", type=int, default=512)
@@ -29,6 +47,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--run-test", action="store_true")
     parser.add_argument("--num-examples", type=int, default=4)
     parser.add_argument("--example-stage", choices=("val", "test"), default="val")
+    parser.add_argument(
+        "--show-progress",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+    )
     return parser.parse_args()
 
 
@@ -41,14 +64,17 @@ def seed_everything(seed: int) -> None:
         torch.cuda.manual_seed_all(seed)
 
 
+def print_hf_auth_status() -> None:
+    status = hf_token_status()
+    print(f"HF auth: {status.source}")
+
+
 def build_model() -> nn.Module:
-    # Trainer는 model(sar, cloudy)를 호출하므로 입력 시그니처를 맞춰 구현한다.
-    raise NotImplementedError("프로젝트 모델로 build_model()을 교체하세요.")
+    raise NotImplementedError("build_model()을 구현하세요.")
 
 
 def build_optimizer(model: nn.Module) -> torch.optim.Optimizer:
-    # build_model()에서 만든 파라미터와 함께 사용할 optimizer를 정의한다.
-    raise NotImplementedError("프로젝트 optimizer로 build_optimizer()를 교체하세요.")
+    raise NotImplementedError("build_optimizer()를 구현하세요.")
 
 
 def build_criterion() -> nn.Module:
@@ -272,13 +298,20 @@ def main() -> None:
     args = parse_args()
     seed_everything(args.seed)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print_hf_auth_status()
 
-    # 최신 cr-train은 file-shard 스트리밍 + cache preset 조합을 io_profile로 제어한다.
+    # 최신 cr-train은 loader 동작을 개별 옵션으로 직접 제어한다.
     train_loader, val_loader, test_loader = build_sen12mscr_loaders(
         batch_size=args.batch_size,
+        streaming=args.streaming,
         seed=args.seed,
         split=args.split,
-        io_profile=args.io_profile,
+        shuffle_buffer_size=args.shuffle_buffer_size,
+        num_workers=args.num_workers,
+        pin_memory=args.pin_memory,
+        timeout=args.timeout,
+        prefetch_factor=args.prefetch_factor,
+        persistent_workers=args.persistent_workers,
     )
 
     model = build_model().to(device)
@@ -297,6 +330,7 @@ def main() -> None:
             val_max_samples=args.val_max_samples,
             test_max_samples=args.test_max_samples,
             checkpoint_dir=args.checkpoint_dir,
+            show_progress=args.show_progress,
         ),
         train_loader=train_loader,
         val_loader=val_loader,
