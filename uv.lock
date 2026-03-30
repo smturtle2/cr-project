@@ -335,7 +335,7 @@ requires-dist = [
 [[package]]
 name = "cr-train"
 version = "0.1.0"
-source = { git = "https://github.com/smturtle2/cr-train.git#2344e5df9992b3bd4603704f39b5e1eb38c5c4ab" }
+source = { git = "https://github.com/smturtle2/cr-train.git#c4386724646b55a8c9629b9016bc18d11ad1dc86" }
 dependencies = [
     { name = "datasets" },
     { name = "fsspec" },

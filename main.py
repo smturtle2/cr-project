@@ -20,6 +20,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--batch-size", type=int, default=8)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--split", choices=("official", "seeded_scene"), default="official")
+    parser.add_argument("--io-profile", choices=("smooth", "conservative"), default="smooth")
     parser.add_argument("--max-epochs", type=int, default=10)
     parser.add_argument("--train-max-samples", type=int, default=2048)
     parser.add_argument("--val-max-samples", type=int, default=512)
@@ -200,58 +201,66 @@ def save_restoration_examples(
     model.eval()
 
     saved_paths: list[Path] = []
-    with torch.no_grad():
-        for batch in dataloader:
-            sar, cloudy = batch["inputs"]
-            target = batch["target"]
-            metadata = batch["metadata"]
-            prediction = model(sar.to(device), cloudy.to(device)).cpu()
+    iterator = iter(dataloader)
+    try:
+        with torch.no_grad():
+            while len(saved_paths) < num_examples:
+                try:
+                    batch = next(iterator)
+                except StopIteration:
+                    break
 
-            for index in range(prediction.shape[0]):
-                cloudy_rgb, prediction_rgb, target_rgb = normalize_rgb_triplet(
-                    cloudy[index],
-                    prediction[index],
-                    target[index],
-                )
-                sar_map = normalize_map(sar[index].mean(dim=0))
-                error_map = normalize_map((prediction[index] - target[index]).abs().mean(dim=0))
+                sar, cloudy = batch["inputs"]
+                target = batch["target"]
+                metadata = batch["metadata"]
+                prediction = model(sar.to(device), cloudy.to(device)).cpu()
 
-                title = (
-                    f"{stage} example {len(saved_paths) + 1} | "
-                    f"{metadata['season'][index]}/scene_{metadata['scene'][index]}/patch_{metadata['patch'][index]}"
-                )
+                for index in range(prediction.shape[0]):
+                    cloudy_rgb, prediction_rgb, target_rgb = normalize_rgb_triplet(
+                        cloudy[index],
+                        prediction[index],
+                        target[index],
+                    )
+                    sar_map = normalize_map(sar[index].mean(dim=0))
+                    error_map = normalize_map((prediction[index] - target[index]).abs().mean(dim=0))
 
-                fig, axes = plt.subplots(1, 5, figsize=(18, 4))
-                fig.suptitle(title, fontsize=11)
-                panels = (
-                    ("Cloudy RGB", cloudy_rgb, None),
-                    ("Prediction RGB", prediction_rgb, None),
-                    ("Target RGB", target_rgb, None),
-                    ("SAR Mean", sar_map, "gray"),
-                    ("Abs Error", error_map, "magma"),
-                )
+                    title = (
+                        f"{stage} example {len(saved_paths) + 1} | "
+                        f"{metadata['season'][index]}/scene_{metadata['scene'][index]}/patch_{metadata['patch'][index]}"
+                    )
 
-                for ax, (panel_title, image, cmap) in zip(axes, panels):
-                    if cmap is None:
-                        ax.imshow(image)
-                    else:
-                        ax.imshow(image, cmap=cmap)
-                    ax.set_title(panel_title)
-                    ax.axis("off")
+                    fig, axes = plt.subplots(1, 5, figsize=(18, 4))
+                    fig.suptitle(title, fontsize=11)
+                    panels = (
+                        ("Cloudy RGB", cloudy_rgb, None),
+                        ("Prediction RGB", prediction_rgb, None),
+                        ("Target RGB", target_rgb, None),
+                        ("SAR Mean", sar_map, "gray"),
+                        ("Abs Error", error_map, "magma"),
+                    )
 
-                fig.tight_layout()
-                fig.subplots_adjust(top=0.80)
-                path = output_dir / f"{stage}_example_{len(saved_paths) + 1:02d}.png"
-                fig.savefig(path, dpi=180, bbox_inches="tight")
-                plt.close(fig)
-                saved_paths.append(path)
+                    for ax, (panel_title, image, cmap) in zip(axes, panels):
+                        if cmap is None:
+                            ax.imshow(image)
+                        else:
+                            ax.imshow(image, cmap=cmap)
+                        ax.set_title(panel_title)
+                        ax.axis("off")
 
-                if len(saved_paths) == num_examples:
-                    model.train(was_training)
-                    print(f"\nsaved examples: {output_dir}")
-                    return saved_paths
+                    fig.tight_layout()
+                    fig.subplots_adjust(top=0.80)
+                    path = output_dir / f"{stage}_example_{len(saved_paths) + 1:02d}.png"
+                    fig.savefig(path, dpi=180, bbox_inches="tight")
+                    plt.close(fig)
+                    saved_paths.append(path)
 
-    model.train(was_training)
+                    if len(saved_paths) == num_examples:
+                        break
+    finally:
+        # 스트리밍 iterator를 조기 종료하는 경우 worker/prefetch 상태를 바로 정리한다.
+        del iterator
+        model.train(was_training)
+
     print(f"\nsaved examples: {output_dir}")
     return saved_paths
 
@@ -261,11 +270,12 @@ def main() -> None:
     seed_everything(args.seed)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    # 최신 cr-train loader 기본값을 그대로 사용한다.
+    # 최신 cr-train은 file-shard 스트리밍 + cache preset 조합을 io_profile로 제어한다.
     train_loader, val_loader, test_loader = build_sen12mscr_loaders(
         batch_size=args.batch_size,
         seed=args.seed,
         split=args.split,
+        io_profile=args.io_profile,
     )
 
     model = build_model().to(device)
