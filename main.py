@@ -261,7 +261,7 @@ def main() -> None:
     seed_everything(args.seed)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    # cr-train이 SEN12MS-CR 스트리밍 로더 구성을 이미 제공한다.
+    # 최신 cr-train loader 기본값을 그대로 사용한다.
     train_loader, val_loader, test_loader = build_sen12mscr_loaders(
         batch_size=args.batch_size,
         seed=args.seed,
