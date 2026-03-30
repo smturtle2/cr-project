@@ -4,7 +4,6 @@ import argparse
 import random
 from pathlib import Path
 
-import matplotlib.pyplot as plt
 import numpy as np
 import torch
 from torch import nn
@@ -118,6 +117,8 @@ def save_history_plot(history: list[dict[str, int | float]], path: Path) -> None
     if not history:
         return
 
+    import matplotlib.pyplot as plt
+
     metric_keys = sorted(
         {key for row in history for key in row if key not in {"epoch", "global_step"}}
     )
@@ -195,6 +196,8 @@ def save_restoration_examples(
     # 학습 후 cloudy / prediction / target / SAR / error를 한 장에 묶어 저장한다.
     if num_examples <= 0:
         return []
+
+    import matplotlib.pyplot as plt
 
     output_dir.mkdir(parents=True, exist_ok=True)
     was_training = model.training
