@@ -18,14 +18,6 @@ git config core.hooksPath .githooks
 - 현재 브랜치가 `main` 이 아니면 두 파일이 staging 되어 있을 때 `git commit` 실패
 - `modules/...` 같은 feature 코드 파일은 그대로 커밋 가능
 
-### 막혔을 때
-
-`main.py` 나 `main.ipynb` 를 feature 브랜치에서 실수로 수정했다면:
-
-1. 변경을 되돌리거나
-2. 별도 브랜치가 아니라 `main` 에서 작업하거나
-3. 정말 공통 변경이라면 `main` 에 먼저 반영한 뒤 feature 브랜치를 다시 `rebase` 하면 됩니다
-
 ### 주의
 
 이 방식은 로컬 커밋 시점을 막는 용도입니다.
