@@ -6,9 +6,10 @@ from pathlib import Path
 
 import numpy as np
 import torch
+from huggingface_hub import get_token
 from torch import nn
 
-from cr_train import MAE, Trainer, TrainerConfig, build_sen12mscr_loaders, hf_token_status
+from cr_train import MAE, Trainer, TrainerConfig, build_loaders
 
 
 RGB_CHANNELS = (3, 2, 1)
@@ -69,8 +70,32 @@ def seed_everything(seed: int) -> None:
 
 
 def print_hf_auth_status() -> None:
-    status = hf_token_status()
-    print(f"HF auth: {status.source}")
+    print(f"HF auth: {'configured' if get_token() else 'missing'}")
+
+
+def resolve_loader_kwargs(args: argparse.Namespace) -> dict[str, int | bool]:
+    if args.split != "official":
+        raise ValueError("current cr-train only supports the official Hugging Face splits")
+    if not args.streaming:
+        raise ValueError("current cr-train always streams the Hugging Face parquet shards")
+
+    ignored_options: list[str] = []
+    if args.timeout != 0.0:
+        ignored_options.append(f"--timeout={args.timeout}")
+    if args.prefetch_factor is not None:
+        ignored_options.append(f"--prefetch-factor={args.prefetch_factor}")
+    if args.persistent_workers is not None:
+        ignored_options.append(f"--persistent-workers={args.persistent_workers}")
+    if ignored_options:
+        print("ignored loader options:", ", ".join(ignored_options))
+
+    return {
+        "batch_size": args.batch_size,
+        "seed": args.seed,
+        "shuffle_buffer_size": args.shuffle_buffer_size,
+        "num_workers": 0 if args.num_workers is None else args.num_workers,
+        "pin_memory": args.pin_memory,
+    }
 
 
 def build_model() -> nn.Module:
@@ -305,19 +330,8 @@ def main() -> None:
     artifact_dir = args.checkpoint_dir.parent
     print_hf_auth_status()
 
-    # 최신 cr-train은 loader 동작을 개별 옵션으로 직접 제어한다.
-    train_loader, val_loader, test_loader = build_sen12mscr_loaders(
-        batch_size=args.batch_size,
-        streaming=args.streaming,
-        seed=args.seed,
-        split=args.split,
-        shuffle_buffer_size=args.shuffle_buffer_size,
-        num_workers=args.num_workers,
-        pin_memory=args.pin_memory,
-        timeout=args.timeout,
-        prefetch_factor=args.prefetch_factor,
-        persistent_workers=args.persistent_workers,
-    )
+    # 최신 cr-train은 공식 split 기반 streaming loader만 공개한다.
+    train_loader, val_loader, test_loader = build_loaders(**resolve_loader_kwargs(args))
 
     model = build_model().to(device)
     optimizer = build_optimizer(model)
