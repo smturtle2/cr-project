@@ -13,7 +13,7 @@ from cr_train import MAE, Trainer, TrainerConfig, build_loaders
 
 
 RGB_CHANNELS = (3, 2, 1)
-
+print()
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="SEN12MS-CR 학습 엔트리 포인트")
     parser.add_argument("--batch-size", type=int, default=8)
