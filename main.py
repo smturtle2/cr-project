@@ -57,6 +57,8 @@ def parse_args() -> argparse.Namespace:
 def seed_everything(seed: int) -> None:
     # 모델 가중치를 만드는 시점부터 재현 가능하도록 Trainer 생성 전에 한 번 더 고정한다.
     # Trainer 내부도 epoch마다 다시 시드를 관리하지만, 모델 초기화는 main 쪽 책임이다.
+    # 최신 cr-train은 epoch seed는 유지하되 deterministic 알고리즘 강제는 하지 않으므로
+    # 여기서도 RNG 시드만 맞추고 CUDA 비결정 연산까지 막지는 않는다.
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
