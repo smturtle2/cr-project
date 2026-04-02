@@ -2,66 +2,61 @@ from __future__ import annotations
 
 import argparse
 import random
+from collections.abc import Callable, Mapping
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 import torch
 from huggingface_hub import get_token
 from torch import nn
 
-from cr_train import MAE, Trainer, TrainerConfig, build_loaders
+from cr_train import Trainer
+from cr_train.data import DATASET_ID, build_dataloader
+from cr_train.data.dataset import prepare_split
+from cr_train.data.runtime import ensure_split_cache
 
 
+# Sentinel-2 13채널 중 사람이 보기 쉬운 RGB 조합(B4, B3, B2) 인덱스다.
 RGB_CHANNELS = (3, 2, 1)
 
+# Trainer가 기대하는 `(prediction, batch)` 계약을 타입으로도 분명히 적어 둔다.
+Batch = dict[str, Any]
+LossFn = Callable[[torch.Tensor, Batch], torch.Tensor]
+MetricFn = Callable[[torch.Tensor, Batch], torch.Tensor]
+
+
 def parse_args() -> argparse.Namespace:
+    # Trainer가 이미 학습 루프, 데이터 준비, 체크포인트 저장을 담당하므로
+    # 여기서는 실험에 꼭 필요한 인자만 노출한다.
     parser = argparse.ArgumentParser(description="SEN12MS-CR 학습 엔트리 포인트")
-    parser.add_argument("--batch-size", type=int, default=8)
-    parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument("--split", choices=("official", "seeded_scene"), default="official")
+    parser.add_argument("--batch-size", type=int, default=8, help="train/val/test 전체에 공통으로 쓸 배치 크기")
+    parser.add_argument("--seed", type=int, default=42, help="모델 초기화와 Trainer의 데이터 샘플링에 공통으로 쓸 시드")
+    parser.add_argument("--max-epochs", type=int, default=10, help="Trainer.step()을 몇 epoch까지 반복할지")
+    parser.add_argument("--train-max-samples", type=int, default=2048, help="train split에서 사용할 최대 샘플 수")
+    parser.add_argument("--val-max-samples", type=int, default=512, help="validation split에서 사용할 최대 샘플 수")
+    parser.add_argument("--test-max-samples", type=int, default=512, help="test split에서 사용할 최대 샘플 수")
     parser.add_argument(
-        "--streaming",
-        action=argparse.BooleanOptionalAction,
-        default=True,
-        help="Hugging Face에서 parquet shard를 바로 스트리밍할지 여부",
-    )
-    parser.add_argument("--shuffle-buffer-size", type=int, default=64)
-    parser.add_argument("--num-workers", type=int, default=None)
-    parser.add_argument(
-        "--pin-memory",
-        action=argparse.BooleanOptionalAction,
-        default=False,
-    )
-    parser.add_argument("--timeout", type=float, default=0.0)
-    parser.add_argument("--prefetch-factor", type=int, default=None)
-    parser.add_argument(
-        "--persistent-workers",
-        action=argparse.BooleanOptionalAction,
-        default=None,
-    )
-    parser.add_argument("--max-epochs", type=int, default=10)
-    parser.add_argument("--train-max-samples", type=int, default=2048)
-    parser.add_argument("--val-max-samples", type=int, default=512)
-    parser.add_argument("--test-max-samples", type=int, default=512)
-    parser.add_argument(
-        "--checkpoint-dir",
+        "--output-dir",
         type=Path,
-        default=Path("artifacts/checkpoints"),
+        default=Path("artifacts"),
+        help="체크포인트, 학습 곡선, 예시 이미지를 저장할 루트 디렉터리",
     )
-    parser.add_argument("--resume", type=Path, default=None)
-    parser.add_argument("--run-test", action="store_true")
-    parser.add_argument("--num-examples", type=int, default=4)
-    parser.add_argument("--example-stage", choices=("val", "test"), default="val")
+    parser.add_argument("--resume", type=Path, default=None, help="이어서 학습할 checkpoint 경로")
+    parser.add_argument("--run-test", action="store_true", help="학습 뒤 test split 평가를 추가로 실행할지")
+    parser.add_argument("--num-examples", type=int, default=4, help="저장할 복원 예시 이미지 수")
     parser.add_argument(
-        "--show-progress",
-        action=argparse.BooleanOptionalAction,
-        default=None,
+        "--example-stage",
+        choices=("val", "test"),
+        default="val",
+        help="복원 예시를 뽑아올 split",
     )
     return parser.parse_args()
 
 
 def seed_everything(seed: int) -> None:
-    # 실험 재현성을 위해 파이썬, 넘파이, 파이토치 시드를 함께 고정한다.
+    # 모델 가중치를 만드는 시점부터 재현 가능하도록 Trainer 생성 전에 한 번 더 고정한다.
+    # Trainer 내부도 epoch마다 다시 시드를 관리하지만, 모델 초기화는 main 쪽 책임이다.
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
@@ -70,105 +65,91 @@ def seed_everything(seed: int) -> None:
 
 
 def print_hf_auth_status() -> None:
+    # 데이터셋은 Hugging Face에서 오므로 토큰이 잡혀 있는지만 가볍게 알려 준다.
+    # 인증 자체를 여기서 처리하지는 않고, 상태만 보여 준다.
     print(f"HF auth: {'configured' if get_token() else 'missing'}")
 
 
-def resolve_loader_kwargs(args: argparse.Namespace) -> dict[str, int | bool]:
-    if args.split != "official":
-        raise ValueError("current cr-train only supports the official Hugging Face splits")
-    if not args.streaming:
-        raise ValueError("current cr-train always streams the Hugging Face parquet shards")
-
-    ignored_options: list[str] = []
-    if args.timeout != 0.0:
-        ignored_options.append(f"--timeout={args.timeout}")
-    if args.prefetch_factor is not None:
-        ignored_options.append(f"--prefetch-factor={args.prefetch_factor}")
-    if args.persistent_workers is not None:
-        ignored_options.append(f"--persistent-workers={args.persistent_workers}")
-    if ignored_options:
-        print("ignored loader options:", ", ".join(ignored_options))
-
-    return {
-        "batch_size": args.batch_size,
-        "seed": args.seed,
-        "shuffle_buffer_size": args.shuffle_buffer_size,
-        "num_workers": 0 if args.num_workers is None else args.num_workers,
-        "pin_memory": args.pin_memory,
-    }
-
-
 def build_model() -> nn.Module:
+    # 사용자 프로젝트에서 실제 모델을 연결할 지점이다.
+    # cr-train은 `forward(sar, cloudy)` 시그니처를 기대하므로 그 규약만 맞추면 된다.
     raise NotImplementedError("build_model()을 구현하세요.")
 
 
 def build_optimizer(model: nn.Module) -> torch.optim.Optimizer:
+    # 사용자 프로젝트에서 실제 optimizer를 연결할 지점이다.
     raise NotImplementedError("build_optimizer()를 구현하세요.")
 
 
-def build_criterion() -> nn.Module:
-    # 기본 복원 손실은 L1로 둔다.
-    return nn.L1Loss()
+def build_loss() -> LossFn:
+    # loss도 모델/optimizer와 마찬가지로 프로젝트 쪽 교체 포인트다.
+    # Trainer가 기대하는 `(prediction, batch)` 계약을 여기서 맞춰 준다.
+    l1_loss = nn.L1Loss()
+
+    def loss_fn(prediction: torch.Tensor, batch: Batch) -> torch.Tensor:
+        return l1_loss(prediction, batch["target"])
+
+    return loss_fn
 
 
-def build_metrics() -> list[nn.Module]:
-    # Trainer가 epoch 평균을 집계할 metric 목록이다.
-    return [MAE()]
+def build_metrics() -> dict[str, MetricFn]:
+    # metric 역시 Trainer에 직접 넘기는 사용자 정의 지점이다.
+    # 기본 예시는 target 기준 MAE 하나만 사용한다.
+    def mae(prediction: torch.Tensor, batch: Batch) -> torch.Tensor:
+        return torch.mean(torch.abs(prediction - batch["target"]))
+
+    return {"mae": mae}
 
 
-def flatten_record(record: dict) -> dict[str, int | float]:
-    # Trainer가 stage별로 나눠 주는 로그를 한 줄짜리 dict로 평탄화한다.
+def load_checkpoint(trainer: Trainer, checkpoint_path: Path, *, device: torch.device) -> None:
+    # 최신 cr-train은 공개 resume API를 제공하지 않으므로
+    # 저장 포맷(`model`, `optimizer`, `epoch`, `global_step`)에 맞춰 직접 복원한다.
+    # PyTorch 버전에 따라 `weights_only` 인자 지원 여부가 달라서 여기서만 분기 처리한다.
+    try:
+        checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
+    except TypeError:
+        checkpoint = torch.load(checkpoint_path, map_location=device)
+
+    # 분산 학습에서 model이 DDP로 감싸졌더라도 실제 state_dict 대상은 내부 module이다.
+    model_owner = trainer.model.module if hasattr(trainer.model, "module") else trainer.model
+    model_owner.load_state_dict(checkpoint["model"])
+    trainer.optimizer.load_state_dict(checkpoint["optimizer"])
+    trainer.current_epoch = int(checkpoint["epoch"])
+    trainer.global_step = int(checkpoint["global_step"])
+
+    print(
+        "resumed checkpoint:",
+        f"path={checkpoint_path}",
+        f"epoch={trainer.current_epoch}",
+        f"global_step={trainer.global_step}",
+    )
+
+
+def flatten_record(record: Mapping[str, Any], *, global_step: int) -> dict[str, int | float]:
+    # epoch 단위 결과를 plot용 row 하나로 바꾼다.
+    # Trainer가 이미 사람이 읽기 좋은 요약을 출력하므로, 여기서는 시각화에 필요한 값만 남긴다.
     row: dict[str, int | float] = {
         "epoch": int(record["epoch"]),
-        "global_step": int(record["global_step"]),
+        "global_step": int(global_step),
     }
+
     for stage in ("train", "val", "test"):
-        for name, value in record.get(stage, {}).items():
+        summary = record.get(stage)
+        if not summary:
+            continue
+
+        if "loss" in summary:
+            row[f"{stage}_loss"] = float(summary["loss"])
+
+        for name, value in summary.get("metrics", {}).items():
             row[f"{stage}_{name}"] = float(value)
+
     return row
 
 
-def format_value(value: int | float | None) -> str:
-    if value is None:
-        return "-"
-    if isinstance(value, int):
-        return str(value)
-    return f"{value:.4f}"
-
-
-def format_row(row: dict[str, int | float]) -> str:
-    metric_keys = sorted(key for key in row if key not in {"epoch", "global_step"})
-    parts = [f"epoch={row['epoch']}", f"global_step={row['global_step']}"]
-    parts.extend(f"{key}={format_value(row[key])}" for key in metric_keys)
-    return " | ".join(parts)
-
-
-def print_history(history: list[dict[str, int | float]]) -> None:
-    if not history:
-        return
-
-    keys = ["epoch", "global_step"] + sorted(
-        {key for row in history for key in row if key not in {"epoch", "global_step"}}
-    )
-    widths = {
-        key: max(len(key), *(len(format_value(row.get(key))) for row in history))
-        for key in keys
-    }
-
-    print("\nhistory")
-    print(" ".join(key.ljust(widths[key]) for key in keys))
-    for row in history:
-        print(" ".join(format_value(row.get(key)).ljust(widths[key]) for key in keys))
-
-    for best_key in ("val_loss", "train_loss"):
-        values = [row for row in history if best_key in row]
-        if values:
-            best_row = min(values, key=lambda row: float(row[best_key]))
-            print(f"\nbest {best_key}: {format_row(best_row)}")
-            break
-
-
 def save_history_plot(history: list[dict[str, int | float]], path: Path) -> None:
+    # 학습 결과를 한 장으로 남기기 위해 loss와 나머지 metric을 분리해서 그린다.
+    # 파일 기반 결과물이 있으면 notebook 없이도 학습 흐름을 다시 확인하기 쉽다.
     if not history:
         return
 
@@ -204,11 +185,56 @@ def save_history_plot(history: list[dict[str, int | float]], path: Path) -> None
     path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(path, dpi=180, bbox_inches="tight")
     plt.close(fig)
-    print(f"\nsaved plot: {path}")
+    print(f"saved plot: {path}")
+
+
+def build_loader(
+    trainer: Trainer,
+    *,
+    split: str,
+    max_samples: int | None,
+    training: bool,
+    epoch_index: int,
+):
+    # 예시 이미지를 만들거나 notebook에서 배치 shape를 확인할 때만 별도 loader가 필요하다.
+    # 이때도 데이터 준비 자체는 cr-train의 공개 data API를 그대로 사용한다.
+    ensure_split_cache(
+        split=split,
+        dataset_name=DATASET_ID,
+        revision=None,
+        max_samples=max_samples,
+        seed=trainer.seed,
+        cache_root=trainer.cache_root,
+    )
+
+    prepared = prepare_split(
+        split=split,
+        dataset_name=DATASET_ID,
+        revision=None,
+        max_samples=max_samples,
+        seed=trainer.seed,
+        epoch=epoch_index,
+        training=training,
+        cache_root=trainer.cache_root,
+    )
+
+    return build_dataloader(
+        prepared,
+        batch_size=trainer.batch_size,
+        num_workers=trainer.num_workers,
+        training=training,
+        seed=trainer.seed,
+        epoch=epoch_index,
+        include_metadata=trainer.include_metadata,
+        pin_memory=trainer.pin_memory,
+        persistent_workers=trainer.persistent_workers,
+        prefetch_factor=trainer.prefetch_factor,
+        drop_last=trainer.drop_last if training else False,
+    )
 
 
 def select_rgb(image: torch.Tensor) -> torch.Tensor:
-    # 13채널 Sentinel-2 계열은 일반적으로 B4, B3, B2를 RGB로 본다.
+    # 13채널 optical image에서 사람이 직관적으로 보는 RGB만 뽑는다.
     return image[list(RGB_CHANNELS)]
 
 
@@ -217,6 +243,8 @@ def normalize_rgb_triplet(
     prediction: torch.Tensor,
     target: torch.Tensor,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    # 세 이미지를 같은 범위로 정규화해야 비교가 쉬워진다.
+    # 그래서 세 텐서를 한꺼번에 합쳐 분위수 기반 min/max를 잡고 동일한 스케일을 적용한다.
     rgb_tensors = [select_rgb(tensor).detach().cpu().float() for tensor in (cloudy, prediction, target)]
     merged = np.concatenate(
         [tensor.permute(1, 2, 0).reshape(-1, 3).numpy() for tensor in rgb_tensors],
@@ -231,10 +259,12 @@ def normalize_rgb_triplet(
         image = tensor.permute(1, 2, 0).numpy()
         image = np.clip((image - low) / scale, 0.0, 1.0)
         images.append(image ** (1.0 / 2.2))
+
     return images[0], images[1], images[2]
 
 
 def normalize_map(image: torch.Tensor) -> np.ndarray:
+    # SAR 평균 맵이나 오차 맵은 단일 채널이므로 분위수 기반으로 0~1에 맞춰 보여 준다.
     array = image.detach().cpu().float().numpy()
     low, high = np.quantile(array, [0.02, 0.98])
     return np.clip((array - low) / max(high - low, 1e-6), 0.0, 1.0)
@@ -243,12 +273,14 @@ def normalize_map(image: torch.Tensor) -> np.ndarray:
 def save_restoration_examples(
     model: nn.Module,
     dataloader,
+    *,
     device: torch.device,
     output_dir: Path,
     num_examples: int,
     stage: str,
 ) -> list[Path]:
-    # 학습 후 cloudy / prediction / target / SAR / error를 한 장에 묶어 저장한다.
+    # 학습이 끝난 뒤 실제 복원 품질을 빠르게 확인할 수 있도록
+    # cloudy / prediction / target / SAR / error를 한 장에 묶어서 저장한다.
     if num_examples <= 0:
         return []
 
@@ -268,9 +300,10 @@ def save_restoration_examples(
                 except StopIteration:
                     break
 
-                sar, cloudy = batch["inputs"]
+                sar = batch["sar"]
+                cloudy = batch["cloudy"]
                 target = batch["target"]
-                metadata = batch["metadata"]
+                metadata = batch.get("meta", {})
                 prediction = model(sar.to(device), cloudy.to(device)).cpu()
 
                 for index in range(prediction.shape[0]):
@@ -282,9 +315,17 @@ def save_restoration_examples(
                     sar_map = normalize_map(sar[index].mean(dim=0))
                     error_map = normalize_map((prediction[index] - target[index]).abs().mean(dim=0))
 
+                    # metadata는 batch 단위 list라서 index별 값을 직접 안전하게 꺼낸다.
+                    seasons = metadata.get("season", [])
+                    scenes = metadata.get("scene", [])
+                    patches = metadata.get("patch", [])
+                    season = str(seasons[index]) if isinstance(seasons, (list, tuple)) and index < len(seasons) else ""
+                    scene = str(scenes[index]) if isinstance(scenes, (list, tuple)) and index < len(scenes) else ""
+                    patch = str(patches[index]) if isinstance(patches, (list, tuple)) and index < len(patches) else ""
+
                     title = (
                         f"{stage} example {len(saved_paths) + 1} | "
-                        f"{metadata['season'][index]}/scene_{metadata['scene'][index]}/patch_{metadata['patch'][index]}"
+                        f"{season}/scene_{scene}/patch_{patch}"
                     )
 
                     fig, axes = plt.subplots(1, 5, figsize=(18, 4))
@@ -315,79 +356,69 @@ def save_restoration_examples(
                     if len(saved_paths) == num_examples:
                         break
     finally:
-        # 스트리밍 iterator를 조기 종료하는 경우 worker/prefetch 상태를 바로 정리한다.
+        # iterator를 빨리 정리해 두면 worker가 떠 있는 상태로 오래 남지 않는다.
         del iterator
         model.train(was_training)
 
-    print(f"\nsaved examples: {output_dir}")
+    print(f"saved examples: {output_dir}")
     return saved_paths
 
 
 def main() -> None:
+    # main은 "모델/옵티마이저 조립 -> Trainer 실행 -> 결과물 저장"만 담당한다.
+    # Trainer가 이미 해 주는 일은 최대한 그대로 맡기고, 여기서는 프로젝트 전용 후처리만 남긴다.
+    # 그래서 Trainer 생성도 별도 래퍼 함수로 감싸지 않고 이 자리에서 바로 보이게 둔다.
     args = parse_args()
     seed_everything(args.seed)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    artifact_dir = args.checkpoint_dir.parent
     print_hf_auth_status()
 
-    # 최신 cr-train은 공식 split 기반 streaming loader만 공개한다.
-    train_loader, val_loader, test_loader = build_loaders(**resolve_loader_kwargs(args))
+    args.output_dir.mkdir(parents=True, exist_ok=True)
 
     model = build_model().to(device)
     optimizer = build_optimizer(model)
-    criterion = build_criterion()
-    metrics = build_metrics()
-
+    # 이 프로젝트가 Trainer에 어떤 값을 넘기는지 한눈에 보이도록 직접 생성한다.
     trainer = Trainer(
         model=model,
         optimizer=optimizer,
-        criterion=criterion,
-        metrics=metrics,
-        config=TrainerConfig(
-            max_epochs=args.max_epochs,
-            train_max_samples=args.train_max_samples,
-            val_max_samples=args.val_max_samples,
-            test_max_samples=args.test_max_samples,
-            checkpoint_dir=args.checkpoint_dir,
-            show_progress=args.show_progress,
-        ),
-        train_loader=train_loader,
-        val_loader=val_loader,
-        test_loader=test_loader,
+        loss=build_loss(),
+        metrics=build_metrics(),
+        max_train_samples=args.train_max_samples,
+        max_val_samples=args.val_max_samples,
+        max_test_samples=args.test_max_samples,
+        output_dir=args.output_dir,
+        batch_size=args.batch_size,
+        epochs=args.max_epochs,
+        seed=args.seed,
     )
 
     if args.resume is not None:
-        trainer.load_checkpoint(args.resume)
+        load_checkpoint(trainer, args.resume, device=device)
 
-    # epoch별 로그를 모아 표와 그래프로 다시 본다.
     history: list[dict[str, int | float]] = []
-    for record in trainer.step():
-        row = flatten_record(record)
-        history.append(row)
-        print(format_row(row))
+    while trainer.current_epoch < trainer.epochs:
+        record = trainer.step()
+        history.append(flatten_record(record, global_step=trainer.global_step))
 
-    print_history(history)
-    save_history_plot(history, artifact_dir / "history.png")
+    save_history_plot(history, args.output_dir / "history.png")
 
     if args.run_test:
-        test_row = {f"test_{name}": float(value) for name, value in trainer.test().items()}
-        print("\ntest")
-        print(
-            format_row(
-                {
-                    "epoch": trainer.state.epoch,
-                    "global_step": trainer.state.global_step,
-                    **test_row,
-                }
-            )
-        )
+        trainer.test()
 
-    example_loader = test_loader if args.example_stage == "test" else val_loader
+    preview_split = "validation" if args.example_stage == "val" else "test"
+    preview_max_samples = args.val_max_samples if args.example_stage == "val" else args.test_max_samples
+    preview_loader = build_loader(
+        trainer,
+        split=preview_split,
+        max_samples=preview_max_samples,
+        training=False,
+        epoch_index=max(trainer.current_epoch - 1, 0),
+    )
     save_restoration_examples(
-        model=model,
-        dataloader=example_loader,
+        model=trainer.model,
+        dataloader=preview_loader,
         device=device,
-        output_dir=artifact_dir / "examples",
+        output_dir=args.output_dir / "examples",
         num_examples=args.num_examples,
         stage=args.example_stage,
     )
