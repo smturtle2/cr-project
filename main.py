@@ -33,9 +33,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--batch-size", type=int, default=8, help="train/val/test 전체에 공통으로 쓸 배치 크기")
     parser.add_argument("--seed", type=int, default=42, help="모델 초기화와 Trainer의 데이터 샘플링에 공통으로 쓸 시드")
     parser.add_argument("--max-epochs", type=int, default=10, help="Trainer.step()을 몇 epoch까지 반복할지")
-    parser.add_argument("--train-max-samples", type=int, default=2048, help="train split에서 사용할 최대 샘플 수")
-    parser.add_argument("--val-max-samples", type=int, default=512, help="validation split에서 사용할 최대 샘플 수")
-    parser.add_argument("--test-max-samples", type=int, default=512, help="test split에서 사용할 최대 샘플 수")
+    parser.add_argument("--train-max-samples", type=int, default=16384, help="train split에서 사용할 최대 샘플 수")
+    parser.add_argument("--val-max-samples", type=int, default=2048, help="validation split에서 사용할 최대 샘플 수")
+    parser.add_argument("--test-max-samples", type=int, default=2048, help="test split에서 사용할 최대 샘플 수")
     parser.add_argument(
         "--output-dir",
         type=Path,
@@ -130,10 +130,14 @@ def load_checkpoint(trainer: Trainer, checkpoint_path: Path, *, device: torch.de
 def flatten_record(record: Mapping[str, Any], *, global_step: int) -> dict[str, int | float]:
     # epoch 단위 결과를 plot용 row 하나로 바꾼다.
     # Trainer가 이미 사람이 읽기 좋은 요약을 출력하므로, 여기서는 시각화에 필요한 값만 남긴다.
+    # 최신 cr-train은 epoch 전체 소요 시간도 함께 주므로, 표/그래프에서 같이 볼 수 있게 보존한다.
     row: dict[str, int | float] = {
         "epoch": int(record["epoch"]),
         "global_step": int(global_step),
     }
+
+    if "elapsed_sec" in record:
+        row["elapsed_sec"] = float(record["elapsed_sec"])
 
     for stage in ("train", "val", "test"):
         summary = record.get(stage)
@@ -150,7 +154,7 @@ def flatten_record(record: Mapping[str, Any], *, global_step: int) -> dict[str, 
 
 
 def save_history_plot(history: list[dict[str, int | float]], path: Path) -> None:
-    # 학습 결과를 한 장으로 남기기 위해 loss와 나머지 metric을 분리해서 그린다.
+    # 학습 결과를 한 장으로 남기기 위해 loss, metric, epoch 시간대를 분리해서 그린다.
     # 파일 기반 결과물이 있으면 notebook 없이도 학습 흐름을 다시 확인하기 쉽다.
     if not history:
         return
@@ -161,8 +165,9 @@ def save_history_plot(history: list[dict[str, int | float]], path: Path) -> None
         {key for row in history for key in row if key not in {"epoch", "global_step"}}
     )
     loss_keys = [key for key in metric_keys if key.endswith("_loss")]
-    other_keys = [key for key in metric_keys if key not in loss_keys]
-    groups = [keys for keys in (loss_keys, other_keys) if keys]
+    time_keys = [key for key in metric_keys if key == "elapsed_sec"]
+    other_keys = [key for key in metric_keys if key not in loss_keys and key not in time_keys]
+    groups = [keys for keys in (loss_keys, other_keys, time_keys) if keys]
     if not groups:
         return
 
@@ -179,7 +184,10 @@ def save_history_plot(history: list[dict[str, int | float]], path: Path) -> None
         ax.legend(frameon=False)
         ax.spines["top"].set_visible(False)
         ax.spines["right"].set_visible(False)
-        ax.set_ylabel("value")
+        if keys == time_keys:
+            ax.set_ylabel("seconds")
+        else:
+            ax.set_ylabel("value")
 
     axes[0].set_title("training history")
     axes[-1].set_xlabel("epoch")
