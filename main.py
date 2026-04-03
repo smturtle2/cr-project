@@ -224,11 +224,13 @@ def normalize_rgb_triplet(
     prediction: torch.Tensor,
     target: torch.Tensor,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    # 세 이미지를 같은 범위로 정규화해야 비교가 쉬워진다.
-    # 그래서 세 텐서를 한꺼번에 합쳐 분위수 기반 min/max를 잡고 동일한 스케일을 적용한다.
+    # 세 이미지는 같은 스케일로 보여야 비교가 쉽다.
+    # 다만 prediction에 큰 이상치가 끼면 기준 스케일까지 깨져서
+    # 정상인 cloudy/target 색이 같이 죽을 수 있으므로, 기준 범위는 입력/GT로만 잡는다.
     rgb_tensors = [select_rgb(tensor).detach().cpu().float() for tensor in (cloudy, prediction, target)]
+    reference_tensors = [rgb_tensors[0], rgb_tensors[2]]
     merged = np.concatenate(
-        [tensor.permute(1, 2, 0).reshape(-1, 3).numpy() for tensor in rgb_tensors],
+        [tensor.permute(1, 2, 0).reshape(-1, 3).numpy() for tensor in reference_tensors],
         axis=0,
     )
     low = np.quantile(merged, 0.02, axis=0)
