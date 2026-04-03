@@ -29,3 +29,6 @@ tmp_main.py
 .DS_Store
 .idea/
 .vscode/
+
+# Cache
+.cr_cache_stats/
