@@ -10,12 +10,13 @@
 
 ```bash
 cp tmp_main_base.py tmp_main.py
-uv run python tmp_main.py --help
+uv run python tmp_main.py
 ```
 
 - `tmp_main_base.py` 는 저장소에 남는 템플릿 파일입니다
 - `tmp_main.py` 는 각자 수정해서 쓰는 로컬 파일이고 `.gitignore` 에 들어 있습니다
 - `tmp_main.py` 에서는 `build_model()`, `build_optimizer()` 를 구현하고 필요하면 `build_loss()`, `build_metrics()` 도 덮어쓰면 됩니다
+- 학습 설정은 CLI parse 대신 `main(...)` 호출 인자로 직접 넘깁니다
 - 실행 자체는 공용 `main.py` 가 담당하므로 학습 루프와 결과 저장 흐름은 동일하게 유지됩니다
 
 ### 한 번만 설정

@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import argparse
 import random
 from collections.abc import Callable, Mapping
 from pathlib import Path
@@ -24,34 +23,6 @@ RGB_CHANNELS = (3, 2, 1)
 Batch = dict[str, Any]
 LossFn = Callable[[torch.Tensor, Batch], torch.Tensor]
 MetricFn = Callable[[torch.Tensor, Batch], torch.Tensor]
-
-
-def parse_args() -> argparse.Namespace:
-    # Trainer가 이미 학습 루프, 데이터 준비, 체크포인트 저장을 담당하므로
-    # 여기서는 실험에 꼭 필요한 인자만 노출한다.
-    parser = argparse.ArgumentParser(description="SEN12MS-CR 학습 엔트리 포인트")
-    parser.add_argument("--batch-size", type=int, default=8, help="train/val/test 전체에 공통으로 쓸 배치 크기")
-    parser.add_argument("--seed", type=int, default=42, help="모델 초기화와 Trainer의 데이터 샘플링에 공통으로 쓸 시드")
-    parser.add_argument("--max-epochs", type=int, default=10, help="Trainer.step()을 몇 epoch까지 반복할지")
-    parser.add_argument("--train-max-samples", type=int, default=16384, help="train split에서 사용할 최대 샘플 수")
-    parser.add_argument("--val-max-samples", type=int, default=2048, help="validation split에서 사용할 최대 샘플 수")
-    parser.add_argument("--test-max-samples", type=int, default=2048, help="test split에서 사용할 최대 샘플 수")
-    parser.add_argument(
-        "--output-dir",
-        type=Path,
-        default=Path("artifacts"),
-        help="체크포인트, 학습 곡선, 예시 이미지를 저장할 루트 디렉터리",
-    )
-    parser.add_argument("--resume", type=Path, default=None, help="이어서 학습할 checkpoint 경로")
-    parser.add_argument("--run-test", action="store_true", help="학습 뒤 test split 평가를 추가로 실행할지")
-    parser.add_argument("--num-examples", type=int, default=4, help="저장할 복원 예시 이미지 수")
-    parser.add_argument(
-        "--example-stage",
-        choices=("val", "test"),
-        default="val",
-        help="복원 예시를 뽑아올 split",
-    )
-    return parser.parse_args()
 
 
 def seed_everything(seed: int) -> None:
@@ -189,7 +160,7 @@ def save_history_plot(history: list[dict[str, int | float]], path: Path) -> None
         else:
             ax.set_ylabel("value")
 
-    axes[0].set_title("training history")
+    axes[0].set_title("training and evaluation history")
     axes[-1].set_xlabel("epoch")
     fig.tight_layout()
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -374,16 +345,31 @@ def save_restoration_examples(
     return saved_paths
 
 
-def main() -> None:
+def main(
+    *,
+    batch_size: int = 8,
+    seed: int = 42,
+    max_epochs: int = 10,
+    train_max_samples: int = 16384,
+    val_max_samples: int = 2048,
+    test_max_samples: int = 2048,
+    output_dir: str | Path = Path("artifacts"),
+    resume: str | Path | None = None,
+    run_test: bool = False,
+    num_examples: int = 4,
+    example_stage: str = "val",
+) -> None:
     # main은 "모델/옵티마이저 조립 -> Trainer 실행 -> 결과물 저장"만 담당한다.
     # Trainer가 이미 해 주는 일은 최대한 그대로 맡기고, 여기서는 프로젝트 전용 후처리만 남긴다.
     # 그래서 Trainer 생성도 별도 래퍼 함수로 감싸지 않고 이 자리에서 바로 보이게 둔다.
-    args = parse_args()
-    seed_everything(args.seed)
+    output_dir = Path(output_dir)
+    resume = Path(resume) if resume is not None else None
+
+    seed_everything(seed)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print_hf_auth_status()
 
-    args.output_dir.mkdir(parents=True, exist_ok=True)
+    output_dir.mkdir(parents=True, exist_ok=True)
 
     model = build_model().to(device)
     optimizer = build_optimizer(model)
@@ -393,45 +379,53 @@ def main() -> None:
         optimizer=optimizer,
         loss=build_loss(),
         metrics=build_metrics(),
-        max_train_samples=args.train_max_samples,
-        max_val_samples=args.val_max_samples,
-        max_test_samples=args.test_max_samples,
-        output_dir=args.output_dir,
-        batch_size=args.batch_size,
-        epochs=args.max_epochs,
-        seed=args.seed,
+        max_train_samples=train_max_samples,
+        max_val_samples=val_max_samples,
+        max_test_samples=test_max_samples,
+        output_dir=output_dir,
+        batch_size=batch_size,
+        epochs=max_epochs,
+        seed=seed,
     )
 
-    if args.resume is not None:
-        load_checkpoint(trainer, args.resume, device=device)
+    if resume is not None:
+        load_checkpoint(trainer, resume, device=device)
 
     history: list[dict[str, int | float]] = []
+    preview_split = "validation" if example_stage == "val" else "test"
+    preview_max_samples = val_max_samples if example_stage == "val" else test_max_samples
     while trainer.current_epoch < trainer.epochs:
         record = trainer.step()
         history.append(flatten_record(record, global_step=trainer.global_step))
+        preview_loader = build_loader(
+            trainer,
+            split=preview_split,
+            max_samples=preview_max_samples,
+            training=False,
+            epoch_index=max(trainer.current_epoch - 1, 0),
+        )
+        save_restoration_examples(
+            model=trainer.model,
+            dataloader=preview_loader,
+            device=device,
+            output_dir=output_dir / "examples" / f"epoch_{trainer.current_epoch:03d}",
+            num_examples=num_examples,
+            stage=example_stage,
+        )
 
-    save_history_plot(history, args.output_dir / "history.png")
+    if run_test:
+        test_record = trainer.test()
+        history.append(
+            flatten_record(
+                {
+                    "epoch": trainer.current_epoch,
+                    "test": test_record,
+                },
+                global_step=trainer.global_step,
+            )
+        )
 
-    if args.run_test:
-        trainer.test()
-
-    preview_split = "validation" if args.example_stage == "val" else "test"
-    preview_max_samples = args.val_max_samples if args.example_stage == "val" else args.test_max_samples
-    preview_loader = build_loader(
-        trainer,
-        split=preview_split,
-        max_samples=preview_max_samples,
-        training=False,
-        epoch_index=max(trainer.current_epoch - 1, 0),
-    )
-    save_restoration_examples(
-        model=trainer.model,
-        dataloader=preview_loader,
-        device=device,
-        output_dir=args.output_dir / "examples",
-        num_examples=args.num_examples,
-        stage=args.example_stage,
-    )
+    save_history_plot(history, output_dir / "history.png")
 
 
 if __name__ == "__main__":

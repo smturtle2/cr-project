@@ -1,6 +1,10 @@
 from __future__ import annotations
 
+from collections.abc import Iterator
+from contextlib import contextmanager
 import main as shared_main
+from pathlib import Path
+
 import torch
 from torch import nn
 
@@ -16,7 +20,7 @@ _DEFAULT_BUILD_METRICS = shared_main.build_metrics
 # 보통은 아래처럼 복사해서 `tmp_main.py`를 만든 뒤 그 파일을 수정해서 사용한다.
 #
 #   cp tmp_main_base.py tmp_main.py
-#   uv run python tmp_main.py --help
+#   uv run python tmp_main.py
 #
 # `tmp_main.py`는 gitignore에 들어 있으므로 공용 `main.py`를 건드리지 않고
 # 각자 실험용 모델/옵티마이저/loss/metric을 자유롭게 연결할 수 있다.
@@ -47,28 +51,45 @@ def build_metrics() -> dict[str, shared_main.MetricFn]:
     return _DEFAULT_BUILD_METRICS()
 
 
-def main() -> None:
+@contextmanager
+def use_local_builds() -> Iterator[None]:
     # 공용 러너는 `main.py`에 두고,
     # 이 템플릿은 교체 가능한 build 함수만 잠시 덮어쓴 뒤 실행을 위임한다.
     # 실행이 끝난 뒤 원래 함수를 복구해 두면 같은 프로세스에서 `main`을 다시 import해서 쓸 때
     # 개인용 build 함수가 전역 상태처럼 남아 버리는 문제를 막을 수 있다.
-    original_build_model = shared_main.build_model
-    original_build_optimizer = shared_main.build_optimizer
-    original_build_loss = shared_main.build_loss
-    original_build_metrics = shared_main.build_metrics
+    overrides = {
+        "build_model": build_model,
+        "build_optimizer": build_optimizer,
+        "build_loss": build_loss,
+        "build_metrics": build_metrics,
+    }
+    originals = {name: getattr(shared_main, name) for name in overrides}
 
-    shared_main.build_model = build_model
-    shared_main.build_optimizer = build_optimizer
-    shared_main.build_loss = build_loss
-    shared_main.build_metrics = build_metrics
+    for name, override in overrides.items():
+        setattr(shared_main, name, override)
 
     try:
-        shared_main.main()
+        yield
     finally:
-        shared_main.build_model = original_build_model
-        shared_main.build_optimizer = original_build_optimizer
-        shared_main.build_loss = original_build_loss
-        shared_main.build_metrics = original_build_metrics
+        for name, original in originals.items():
+            setattr(shared_main, name, original)
+
+
+def main() -> None:
+    with use_local_builds():
+        shared_main.main(
+            batch_size=8,
+            seed=42,
+            max_epochs=10,
+            train_max_samples=16384,
+            val_max_samples=2048,
+            test_max_samples=2048,
+            output_dir=Path("artifacts"),
+            resume=None,
+            run_test=False,
+            num_examples=4,
+            example_stage="val",
+        )
 
 
 if __name__ == "__main__":
