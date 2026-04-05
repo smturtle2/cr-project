@@ -625,6 +625,9 @@ def main(
         batch_size=batch_size,
         epochs=max_epochs,
         seed=seed,
+        train_crop_size=128,
+        train_random_flip=True,
+        train_random_rot90=True,
     )
     best_selector = build_best_epoch_selector()
     best_state = load_best_state(output_dir, selector=best_selector) if resume is not None else None
