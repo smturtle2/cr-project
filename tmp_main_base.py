@@ -86,16 +86,15 @@ def use_local_builds() -> Iterator[None]:
 def main() -> None:
     with use_local_builds():
         shared_main.main(
-            batch_size=8,
+            batch_size=4,
             seed=42,
             max_epochs=10,
-            train_max_samples=16384,
-            val_max_samples=2048,
-            test_max_samples=2048,
+            train_max_samples=2048,
+            val_max_samples=256,
+            test_max_samples=256,
             output_dir=Path("artifacts"),
-            resume=None,
-            run_test=False,
-            num_examples=4,
+            run_test=True,
+            num_examples=5,
             example_mode="best",
         )
 
