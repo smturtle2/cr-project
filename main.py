@@ -1,9 +1,13 @@
 from __future__ import annotations
 
+import json
+import math
 import random
+import shutil
 from collections.abc import Callable, Mapping
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import numpy as np
 import torch
@@ -23,6 +27,28 @@ RGB_CHANNELS = (3, 2, 1)
 Batch = dict[str, Any]
 LossFn = Callable[[torch.Tensor, Batch], torch.Tensor]
 MetricFn = Callable[[torch.Tensor, Batch], torch.Tensor]
+StepRecord = Mapping[str, Any]
+
+
+@dataclass(slots=True, frozen=True)
+class BestEpochSelector:
+    name: str
+    mode: Literal["min", "max"]
+    score_fn: Callable[[StepRecord], float]
+
+    def __post_init__(self) -> None:
+        if not self.name.strip():
+            raise ValueError("BestEpochSelector.name must not be empty")
+        if self.mode not in {"min", "max"}:
+            raise ValueError("BestEpochSelector.mode must be either 'min' or 'max'")
+        if not callable(self.score_fn):
+            raise TypeError("BestEpochSelector.score_fn must be callable")
+
+
+@dataclass(slots=True)
+class BestState:
+    epoch: int
+    score: float
 
 
 def seed_everything(seed: int) -> None:
@@ -74,6 +100,15 @@ def build_metrics() -> dict[str, MetricFn]:
     return {"mae": mae}
 
 
+def build_best_epoch_selector() -> BestEpochSelector:
+    # 기본 best 기준은 validation loss 최소값이다.
+    return BestEpochSelector(
+        name="val_loss",
+        mode="min",
+        score_fn=lambda record: float(record["val"]["loss"]),
+    )
+
+
 def load_checkpoint(trainer: Trainer, checkpoint_path: Path, *, device: torch.device) -> None:
     # 최신 cr-train은 공개 resume API를 제공하지 않으므로
     # 저장 포맷(`model`, `optimizer`, `epoch`, `global_step`)에 맞춰 직접 복원한다.
@@ -122,6 +157,104 @@ def flatten_record(record: Mapping[str, Any], *, global_step: int) -> dict[str, 
             row[f"{stage}_{name}"] = float(value)
 
     return row
+
+
+def append_history(
+    history: list[dict[str, int | float]],
+    record: Mapping[str, Any],
+    *,
+    global_step: int,
+) -> None:
+    history.append(flatten_record(record, global_step=global_step))
+
+
+def score_epoch(record: StepRecord, *, selector: BestEpochSelector) -> float:
+    score = float(selector.score_fn(record))
+    if not math.isfinite(score):
+        raise ValueError(f"best epoch selector '{selector.name}' returned a non-finite score")
+    return score
+
+
+def is_better_score(
+    score: float,
+    best_score: float | None,
+    *,
+    mode: Literal["min", "max"],
+) -> bool:
+    if best_score is None:
+        return True
+    if mode == "min":
+        return score < best_score
+    if mode == "max":
+        return score > best_score
+    raise ValueError(f"unsupported best score mode: {mode}")
+
+
+def best_metadata_path(output_dir: Path) -> Path:
+    return output_dir / "best.json"
+
+
+def best_checkpoint_path(output_dir: Path) -> Path:
+    return output_dir / "best.pt"
+
+
+def load_best_state(output_dir: Path, *, selector: BestEpochSelector) -> BestState | None:
+    metadata_path = best_metadata_path(output_dir)
+    if not metadata_path.exists():
+        return None
+
+    payload = json.loads(metadata_path.read_text(encoding="utf-8"))
+    selector_name = str(payload["selector_name"])
+    selector_mode = str(payload["selector_mode"])
+    if selector_name != selector.name or selector_mode != selector.mode:
+        print(
+            "ignored existing best metadata:",
+            f"path={metadata_path}",
+            f"selector={selector_name}/{selector_mode}",
+            f"expected={selector.name}/{selector.mode}",
+        )
+        return None
+
+    checkpoint_path = Path(str(payload["source_checkpoint_path"]))
+    return BestState(
+        epoch=int(payload["epoch"]),
+        score=float(payload["score"]),
+    )
+
+
+def save_best_state(
+    output_dir: Path,
+    *,
+    epoch: int,
+    score: float,
+    selector: BestEpochSelector,
+    source_checkpoint_path: Path,
+) -> BestState:
+    output_dir.mkdir(parents=True, exist_ok=True)
+    best_path = best_checkpoint_path(output_dir)
+    shutil.copy2(source_checkpoint_path, best_path)
+
+    payload = {
+        "epoch": int(epoch),
+        "score": float(score),
+        "selector_name": selector.name,
+        "selector_mode": selector.mode,
+        "source_checkpoint_path": str(source_checkpoint_path),
+    }
+    best_metadata_path(output_dir).write_text(
+        json.dumps(payload, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    print(
+        "updated best checkpoint:",
+        f"epoch={epoch}",
+        f"{selector.name}={score:.6f}",
+        f"path={best_path}",
+    )
+    return BestState(
+        epoch=int(epoch),
+        score=float(score),
+    )
 
 
 def save_history_plot(history: list[dict[str, int | float]], path: Path) -> None:
@@ -347,6 +480,98 @@ def save_restoration_examples(
     return saved_paths
 
 
+def save_examples_for_epoch(
+    trainer: Trainer,
+    *,
+    device: torch.device,
+    split: str,
+    max_samples: int | None,
+    stage: str,
+    epoch: int,
+    output_dir: Path,
+    num_examples: int,
+) -> list[Path]:
+    if num_examples <= 0:
+        return []
+
+    dataloader = build_loader(
+        trainer,
+        split=split,
+        max_samples=max_samples,
+        training=False,
+        epoch_index=max(epoch - 1, 0),
+    )
+    return save_restoration_examples(
+        model=trainer.model,
+        dataloader=dataloader,
+        device=device,
+        output_dir=output_dir,
+        num_examples=num_examples,
+        stage=stage,
+    )
+
+
+def maybe_update_best_state(
+    trainer: Trainer,
+    record: StepRecord,
+    *,
+    output_dir: Path,
+    device: torch.device,
+    best_state: BestState | None,
+    selector: BestEpochSelector,
+    example_mode: Literal["best", "after_test"],
+    val_max_samples: int | None,
+    num_examples: int,
+) -> BestState | None:
+    epoch = int(record["epoch"])
+    checkpoint_path = Path(str(record["checkpoint_path"]))
+    score = score_epoch(record, selector=selector)
+    if not is_better_score(
+        score,
+        None if best_state is None else best_state.score,
+        mode=selector.mode,
+    ):
+        return best_state
+
+    updated_best_state = save_best_state(
+        output_dir,
+        epoch=epoch,
+        score=score,
+        selector=selector,
+        source_checkpoint_path=checkpoint_path,
+    )
+    if example_mode == "best":
+        save_examples_for_epoch(
+            trainer,
+            device=device,
+            split="validation",
+            max_samples=val_max_samples,
+            stage="val",
+            epoch=epoch,
+            output_dir=output_dir / "examples" / "best" / f"epoch_{epoch:03d}",
+            num_examples=num_examples,
+        )
+    return updated_best_state
+
+
+def run_test_and_record(
+    trainer: Trainer,
+    history: list[dict[str, int | float]],
+    *,
+    global_step: int,
+) -> dict[str, Any]:
+    test_record = trainer.test()
+    append_history(
+        history,
+        {
+            "epoch": trainer.current_epoch,
+            "test": test_record,
+        },
+        global_step=global_step,
+    )
+    return test_record
+
+
 def main(
     *,
     batch_size: int = 8,
@@ -359,13 +584,15 @@ def main(
     resume: str | Path | None = None,
     run_test: bool = False,
     num_examples: int = 4,
-    example_stage: str = "val",
+    example_mode: Literal["best", "after_test"] = "best",
 ) -> None:
     # main은 "모델/옵티마이저 조립 -> Trainer 실행 -> 결과물 저장"만 담당한다.
     # Trainer가 이미 해 주는 일은 최대한 그대로 맡기고, 여기서는 프로젝트 전용 후처리만 남긴다.
     # 그래서 Trainer 생성도 별도 래퍼 함수로 감싸지 않고 이 자리에서 바로 보이게 둔다.
     output_dir = Path(output_dir)
     resume = Path(resume) if resume is not None else None
+    if example_mode not in {"best", "after_test"}:
+        raise ValueError("example_mode must be either 'best' or 'after_test'")
 
     seed_everything(seed)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -389,43 +616,42 @@ def main(
         epochs=max_epochs,
         seed=seed,
     )
+    best_selector = build_best_epoch_selector()
+    best_state = load_best_state(output_dir, selector=best_selector) if resume is not None else None
 
     if resume is not None:
         load_checkpoint(trainer, resume, device=device)
 
     history: list[dict[str, int | float]] = []
-    preview_split = "validation" if example_stage == "val" else "test"
-    preview_max_samples = val_max_samples if example_stage == "val" else test_max_samples
     while trainer.current_epoch < trainer.epochs:
         record = trainer.step()
-        history.append(flatten_record(record, global_step=trainer.global_step))
-        preview_loader = build_loader(
+        append_history(history, record, global_step=trainer.global_step)
+        best_state = maybe_update_best_state(
             trainer,
-            split=preview_split,
-            max_samples=preview_max_samples,
-            training=False,
-            epoch_index=max(trainer.current_epoch - 1, 0),
-        )
-        save_restoration_examples(
-            model=trainer.model,
-            dataloader=preview_loader,
+            record,
+            output_dir=output_dir,
             device=device,
-            output_dir=output_dir / "examples" / f"epoch_{trainer.current_epoch:03d}",
+            best_state=best_state,
+            selector=best_selector,
+            example_mode=example_mode,
+            val_max_samples=val_max_samples,
             num_examples=num_examples,
-            stage=example_stage,
         )
 
-    if run_test:
-        test_record = trainer.test()
-        history.append(
-            flatten_record(
-                {
-                    "epoch": trainer.current_epoch,
-                    "test": test_record,
-                },
-                global_step=trainer.global_step,
-            )
+    if example_mode == "after_test":
+        run_test_and_record(trainer, history, global_step=trainer.global_step)
+        save_examples_for_epoch(
+            trainer,
+            device=device,
+            split="test",
+            max_samples=test_max_samples,
+            stage="test",
+            epoch=max(trainer.current_epoch, 1),
+            output_dir=output_dir / "examples" / "test",
+            num_examples=num_examples,
         )
+    elif run_test:
+        run_test_and_record(trainer, history, global_step=trainer.global_step)
 
     save_history_plot(history, output_dir / "history.png")
 

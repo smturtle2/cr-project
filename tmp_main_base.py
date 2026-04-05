@@ -14,6 +14,7 @@ from torch import nn
 # 기본 구현을 재귀 없이 다시 호출할 수 있다.
 _DEFAULT_BUILD_LOSS = shared_main.build_loss
 _DEFAULT_BUILD_METRICS = shared_main.build_metrics
+_DEFAULT_BUILD_BEST_EPOCH_SELECTOR = shared_main.build_best_epoch_selector
 
 
 # 이 파일은 그대로 실행하는 용도가 아니라 개인 작업용 템플릿이다.
@@ -51,6 +52,12 @@ def build_metrics() -> dict[str, shared_main.MetricFn]:
     return _DEFAULT_BUILD_METRICS()
 
 
+def build_best_epoch_selector() -> shared_main.BestEpochSelector:
+    # best epoch 기준도 기본 `main.py` 구현을 그대로 쓰거나,
+    # 필요하면 `tmp_main.py`에서 이 함수를 덮어써서 loss 외 기준으로 바꿀 수 있다.
+    return _DEFAULT_BUILD_BEST_EPOCH_SELECTOR()
+
+
 @contextmanager
 def use_local_builds() -> Iterator[None]:
     # 공용 러너는 `main.py`에 두고,
@@ -62,6 +69,7 @@ def use_local_builds() -> Iterator[None]:
         "build_optimizer": build_optimizer,
         "build_loss": build_loss,
         "build_metrics": build_metrics,
+        "build_best_epoch_selector": build_best_epoch_selector,
     }
     originals = {name: getattr(shared_main, name) for name in overrides}
 
@@ -88,7 +96,7 @@ def main() -> None:
             resume=None,
             run_test=False,
             num_examples=4,
-            example_stage="val",
+            example_mode="best",
         )
 
 
