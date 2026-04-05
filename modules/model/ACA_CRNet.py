@@ -132,11 +132,13 @@ class ACA_CRNet(nn.Module):
                  cafm_feat_dim: int = 32,     # [수정] 밀도 추정 차원
                  use_cross_modal: bool = False,            # [XMODAL] 모듈① on/off
                  cross_modal_heads: int = 4,               # [XMODAL] attention head 수
-                 cross_modal_ffn_expansion: float = 2.0):  # [XMODAL] GDFN 확장
+                 cross_modal_ffn_expansion: float = 2.0,   # [XMODAL] GDFN 확장
+                 use_checkpoint: bool = False):            # [CKPT] gradient checkpointing
         super(ACA_CRNet, self).__init__()
 
         self.use_cafm = use_cafm
         self.use_cross_modal = use_cross_modal  # [XMODAL]
+        self.use_checkpoint = use_checkpoint    # [CKPT]
         self.opt_channels = opt_channels
         in_channels = sar_channels + opt_channels  # [수정] 15ch 입력
 
@@ -251,8 +253,17 @@ class ACA_CRNet(nn.Module):
         # ── Head ──
         feat = self.head(x)
 
+        # [CKPT] body1/2/3에 gradient checkpointing 적용 — backward 메모리 절감
+        # 학습 시에만 checkpoint 사용 (eval 시 오버헤드 없음)
+        from torch.utils.checkpoint import checkpoint_sequential
+
+        def _body(seq: nn.Sequential, x: torch.Tensor) -> torch.Tensor:
+            if self.use_checkpoint and self.training and x.requires_grad:
+                return checkpoint_sequential(seq, segments=len(seq), input=x, use_reentrant=False)
+            return seq(x)
+
         # ── Body 구간 1 → ResBlock_att (layer 8) ──
-        feat = self.body1(feat)
+        feat = _body(self.body1, feat)
 
         # [수정] 모듈①: SAR feature 추출 + cross-modal attention 주입
         # Q=feat(Optical), K/V=f_sar(SAR), Residual=Q → optical 공간 유지
@@ -268,13 +279,13 @@ class ACA_CRNet(nn.Module):
             feat = self.cafm1(feat, self.last_density)
 
         # ── Body 구간 2 → ResBlock_att (layer 12) ──
-        feat = self.body2(feat)
+        feat = _body(self.body2, feat)
         # [수정] CAFM #2: 후반 feature 변조 (같은 밀도맵, 다른 γ/β)
         if self.use_cafm:
             feat = self.cafm2(feat, self.last_density)
 
         # ── Body 구간 3 ──
-        feat = self.body3(feat)
+        feat = _body(self.body3, feat)
 
         # ── Tail ──
         out = self.tail(feat)
