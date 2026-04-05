@@ -32,6 +32,8 @@ class FakeTrainer:
     step_records: list[dict[str, object]] = []
     test_record: dict[str, object] = {"loss": 0.25, "metrics": {"mae": 0.1}}
     instances: list["FakeTrainer"] = []
+    saved_checkpoint_paths: list[Path] = []
+    loaded_checkpoint_paths: list[Path] = []
 
     def __init__(
         self,
@@ -44,9 +46,15 @@ class FakeTrainer:
         max_val_samples,
         max_test_samples,
         output_dir,
+        cache_dir,
         batch_size,
         epochs,
         seed,
+        num_workers,
+        multiprocessing_context,
+        train_crop_size,
+        train_random_flip,
+        train_random_rot90,
     ) -> None:
         del loss, metrics, max_train_samples, max_val_samples, max_test_samples
         self.model = model
@@ -55,8 +63,12 @@ class FakeTrainer:
         self.batch_size = batch_size
         self.epochs = epochs
         self.seed = seed
-        self.num_workers = 0
-        self.cache_root = self.output_dir / "cache"
+        self.multiprocessing_context = multiprocessing_context
+        self.train_crop_size = train_crop_size
+        self.train_random_flip = train_random_flip
+        self.train_random_rot90 = train_random_rot90
+        self.num_workers = 0 if num_workers == "auto" else int(num_workers)
+        self.cache_root = Path(cache_dir) if cache_dir is not None else self.output_dir / "cache"
         self.include_metadata = True
         self.pin_memory = False
         self.persistent_workers = False
@@ -70,10 +82,6 @@ class FakeTrainer:
     def step(self) -> dict[str, object]:
         record = copy.deepcopy(type(self).step_records[self.current_epoch])
         epoch = int(record["epoch"])
-        checkpoint_path = self.output_dir / f"epoch-{epoch:04d}.pt"
-        checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
-        checkpoint_path.write_text(f"checkpoint:{epoch}\n", encoding="utf-8")
-        record["checkpoint_path"] = str(checkpoint_path)
         self.current_epoch = epoch
         self.global_step = epoch * 10
         return record
@@ -82,10 +90,32 @@ class FakeTrainer:
         self.test_calls += 1
         return copy.deepcopy(type(self).test_record)
 
+    def save_checkpoint(self, path: str | Path | None = None) -> Path:
+        checkpoint_path = Path(path) if path is not None else self.output_dir / f"epoch-{self.current_epoch:04d}.pt"
+        checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
+        checkpoint_path.write_text(f"checkpoint:{self.current_epoch}\n", encoding="utf-8")
+        type(self).saved_checkpoint_paths.append(checkpoint_path)
+        return checkpoint_path
+
+    def load_checkpoint(self, path: str | Path) -> dict[str, object]:
+        checkpoint_path = Path(path)
+        payload = checkpoint_path.read_text(encoding="utf-8").strip()
+        epoch = int(payload.split(":", maxsplit=1)[1]) if payload.startswith("checkpoint:") else 0
+        self.current_epoch = epoch
+        self.global_step = epoch * 10
+        type(self).loaded_checkpoint_paths.append(checkpoint_path)
+        return {
+            "path": checkpoint_path,
+            "epoch": self.current_epoch,
+            "global_step": self.global_step,
+        }
+
 
 class MainTrainingFlowTest(unittest.TestCase):
     def setUp(self) -> None:
         FakeTrainer.instances = []
+        FakeTrainer.saved_checkpoint_paths = []
+        FakeTrainer.loaded_checkpoint_paths = []
 
     def test_default_best_selector_uses_validation_loss(self) -> None:
         selector = main.build_best_epoch_selector()
@@ -249,6 +279,52 @@ class MainTrainingFlowTest(unittest.TestCase):
 
             self.assertEqual(result["trainer"].test_calls, 1)
 
+    def test_save_every_n_epochs_saves_periodic_checkpoints(self) -> None:
+        records = [
+            make_epoch_record(epoch=1, train_loss=1.0, val_loss=0.5),
+            make_epoch_record(epoch=2, train_loss=0.9, val_loss=0.6),
+            make_epoch_record(epoch=3, train_loss=0.8, val_loss=0.7),
+        ]
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            output_dir = Path(tmp_dir)
+            self._run_main(
+                output_dir=output_dir,
+                step_records=records,
+                example_mode="best",
+                run_test=False,
+                num_examples=0,
+                save_every_n_epochs=2,
+            )
+
+            self.assertTrue((output_dir / "best.pt").exists())
+            self.assertTrue((output_dir / "epoch-0002.pt").exists())
+            self.assertFalse((output_dir / "epoch-0001.pt").exists())
+            self.assertFalse((output_dir / "epoch-0003.pt").exists())
+
+    def test_resume_uses_trainer_load_checkpoint(self) -> None:
+        records = [
+            make_epoch_record(epoch=1, train_loss=1.0, val_loss=0.6),
+            make_epoch_record(epoch=2, train_loss=0.9, val_loss=0.5),
+        ]
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            output_dir = Path(tmp_dir)
+            resume_path = output_dir / "resume.pt"
+            resume_path.write_text("checkpoint:1\n", encoding="utf-8")
+
+            result = self._run_main(
+                output_dir=output_dir,
+                step_records=records,
+                example_mode="best",
+                run_test=False,
+                num_examples=0,
+                resume=resume_path,
+            )
+
+            self.assertEqual(FakeTrainer.loaded_checkpoint_paths, [resume_path])
+            self.assertEqual(result["trainer"].current_epoch, 2)
+
     def _run_main(
         self,
         *,
@@ -258,10 +334,14 @@ class MainTrainingFlowTest(unittest.TestCase):
         num_examples: int,
         run_test: bool | None = False,
         selector: main.BestEpochSelector | None = None,
+        save_every_n_epochs: int = 0,
+        resume: Path | None = None,
     ) -> dict[str, object]:
         FakeTrainer.step_records = copy.deepcopy(step_records)
         FakeTrainer.instances = []
         FakeTrainer.test_record = {"loss": 0.25, "metrics": {"mae": 0.1}}
+        FakeTrainer.saved_checkpoint_paths = []
+        FakeTrainer.loaded_checkpoint_paths = []
 
         build_loader = mock.Mock(side_effect=lambda *args, **kwargs: {"loader": kwargs})
         save_examples = mock.Mock(return_value=[])
@@ -290,9 +370,12 @@ class MainTrainingFlowTest(unittest.TestCase):
                 "max_epochs": len(step_records),
                 "example_mode": example_mode,
                 "num_examples": num_examples,
+                "save_every_n_epochs": save_every_n_epochs,
             }
             if run_test is not None:
                 kwargs["run_test"] = run_test
+            if resume is not None:
+                kwargs["resume"] = resume
 
             main.main(
                 **kwargs,

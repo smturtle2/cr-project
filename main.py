@@ -3,7 +3,6 @@ from __future__ import annotations
 import json
 import math
 import random
-import shutil
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -69,6 +68,10 @@ def print_hf_auth_status() -> None:
     print(f"HF auth: {'configured' if get_token() else 'missing'}")
 
 
+def resolve_device() -> torch.device:
+    return torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+
 def build_model() -> nn.Module:
     # 사용자 프로젝트에서 실제 모델을 연결할 지점이다.
     # cr-train은 `forward(sar, cloudy)` 시그니처를 기대하므로 그 규약만 맞추면 된다.
@@ -109,27 +112,48 @@ def build_best_epoch_selector() -> BestEpochSelector:
     )
 
 
-def load_checkpoint(trainer: Trainer, checkpoint_path: Path, *, device: torch.device) -> None:
-    # 최신 cr-train은 공개 resume API를 제공하지 않으므로
-    # 저장 포맷(`model`, `optimizer`, `epoch`, `global_step`)에 맞춰 직접 복원한다.
-    # PyTorch 버전에 따라 `weights_only` 인자 지원 여부가 달라서 여기서만 분기 처리한다.
-    try:
-        checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
-    except TypeError:
-        checkpoint = torch.load(checkpoint_path, map_location=device)
+def build_trainer(
+    *,
+    batch_size: int = 8,
+    seed: int = 42,
+    max_epochs: int = 10,
+    train_max_samples: int = 16384,
+    val_max_samples: int = 2048,
+    test_max_samples: int = 2048,
+    output_dir: str | Path = Path("artifacts"),
+    cache_dir: str | Path | None = None,
+    num_workers: int | str = "auto",
+    multiprocessing_context: str | None = None,
+    train_crop_size: int | None = 128,
+    train_random_flip: bool = True,
+    train_random_rot90: bool = True,
+) -> Trainer:
+    # main.py와 그 소비자들이 같은 Trainer 구성을 공유하도록 공용 생성 helper로 둔다.
+    output_dir = Path(output_dir)
+    seed_everything(seed)
+    print_hf_auth_status()
+    output_dir.mkdir(parents=True, exist_ok=True)
 
-    # 분산 학습에서 model이 DDP로 감싸졌더라도 실제 state_dict 대상은 내부 module이다.
-    model_owner = trainer.model.module if hasattr(trainer.model, "module") else trainer.model
-    model_owner.load_state_dict(checkpoint["model"])
-    trainer.optimizer.load_state_dict(checkpoint["optimizer"])
-    trainer.current_epoch = int(checkpoint["epoch"])
-    trainer.global_step = int(checkpoint["global_step"])
-
-    print(
-        "resumed checkpoint:",
-        f"path={checkpoint_path}",
-        f"epoch={trainer.current_epoch}",
-        f"global_step={trainer.global_step}",
+    model = build_model().to(resolve_device())
+    optimizer = build_optimizer(model)
+    return Trainer(
+        model=model,
+        optimizer=optimizer,
+        loss=build_loss(),
+        metrics=build_metrics(),
+        max_train_samples=train_max_samples,
+        max_val_samples=val_max_samples,
+        max_test_samples=test_max_samples,
+        output_dir=output_dir,
+        cache_dir=cache_dir,
+        batch_size=batch_size,
+        epochs=max_epochs,
+        seed=seed,
+        num_workers=num_workers,
+        multiprocessing_context=multiprocessing_context,
+        train_crop_size=train_crop_size,
+        train_random_flip=train_random_flip,
+        train_random_rot90=train_random_rot90,
     )
 
 
@@ -227,19 +251,16 @@ def save_best_state(
     epoch: int,
     score: float,
     selector: BestEpochSelector,
-    source_checkpoint_path: Path,
+    checkpoint_path: Path,
 ) -> BestState:
     output_dir.mkdir(parents=True, exist_ok=True)
-    best_path = best_checkpoint_path(output_dir)
-    shutil.copy2(source_checkpoint_path, best_path)
-
     payload = {
         "epoch": int(epoch),
         "score": float(score),
-        "checkpoint_path": str(best_path),
+        "checkpoint_path": str(checkpoint_path),
         "selector_name": selector.name,
         "selector_mode": selector.mode,
-        "source_checkpoint_path": str(source_checkpoint_path),
+        "source_checkpoint_path": str(checkpoint_path),
     }
     best_metadata_path(output_dir).write_text(
         json.dumps(payload, indent=2, sort_keys=True) + "\n",
@@ -249,20 +270,12 @@ def save_best_state(
         "updated best checkpoint:",
         f"epoch={epoch}",
         f"{selector.name}={score:.6f}",
-        f"path={best_path}",
+        f"path={checkpoint_path}",
     )
     return BestState(
         epoch=int(epoch),
         score=float(score),
     )
-
-
-def remove_checkpoint_file(checkpoint_path: Path) -> None:
-    if not checkpoint_path.exists():
-        return
-
-    checkpoint_path.unlink()
-    print(f"removed checkpoint: {checkpoint_path}")
 
 
 def save_history_plot(history: list[dict[str, int | float]], path: Path) -> None:
@@ -349,9 +362,14 @@ def build_loader(
         epoch=epoch_index,
         include_metadata=trainer.include_metadata,
         pin_memory=trainer.pin_memory,
+        multiprocessing_context=trainer.multiprocessing_context,
         persistent_workers=trainer.persistent_workers,
         prefetch_factor=trainer.prefetch_factor,
-        drop_last=trainer.drop_last if training else False,
+        drop_last=trainer.drop_last,
+        crop_size=trainer.train_crop_size if training else None,
+        crop_mode="random" if training and trainer.train_crop_size is not None else "none",
+        random_flip=trainer.train_random_flip if training else False,
+        random_rot90=trainer.train_random_rot90 if training else False,
     )
 
 
@@ -395,10 +413,9 @@ def normalize_map(image: torch.Tensor) -> np.ndarray:
 
 
 def save_restoration_examples(
-    model: nn.Module,
+    trainer: Trainer,
     dataloader,
     *,
-    device: torch.device,
     output_dir: Path,
     num_examples: int,
     stage: str,
@@ -411,8 +428,8 @@ def save_restoration_examples(
     import matplotlib.pyplot as plt
 
     output_dir.mkdir(parents=True, exist_ok=True)
-    was_training = model.training
-    model.eval()
+    was_training = trainer.model.training
+    trainer.model.eval()
 
     saved_paths: list[Path] = []
     iterator = iter(dataloader)
@@ -428,7 +445,10 @@ def save_restoration_examples(
                 cloudy = batch["cloudy"]
                 target = batch["target"]
                 metadata = batch.get("meta", {})
-                prediction = model(sar.to(device), cloudy.to(device)).cpu()
+                prediction = trainer.predict(batch)
+                if not isinstance(prediction, torch.Tensor):
+                    raise TypeError("trainer.predict(batch) must return a torch.Tensor")
+                prediction = prediction.detach().cpu()
 
                 for index in range(prediction.shape[0]):
                     cloudy_rgb, prediction_rgb, target_rgb = normalize_rgb_triplet(
@@ -482,7 +502,7 @@ def save_restoration_examples(
     finally:
         # iterator를 빨리 정리해 두면 worker가 떠 있는 상태로 오래 남지 않는다.
         del iterator
-        model.train(was_training)
+        trainer.model.train(was_training)
 
     print(f"saved examples: {output_dir}")
     return saved_paths
@@ -491,7 +511,6 @@ def save_restoration_examples(
 def save_examples_for_epoch(
     trainer: Trainer,
     *,
-    device: torch.device,
     split: str,
     max_samples: int | None,
     stage: str,
@@ -510,9 +529,8 @@ def save_examples_for_epoch(
         epoch_index=max(epoch - 1, 0),
     )
     return save_restoration_examples(
-        model=trainer.model,
+        trainer=trainer,
         dataloader=dataloader,
-        device=device,
         output_dir=output_dir,
         num_examples=num_examples,
         stage=stage,
@@ -524,7 +542,6 @@ def maybe_update_best_state(
     record: StepRecord,
     *,
     output_dir: Path,
-    device: torch.device,
     best_state: BestState | None,
     selector: BestEpochSelector,
     example_mode: Literal["best", "after_test"],
@@ -532,27 +549,25 @@ def maybe_update_best_state(
     num_examples: int,
 ) -> BestState | None:
     epoch = int(record["epoch"])
-    checkpoint_path = Path(str(record["checkpoint_path"]))
     score = score_epoch(record, selector=selector)
     if not is_better_score(
         score,
         None if best_state is None else best_state.score,
         mode=selector.mode,
     ):
-        remove_checkpoint_file(checkpoint_path)
         return best_state
 
+    checkpoint_path = trainer.save_checkpoint(best_checkpoint_path(output_dir))
     updated_best_state = save_best_state(
         output_dir,
         epoch=epoch,
         score=score,
         selector=selector,
-        source_checkpoint_path=checkpoint_path,
+        checkpoint_path=checkpoint_path,
     )
     if example_mode == "best":
         save_examples_for_epoch(
             trainer,
-            device=device,
             split="validation",
             max_samples=val_max_samples,
             stage="val",
@@ -560,8 +575,18 @@ def maybe_update_best_state(
             output_dir=output_dir / "examples" / "best" / f"epoch_{epoch:03d}",
             num_examples=num_examples,
         )
-    remove_checkpoint_file(checkpoint_path)
     return updated_best_state
+
+
+def maybe_save_epoch_checkpoint(trainer: Trainer, *, save_every_n_epochs: int) -> Path | None:
+    if save_every_n_epochs <= 0:
+        return None
+    if trainer.current_epoch <= 0 or trainer.current_epoch % save_every_n_epochs != 0:
+        return None
+
+    checkpoint_path = trainer.save_checkpoint()
+    print(f"saved checkpoint: {checkpoint_path}")
+    return checkpoint_path
 
 
 def run_test_and_record(
@@ -591,59 +616,58 @@ def main(
     val_max_samples: int = 2048,
     test_max_samples: int = 2048,
     output_dir: str | Path = Path("artifacts"),
+    cache_dir: str | Path | None = None,
     resume: str | Path | None = None,
+    num_workers: int | str = "auto",
+    multiprocessing_context: str | None = None,
+    train_crop_size: int | None = 128,
+    train_random_flip: bool = True,
+    train_random_rot90: bool = True,
+    save_every_n_epochs: int = 0,
     run_test: bool = True,
     num_examples: int = 4,
     example_mode: Literal["best", "after_test"] = "best",
 ) -> None:
     # main은 "모델/옵티마이저 조립 -> Trainer 실행 -> 결과물 저장"만 담당한다.
     # Trainer가 이미 해 주는 일은 최대한 그대로 맡기고, 여기서는 프로젝트 전용 후처리만 남긴다.
-    # 그래서 Trainer 생성도 별도 래퍼 함수로 감싸지 않고 이 자리에서 바로 보이게 둔다.
+    # Trainer 생성은 build_trainer()로 모으고, main은 실행 순서와 산출물 정책만 관리한다.
     output_dir = Path(output_dir)
     resume = Path(resume) if resume is not None else None
     if example_mode not in {"best", "after_test"}:
         raise ValueError("example_mode must be either 'best' or 'after_test'")
+    if save_every_n_epochs < 0:
+        raise ValueError("save_every_n_epochs must be greater than or equal to zero")
 
-    seed_everything(seed)
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print_hf_auth_status()
-
-    output_dir.mkdir(parents=True, exist_ok=True)
-
-    model = build_model().to(device)
-    optimizer = build_optimizer(model)
-    # 이 프로젝트가 Trainer에 어떤 값을 넘기는지 한눈에 보이도록 직접 생성한다.
-    trainer = Trainer(
-        model=model,
-        optimizer=optimizer,
-        loss=build_loss(),
-        metrics=build_metrics(),
-        max_train_samples=train_max_samples,
-        max_val_samples=val_max_samples,
-        max_test_samples=test_max_samples,
-        output_dir=output_dir,
+    trainer = build_trainer(
         batch_size=batch_size,
-        epochs=max_epochs,
         seed=seed,
-        train_crop_size=128,
-        train_random_flip=True,
-        train_random_rot90=True,
+        max_epochs=max_epochs,
+        train_max_samples=train_max_samples,
+        val_max_samples=val_max_samples,
+        test_max_samples=test_max_samples,
+        output_dir=output_dir,
+        cache_dir=cache_dir,
+        num_workers=num_workers,
+        multiprocessing_context=multiprocessing_context,
+        train_crop_size=train_crop_size,
+        train_random_flip=train_random_flip,
+        train_random_rot90=train_random_rot90,
     )
     best_selector = build_best_epoch_selector()
     best_state = load_best_state(output_dir, selector=best_selector) if resume is not None else None
 
     if resume is not None:
-        load_checkpoint(trainer, resume, device=device)
+        trainer.load_checkpoint(resume)
 
     history: list[dict[str, int | float]] = []
     while trainer.current_epoch < trainer.epochs:
         record = trainer.step()
         append_history(history, record, global_step=trainer.global_step)
+        maybe_save_epoch_checkpoint(trainer, save_every_n_epochs=save_every_n_epochs)
         best_state = maybe_update_best_state(
             trainer,
             record,
             output_dir=output_dir,
-            device=device,
             best_state=best_state,
             selector=best_selector,
             example_mode=example_mode,
@@ -655,7 +679,6 @@ def main(
         run_test_and_record(trainer, history, global_step=trainer.global_step)
         save_examples_for_epoch(
             trainer,
-            device=device,
             split="test",
             max_samples=test_max_samples,
             stage="test",
