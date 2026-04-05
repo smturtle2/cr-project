@@ -133,12 +133,14 @@ class ACA_CRNet(nn.Module):
                  use_cross_modal: bool = False,            # [XMODAL] 모듈① on/off
                  cross_modal_heads: int = 4,               # [XMODAL] attention head 수
                  cross_modal_ffn_expansion: float = 2.0,   # [XMODAL] GDFN 확장
-                 use_checkpoint: bool = False):            # [CKPT] gradient checkpointing
+                 use_checkpoint: bool = False,             # [CKPT] gradient checkpointing
+                 use_density_only: bool = False):          # [DENS] density estimator만 활성 (CAFM 변조는 끔)
         super(ACA_CRNet, self).__init__()
 
         self.use_cafm = use_cafm
         self.use_cross_modal = use_cross_modal  # [XMODAL]
         self.use_checkpoint = use_checkpoint    # [CKPT]
+        self.use_density_only = use_density_only  # [DENS]
         self.opt_channels = opt_channels
         in_channels = sar_channels + opt_channels  # [수정] 15ch 입력
 
@@ -178,13 +180,17 @@ class ACA_CRNet(nn.Module):
         self.tail = nn.Conv2d(feature_sizes, opt_channels, kernel_size=3, bias=True, stride=1, padding=1)
 
         # ── [수정] CAFM 모듈 ──
-        if use_cafm:
+        # [DENS] density estimator는 use_cafm 또는 use_density_only일 때 생성.
+        # use_density_only=True이면 CAFM feature modulator(cafm1/2)는 꺼둔 채
+        # density map만 공급 → CloudAdaptiveLoss의 adaptive weighting 전용.
+        if use_cafm or use_density_only:
             # Part A: SAR-Optical 코사인 유사도 기반 밀도 추정
             self.density_estimator = CloudDensityEstimator(
                 sar_channels=sar_channels,
                 optical_channels=opt_channels,
                 feat_dim=cafm_feat_dim,
             )
+        if use_cafm:
             # Part B: AdaIN-style feature 변조 (2개 — layer 8, 12 직후)
             self.cafm1 = CAFM(feature_sizes)  # body1(ResBlock_att #1) 직후
             self.cafm2 = CAFM(feature_sizes)  # body2(ResBlock_att #2) 직후
@@ -242,7 +248,8 @@ class ACA_CRNet(nn.Module):
         self.last_cloudy = cloudy
 
         # ── [수정] Part A: 밀도 추정 (Head Conv 전, 원본 입력에서) ──
-        if self.use_cafm:
+        # [DENS] use_density_only=True이면 density는 계산하되 CAFM 변조는 건너뜀
+        if self.use_cafm or self.use_density_only:
             self.last_density = self.density_estimator(sar, cloudy)
         else:
             self.last_density = None
