@@ -11,8 +11,8 @@ class LCRLoss(nn.Module):
         self,
         *,
         l1_weight: float = 1.0,
-        ssim_weight: float = 0.3,
-        sam_weight: float = 0.1,
+        ssim_weight: float = 0.5,
+        sam_weight: float = 0.01,
     ):
         super().__init__()
         self.l1_weight = l1_weight

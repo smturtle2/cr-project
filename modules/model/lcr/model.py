@@ -5,47 +5,6 @@ import torch.nn.functional as F
 from torch import nn
 
 
-def _pad_to_multiple(x: torch.Tensor, multiple: int) -> tuple[torch.Tensor, tuple[int, int]]:
-    height, width = x.shape[-2:]
-    pad_h = (multiple - height % multiple) % multiple
-    pad_w = (multiple - width % multiple) % multiple
-    if pad_h == 0 and pad_w == 0:
-        return x, (0, 0)
-    return F.pad(x, (0, pad_w, 0, pad_h)), (pad_h, pad_w)
-
-
-def _window_partition(x: torch.Tensor, window_size: int) -> tuple[torch.Tensor, int, int]:
-    batch, channels, height, width = x.shape
-    h_windows = height // window_size
-    w_windows = width // window_size
-    windows = x.view(batch, channels, h_windows, window_size, w_windows, window_size)
-    windows = windows.permute(0, 2, 4, 3, 5, 1).reshape(
-        batch * h_windows * w_windows,
-        window_size * window_size,
-        channels,
-    )
-    return windows, h_windows, w_windows
-
-
-def _window_reverse(
-    windows: torch.Tensor,
-    *,
-    batch: int,
-    channels: int,
-    h_windows: int,
-    w_windows: int,
-    window_size: int,
-) -> torch.Tensor:
-    x = windows.view(batch, h_windows, w_windows, window_size, window_size, channels)
-    x = x.permute(0, 5, 1, 3, 2, 4).reshape(
-        batch,
-        channels,
-        h_windows * window_size,
-        w_windows * window_size,
-    )
-    return x
-
-
 def _reshape_heads(x: torch.Tensor, heads: int) -> torch.Tensor:
     batch, tokens, channels = x.shape
     head_dim = channels // heads
@@ -70,8 +29,6 @@ class DWConvFFN(nn.Module):
         self.net = nn.Sequential(
             nn.Conv2d(dim, hidden_dim, kernel_size=1),
             nn.GELU(),
-            nn.Conv2d(hidden_dim, hidden_dim, kernel_size=3, padding=1, groups=hidden_dim),
-            nn.GELU(),
             nn.Conv2d(hidden_dim, dim, kernel_size=1),
         )
 
@@ -79,55 +36,93 @@ class DWConvFFN(nn.Module):
         return self.net(x)
 
 
-class WindowCrossAttention(nn.Module):
-    def __init__(self, dim: int, heads: int, window_size: int):
+class ShuffleUp2x(nn.Module):
+    def __init__(self, channels: int):
         super().__init__()
+        self.scale_factor = 2
+        self.expand = nn.Conv2d(channels, channels * (self.scale_factor**2), kernel_size=1)
+        self.shuffle = nn.PixelShuffle(self.scale_factor)
+        self.act = nn.GELU()
+        self.fuse = nn.Conv2d(channels, channels, kernel_size=1)
+
+    def forward(
+        self,
+        x: torch.Tensor,
+        *,
+        target_size: tuple[int, int] | None = None,
+    ) -> torch.Tensor:
+        upsampled = self.shuffle(self.expand(x))
+        if target_size is not None:
+            target_h, target_w = target_size
+            out_h, out_w = upsampled.shape[-2:]
+            if target_h > out_h or target_w > out_w:
+                raise ValueError("target_size must not exceed the native 2x upsampled size")
+            upsampled = upsampled[..., :target_h, :target_w]
+        return self.fuse(self.act(upsampled))
+
+
+class NeighborhoodCrossAttention(nn.Module):
+    def __init__(self, dim: int, heads: int, neighborhood_size: int):
+        super().__init__()
+        if neighborhood_size <= 0 or neighborhood_size % 2 == 0:
+            raise ValueError("neighborhood_size must be a positive odd integer")
         self.dim = dim
         self.heads = heads
-        self.window_size = window_size
+        self.neighborhood_size = neighborhood_size
+        self.radius = neighborhood_size // 2
         self.scale = (dim // heads) ** -0.5
         self.q_proj = nn.Conv2d(dim, dim, kernel_size=1)
         self.k_proj = nn.Conv2d(dim, dim, kernel_size=1)
         self.v_proj = nn.Conv2d(dim, dim, kernel_size=1)
         self.out_proj = nn.Conv2d(dim, dim, kernel_size=1)
+        offsets = torch.arange(-self.radius, self.radius + 1, dtype=torch.long)
+        offset_grid = torch.stack(torch.meshgrid(offsets, offsets, indexing="ij"), dim=-1)
+        self.register_buffer("offsets", offset_grid.view(-1, 2), persistent=False)
 
     def forward(self, query: torch.Tensor, key: torch.Tensor, value: torch.Tensor) -> torch.Tensor:
         if query.shape[-2:] != key.shape[-2:] or key.shape[-2:] != value.shape[-2:]:
-            raise ValueError("local cross attention expects matching spatial sizes")
+            raise ValueError("neighborhood cross attention expects matching spatial sizes")
 
         q = self.q_proj(query)
         k = self.k_proj(key)
         v = self.v_proj(value)
 
-        padded_q, (pad_h, pad_w) = _pad_to_multiple(q, self.window_size)
-        padded_k, _ = _pad_to_multiple(k, self.window_size)
-        padded_v, _ = _pad_to_multiple(v, self.window_size)
+        batch, _, height, width = q.shape
+        head_dim = self.dim // self.heads
+        q_heads = q.view(batch, self.heads, head_dim, height, width).permute(0, 1, 3, 4, 2)
+        k_heads = k.view(batch, self.heads, head_dim, height, width).permute(0, 1, 3, 4, 2)
+        v_heads = v.view(batch, self.heads, head_dim, height, width).permute(0, 1, 3, 4, 2)
 
-        batch, channels, padded_h, padded_w = padded_q.shape
-        q_windows, h_windows, w_windows = _window_partition(padded_q, self.window_size)
-        k_windows, _, _ = _window_partition(padded_k, self.window_size)
-        v_windows, _, _ = _window_partition(padded_v, self.window_size)
+        y_coords = torch.arange(height, device=q.device, dtype=torch.long)
+        x_coords = torch.arange(width, device=q.device, dtype=torch.long)
+        base_y, base_x = torch.meshgrid(y_coords, x_coords, indexing="ij")
 
-        q_heads = _reshape_heads(q_windows, self.heads)
-        k_heads = _reshape_heads(k_windows, self.heads)
-        v_heads = _reshape_heads(v_windows, self.heads)
-
-        attn = (q_heads * self.scale) @ k_heads.transpose(-2, -1)
-        attn = attn.softmax(dim=-1)
-        out = attn @ v_heads
-        out = out.transpose(1, 2).reshape(q_windows.shape[0], q_windows.shape[1], channels)
-
-        merged = _window_reverse(
-            out,
-            batch=batch,
-            channels=channels,
-            h_windows=h_windows,
-            w_windows=w_windows,
-            window_size=self.window_size,
+        neighbor_y = base_y[..., None] + self.offsets[:, 0]
+        neighbor_x = base_x[..., None] + self.offsets[:, 1]
+        valid = (
+            (neighbor_y >= 0)
+            & (neighbor_y < height)
+            & (neighbor_x >= 0)
+            & (neighbor_x < width)
         )
-        if pad_h != 0 or pad_w != 0:
-            merged = merged[..., : padded_h - pad_h, : padded_w - pad_w]
-        return self.out_proj(merged)
+        neighbor_y = neighbor_y.clamp(0, height - 1)
+        neighbor_x = neighbor_x.clamp(0, width - 1)
+
+        batch_idx = torch.arange(batch, device=q.device)[:, None, None, None, None]
+        head_idx = torch.arange(self.heads, device=q.device)[None, :, None, None, None]
+        neighbor_y = neighbor_y[None, None, ...]
+        neighbor_x = neighbor_x[None, None, ...]
+        valid = valid[None, None, ...]
+
+        k_neighbors = k_heads[batch_idx, head_idx, neighbor_y, neighbor_x]
+        v_neighbors = v_heads[batch_idx, head_idx, neighbor_y, neighbor_x]
+
+        attn = (q_heads.unsqueeze(-2) * k_neighbors).sum(dim=-1) * self.scale
+        attn = attn.masked_fill(~valid, torch.finfo(attn.dtype).min)
+        attn = attn.softmax(dim=-1)
+        out = (attn.unsqueeze(-1) * v_neighbors).sum(dim=-2)
+        out = out.permute(0, 1, 4, 2, 3).reshape(batch, self.dim, height, width)
+        return self.out_proj(out)
 
 
 class GlobalCrossAttention(nn.Module):
@@ -162,11 +157,15 @@ class GlobalCrossAttention(nn.Module):
 
 
 class LocalBlock(nn.Module):
-    def __init__(self, dim: int, heads: int, window_size: int, ffn_expansion: int):
+    def __init__(self, dim: int, heads: int, neighborhood_size: int, ffn_expansion: int):
         super().__init__()
         self.z_attn_norm = RMSNorm2d(dim)
         self.h_attn_norm = RMSNorm2d(dim)
-        self.attn = WindowCrossAttention(dim=dim, heads=heads, window_size=window_size)
+        self.attn = NeighborhoodCrossAttention(
+            dim=dim,
+            heads=heads,
+            neighborhood_size=neighborhood_size,
+        )
         self.ffn_norm = RMSNorm2d(dim)
         self.ffn = DWConvFFN(dim=dim, expansion=ffn_expansion)
 
@@ -191,8 +190,8 @@ class GlobalBlock(nn.Module):
             z_coarse = z
             h_coarse = h
         else:
-            z_coarse = F.avg_pool2d(z, kernel_size=2, stride=2)
-            h_coarse = F.avg_pool2d(h, kernel_size=2, stride=2)
+            z_coarse = F.max_pool2d(z, kernel_size=2, stride=2)
+            h_coarse = F.max_pool2d(h, kernel_size=2, stride=2)
 
         h_coarse_norm = self.h_attn_norm(h_coarse)
         attn = self.attn(
@@ -210,7 +209,7 @@ class ResDWBlock(nn.Module):
     def __init__(self, dim: int, ffn_expansion: int):
         super().__init__()
         self.conv_norm = RMSNorm2d(dim)
-        self.conv = nn.Conv2d(dim, dim, kernel_size=3, padding=1)
+        self.conv = nn.Conv2d(dim, dim, kernel_size=1)
         self.ffn_norm = RMSNorm2d(dim)
         self.ffn = DWConvFFN(dim=dim, expansion=ffn_expansion)
         self.act = nn.GELU()
@@ -221,12 +220,27 @@ class ResDWBlock(nn.Module):
         return x
 
 
+class PointwiseResBlock(nn.Module):
+    def __init__(self, dim: int, expansion: int):
+        super().__init__()
+        hidden_dim = dim * expansion
+        self.norm = RMSNorm2d(dim)
+        self.net = nn.Sequential(
+            nn.Conv2d(dim, hidden_dim, kernel_size=1),
+            nn.GELU(),
+            nn.Conv2d(hidden_dim, dim, kernel_size=1),
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return x + self.net(self.norm(x))
+
+
 class ConvStem(nn.Module):
     def __init__(self, in_channels: int, dim: int):
         super().__init__()
-        self.proj = nn.Conv2d(in_channels, dim, kernel_size=3, padding=1)
-        self.down1 = nn.Conv2d(dim, dim, kernel_size=3, stride=2, padding=1)
-        self.down2 = nn.Conv2d(dim, dim, kernel_size=3, stride=2, padding=1)
+        self.proj = nn.Conv2d(in_channels, dim, kernel_size=1)
+        self.down1 = nn.Conv2d(dim, dim, kernel_size=2, stride=2)
+        self.down2 = nn.Conv2d(dim, dim, kernel_size=2, stride=2)
         self.act = nn.GELU()
 
     def forward(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
@@ -239,12 +253,14 @@ class ConvStem(nn.Module):
 class ReconstructionTrunk(nn.Module):
     def __init__(self, dim: int, ffn_expansion: int):
         super().__init__()
-        self.proj = nn.Conv2d(dim, dim, kernel_size=3, padding=1)
-        self.merge = nn.Conv2d(dim * 3, dim, kernel_size=3, padding=1)
+        self.proj = nn.Conv2d(dim, dim, kernel_size=1)
+        self.upsample_h2 = ShuffleUp2x(dim)
+        self.merge = nn.Conv2d(dim * 3, dim, kernel_size=1)
         self.block_h2 = ResDWBlock(dim=dim, ffn_expansion=ffn_expansion)
-        self.proj_full = nn.Conv2d(dim, dim, kernel_size=3, padding=1)
-        self.block_full = ResDWBlock(dim=dim, ffn_expansion=ffn_expansion)
-        self.out = nn.Conv2d(dim, dim, kernel_size=3, padding=1)
+        self.upsample_full = ShuffleUp2x(dim)
+        self.proj_full = nn.Conv2d(dim, dim, kernel_size=1)
+        self.block_full = PointwiseResBlock(dim=dim, expansion=ffn_expansion)
+        self.out = nn.Conv2d(dim, dim, kernel_size=1)
 
     def forward(
         self,
@@ -255,11 +271,11 @@ class ReconstructionTrunk(nn.Module):
         output_size: tuple[int, int],
     ) -> torch.Tensor:
         u0 = self.proj(z_f)
-        u1 = F.interpolate(u0, size=sar_skip_h2.shape[-2:], mode="bilinear", align_corners=False)
+        u1 = self.upsample_h2(u0, target_size=sar_skip_h2.shape[-2:])
         u1 = self.merge(torch.cat([u1, sar_skip_h2, hsi_skip_h2], dim=1))
         u1 = self.block_h2(u1)
 
-        u2 = F.interpolate(u1, size=output_size, mode="bilinear", align_corners=False)
+        u2 = self.upsample_full(u1, target_size=output_size)
         u2 = self.proj_full(u2)
         u2 = self.block_full(u2)
         return self.out(u2)
@@ -274,15 +290,15 @@ class LCR(nn.Module):
         dim: int = 64,
         num_blocks: int = 6,
         heads: int = 4,
-        window_size: int = 8,
+        neighborhood_size: int = 7,
         ffn_expansion: int = 2,
         mask_bias_init: float = -2.0,
     ):
         super().__init__()
         if dim % heads != 0:
             raise ValueError("dim must be divisible by heads")
-        if window_size <= 0:
-            raise ValueError("window_size must be greater than zero")
+        if neighborhood_size <= 0 or neighborhood_size % 2 == 0:
+            raise ValueError("neighborhood_size must be a positive odd integer")
         if num_blocks <= 0:
             raise ValueError("num_blocks must be greater than zero")
 
@@ -290,7 +306,7 @@ class LCR(nn.Module):
         self.opt_channels = opt_channels
         self.dim = dim
         self.num_blocks = num_blocks
-        self.window_size = window_size
+        self.neighborhood_size = neighborhood_size
 
         self.sar_stem = ConvStem(in_channels=sar_channels, dim=dim)
         self.hsi_stem = ConvStem(in_channels=opt_channels, dim=dim)
@@ -300,7 +316,7 @@ class LCR(nn.Module):
                 LocalBlock(
                     dim=dim,
                     heads=heads,
-                    window_size=window_size,
+                    neighborhood_size=neighborhood_size,
                     ffn_expansion=ffn_expansion,
                 )
                 for _ in range(num_blocks)
@@ -320,21 +336,21 @@ class LCR(nn.Module):
         self.reconstruction = ReconstructionTrunk(dim=dim, ffn_expansion=ffn_expansion)
 
         self.candidate_head = nn.Sequential(
-            nn.Conv2d(dim, dim, kernel_size=3, padding=1),
+            nn.Conv2d(dim, dim, kernel_size=1),
             nn.GELU(),
-            nn.Conv2d(dim, opt_channels, kernel_size=3, padding=1),
+            nn.Conv2d(dim, opt_channels, kernel_size=1),
         )
 
         mask_hidden = max(dim // 2, 1)
         self.mask_head_coarse = nn.Sequential(
-            nn.Conv2d(dim, mask_hidden, kernel_size=3, padding=1),
+            nn.Conv2d(dim, mask_hidden, kernel_size=1),
             nn.GELU(),
-            nn.Conv2d(mask_hidden, 1, kernel_size=3, padding=1),
+            nn.Conv2d(mask_hidden, 1, kernel_size=1),
         )
         self.mask_head_refine = nn.Sequential(
-            nn.Conv2d(dim + 2, mask_hidden, kernel_size=3, padding=1),
+            nn.Conv2d(dim + 2, mask_hidden, kernel_size=1),
             nn.GELU(),
-            nn.Conv2d(mask_hidden, 1, kernel_size=3, padding=1),
+            nn.Conv2d(mask_hidden, 1, kernel_size=1),
         )
 
         nn.init.constant_(self.mask_head_coarse[-1].bias, mask_bias_init)
