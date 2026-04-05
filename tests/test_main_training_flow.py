@@ -142,15 +142,20 @@ class MainTrainingFlowTest(unittest.TestCase):
                 output_dir=output_dir,
                 step_records=records,
                 example_mode="best",
+                run_test=False,
                 num_examples=2,
             )
 
             best_payload = json.loads((output_dir / "best.json").read_text(encoding="utf-8"))
             self.assertEqual(best_payload["epoch"], 2)
+            self.assertEqual(best_payload["checkpoint_path"], str(output_dir / "best.pt"))
             self.assertEqual(best_payload["selector_name"], "val_loss")
             self.assertEqual(best_payload["selector_mode"], "min")
             self.assertAlmostEqual(best_payload["score"], 0.4)
             self.assertEqual((output_dir / "best.pt").read_text(encoding="utf-8"), "checkpoint:2\n")
+            self.assertFalse((output_dir / "epoch-0001.pt").exists())
+            self.assertFalse((output_dir / "epoch-0002.pt").exists())
+            self.assertFalse((output_dir / "epoch-0003.pt").exists())
 
             self.assertEqual(result["trainer"].test_calls, 0)
             self.assertEqual(result["build_loader"].call_count, 2)
@@ -214,6 +219,7 @@ class MainTrainingFlowTest(unittest.TestCase):
                 output_dir=output_dir,
                 step_records=records,
                 example_mode="best",
+                run_test=False,
                 num_examples=0,
                 selector=selector,
             )
@@ -225,6 +231,24 @@ class MainTrainingFlowTest(unittest.TestCase):
             self.assertAlmostEqual(best_payload["score"], 0.8)
             self.assertEqual((output_dir / "best.pt").read_text(encoding="utf-8"), "checkpoint:2\n")
 
+    def test_best_mode_runs_test_by_default(self) -> None:
+        records = [
+            make_epoch_record(epoch=1, train_loss=1.0, val_loss=0.6),
+            make_epoch_record(epoch=2, train_loss=0.9, val_loss=0.5),
+        ]
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            output_dir = Path(tmp_dir)
+            result = self._run_main(
+                output_dir=output_dir,
+                step_records=records,
+                example_mode="best",
+                run_test=None,
+                num_examples=0,
+            )
+
+            self.assertEqual(result["trainer"].test_calls, 1)
+
     def _run_main(
         self,
         *,
@@ -232,7 +256,7 @@ class MainTrainingFlowTest(unittest.TestCase):
         step_records: list[dict[str, object]],
         example_mode: str,
         num_examples: int,
-        run_test: bool = False,
+        run_test: bool | None = False,
         selector: main.BestEpochSelector | None = None,
     ) -> dict[str, object]:
         FakeTrainer.step_records = copy.deepcopy(step_records)
@@ -261,12 +285,17 @@ class MainTrainingFlowTest(unittest.TestCase):
             mock.patch.object(main, "print_hf_auth_status"),
             mock.patch.object(main.torch.cuda, "is_available", return_value=False),
         ):
+            kwargs = {
+                "output_dir": output_dir,
+                "max_epochs": len(step_records),
+                "example_mode": example_mode,
+                "num_examples": num_examples,
+            }
+            if run_test is not None:
+                kwargs["run_test"] = run_test
+
             main.main(
-                output_dir=output_dir,
-                max_epochs=len(step_records),
-                example_mode=example_mode,
-                num_examples=num_examples,
-                run_test=run_test,
+                **kwargs,
             )
 
         return {

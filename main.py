@@ -215,7 +215,6 @@ def load_best_state(output_dir: Path, *, selector: BestEpochSelector) -> BestSta
         )
         return None
 
-    checkpoint_path = Path(str(payload["source_checkpoint_path"]))
     return BestState(
         epoch=int(payload["epoch"]),
         score=float(payload["score"]),
@@ -237,6 +236,7 @@ def save_best_state(
     payload = {
         "epoch": int(epoch),
         "score": float(score),
+        "checkpoint_path": str(best_path),
         "selector_name": selector.name,
         "selector_mode": selector.mode,
         "source_checkpoint_path": str(source_checkpoint_path),
@@ -255,6 +255,14 @@ def save_best_state(
         epoch=int(epoch),
         score=float(score),
     )
+
+
+def remove_checkpoint_file(checkpoint_path: Path) -> None:
+    if not checkpoint_path.exists():
+        return
+
+    checkpoint_path.unlink()
+    print(f"removed checkpoint: {checkpoint_path}")
 
 
 def save_history_plot(history: list[dict[str, int | float]], path: Path) -> None:
@@ -531,6 +539,7 @@ def maybe_update_best_state(
         None if best_state is None else best_state.score,
         mode=selector.mode,
     ):
+        remove_checkpoint_file(checkpoint_path)
         return best_state
 
     updated_best_state = save_best_state(
@@ -551,6 +560,7 @@ def maybe_update_best_state(
             output_dir=output_dir / "examples" / "best" / f"epoch_{epoch:03d}",
             num_examples=num_examples,
         )
+    remove_checkpoint_file(checkpoint_path)
     return updated_best_state
 
 
@@ -582,7 +592,7 @@ def main(
     test_max_samples: int = 2048,
     output_dir: str | Path = Path("artifacts"),
     resume: str | Path | None = None,
-    run_test: bool = False,
+    run_test: bool = True,
     num_examples: int = 4,
     example_mode: Literal["best", "after_test"] = "best",
 ) -> None:

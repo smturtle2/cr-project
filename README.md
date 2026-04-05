@@ -1,5 +1,12 @@
 # cr-project
 
+## Dependency Policy
+
+이 프로젝트는 서버 간 CUDA 호환성을 맞추기 위해 `torch 2.6.x`로 고정합니다.
+
+- 의존성 설치는 `uv sync`를 사용합니다
+- 버전 확인은 `uv run python -c "import torch; print(torch.__version__)"`로 확인합니다
+
 ## Protected Files
 
 `main.py` 와 `main.ipynb` 는 공용 학습 러너 파일이라서 `main` 브랜치에서만 커밋되도록 훅을 둡니다.
