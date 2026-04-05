@@ -40,11 +40,11 @@ def build_optimizer(model: nn.Module) -> torch.optim.Optimizer:
     raise NotImplementedError("tmp_main.py에서 build_optimizer()를 구현하세요.")
 
 
-def build_loss() -> shared_main.LossFn:
+def build_loss(model: nn.Module) -> shared_main.LossFn:
     # loss는 기본 `main.py` 구현을 그대로 쓰거나,
     # 필요하면 `tmp_main.py`에서 이 함수를 직접 덮어써서 바꿔도 된다.
-    # 부분 수정이 필요하면 `_DEFAULT_BUILD_LOSS()`를 호출해서 기본 구현을 재사용하면 된다.
-    return _DEFAULT_BUILD_LOSS()
+    # 부분 수정이 필요하면 `_DEFAULT_BUILD_LOSS(model)`를 호출해서 기본 구현을 재사용하면 된다.
+    return _DEFAULT_BUILD_LOSS(model)
 
 
 def build_metrics() -> dict[str, shared_main.MetricFn]:
@@ -74,6 +74,7 @@ def build_scheduler_monitor() -> str | None:
 
 @contextmanager
 def use_local_builds() -> Iterator[None]:
+
     # 공용 러너는 `main.py`에 두고,
     # 이 템플릿은 교체 가능한 build 함수만 잠시 덮어쓴 뒤 실행을 위임한다.
     # 실행이 끝난 뒤 원래 함수를 복구해 두면 같은 프로세스에서 `main`을 다시 import해서 쓸 때
