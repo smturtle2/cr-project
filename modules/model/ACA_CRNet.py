@@ -134,13 +134,15 @@ class ACA_CRNet(nn.Module):
                  cross_modal_heads: int = 4,               # [XMODAL] attention head 수
                  cross_modal_ffn_expansion: float = 2.0,   # [XMODAL] GDFN 확장
                  use_checkpoint: bool = False,             # [CKPT] gradient checkpointing
-                 use_density_only: bool = False):          # [DENS] density estimator만 활성 (CAFM 변조는 끔)
+                 use_density_only: bool = False,           # [DENS] density estimator만 활성 (CAFM 변조는 끔)
+                 cross_modal_num_blocks: int = 1):         # [XMODAL] cross-modal 삽입 개수 (1: body1 뒤, 2: body1+body2 뒤)
         super(ACA_CRNet, self).__init__()
 
         self.use_cafm = use_cafm
         self.use_cross_modal = use_cross_modal  # [XMODAL]
         self.use_checkpoint = use_checkpoint    # [CKPT]
         self.use_density_only = use_density_only  # [DENS]
+        self.cross_modal_num_blocks = cross_modal_num_blocks  # [XMODAL]
         self.opt_channels = opt_channels
         in_channels = sar_channels + opt_channels  # [수정] 15ch 입력
 
@@ -207,6 +209,12 @@ class ACA_CRNet(nn.Module):
                 num_heads=cross_modal_heads,
                 ffn_expansion=cross_modal_ffn_expansion,
             )
+            if cross_modal_num_blocks >= 2:
+                self.cross_modal2 = CrossModalBlock(
+                    dim=feature_sizes,
+                    num_heads=cross_modal_heads,
+                    ffn_expansion=cross_modal_ffn_expansion,
+                )
 
         # [수정] 커스텀 Loss/시각화에서 참조할 속성
         self.last_density = None   # 마지막 forward의 밀도맵
@@ -224,12 +232,15 @@ class ACA_CRNet(nn.Module):
                 zero_module(cafm_module.modulator.scale_net[-1])
                 zero_module(cafm_module.modulator.shift_net[-1])
 
-        # [XMODAL] 모듈① CrossModalBlock의 두 출력 projection을 0-init
+        # [XMODAL] 모듈① CrossModalBlock의 출력 projection을 0-init
         # → 학습 초기에 블록 전체가 항등함수로 동작, baseline 성능을 해치지 않음
         if use_cross_modal:
             from .cafm import zero_module
             zero_module(self.cross_modal.attn.project_out)
             zero_module(self.cross_modal.ffn.proj_out)
+            if cross_modal_num_blocks >= 2:
+                zero_module(self.cross_modal2.attn.project_out)
+                zero_module(self.cross_modal2.ffn.proj_out)
 
     def forward(self, sar: torch.Tensor, cloudy: torch.Tensor) -> torch.Tensor:
         """cr-train 호환 forward.
@@ -287,6 +298,11 @@ class ACA_CRNet(nn.Module):
 
         # ── Body 구간 2 → ResBlock_att (layer 12) ──
         feat = _body(self.body2, feat)
+
+        # [XMODAL] cross_modal2: body2 이후 SAR 정보 재주입 (f_sar 재사용)
+        if self.use_cross_modal and self.cross_modal_num_blocks >= 2:
+            feat = self.cross_modal2(feat, f_sar)
+
         # [수정] CAFM #2: 후반 feature 변조 (같은 밀도맵, 다른 γ/β)
         if self.use_cafm:
             feat = self.cafm2(feat, self.last_density)
