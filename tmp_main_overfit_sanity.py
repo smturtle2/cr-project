@@ -8,12 +8,12 @@ Optim: AdamW(lr=1e-4)
 Loss:  MAE (L1Loss)
 Data:  train 16 / val 16 / test 16
 Train: batch=4, epochs=100, crop 128×128 + flip + rot90
+
+학습 전 train dataset 전체(16장) 저장 + 매 epoch마다 train/val example 1장 저장 + history.png 갱신.
 """
 
 from __future__ import annotations
 
-from collections.abc import Iterator
-from contextlib import contextmanager
 from pathlib import Path
 
 import main as shared_main
@@ -24,9 +24,11 @@ from modules.metrics.metrics import MAE, PSNR, SSIM, SAM
 
 
 TRAIN_MAX_SAMPLES = 16
-
-_DEFAULT_BUILD_BEST_EPOCH_SELECTOR = shared_main.build_best_epoch_selector
-_ORIGINAL_MAYBE_UPDATE = shared_main.maybe_update_best_state
+VAL_MAX_SAMPLES = 16
+TEST_MAX_SAMPLES = 16
+SAVE_EVERY = 1  # 매 epoch마다 example 저장 + plot 갱신
+NUM_EXAMPLES = 1
+OUTPUT_DIR = Path("artifacts/sanity_overfit")
 
 
 def build_model() -> nn.Module:
@@ -72,69 +74,69 @@ def build_metrics() -> dict[str, shared_main.MetricFn]:
     return {name: _wrap(m) for name, m in mods.items()}
 
 
-def build_best_epoch_selector() -> shared_main.BestEpochSelector:
-    return _DEFAULT_BUILD_BEST_EPOCH_SELECTOR()
-
-
-def maybe_update_best_state_with_train(trainer, record, *, output_dir, device,
-                                        best_state, selector, example_mode,
-                                        val_max_samples, num_examples):
-    new_best = _ORIGINAL_MAYBE_UPDATE(
-        trainer, record, output_dir=output_dir, device=device,
-        best_state=best_state, selector=selector,
-        example_mode=example_mode, val_max_samples=val_max_samples,
-        num_examples=num_examples,
-    )
-    # best epoch가 갱신되었을 때만 train example도 저장
-    if new_best is not best_state and new_best is not None:
-        epoch = int(record["epoch"])
+def save_examples(trainer, device, epoch):
+    """Train + val example을 함께 저장."""
+    example_dir = OUTPUT_DIR / "examples" / f"epoch_{epoch:03d}"
+    for split, stage, max_samples in [
+        ("train", "train", TRAIN_MAX_SAMPLES),
+        ("validation", "val", VAL_MAX_SAMPLES),
+    ]:
         shared_main.save_examples_for_epoch(
-            trainer, device=device, split="train",
-            max_samples=TRAIN_MAX_SAMPLES,
-            stage="train", epoch=epoch,
-            output_dir=output_dir / "examples" / "best" / f"epoch_{epoch:03d}",
-            num_examples=num_examples,
+            trainer, device=device, split=split,
+            max_samples=max_samples, stage=stage, epoch=epoch,
+            output_dir=example_dir, num_examples=NUM_EXAMPLES,
         )
-    return new_best
-
-
-@contextmanager
-def use_local_builds() -> Iterator[None]:
-    overrides = {
-        "build_model": build_model,
-        "build_optimizer": build_optimizer,
-        "build_loss": build_loss,
-        "build_metrics": build_metrics,
-        "build_best_epoch_selector": build_best_epoch_selector,
-        "maybe_update_best_state": maybe_update_best_state_with_train,
-    }
-    originals = {name: getattr(shared_main, name) for name in overrides}
-
-    for name, override in overrides.items():
-        setattr(shared_main, name, override)
-
-    try:
-        yield
-    finally:
-        for name, original in originals.items():
-            setattr(shared_main, name, original)
 
 
 def main() -> None:
-    with use_local_builds():
-        shared_main.main(
-            batch_size=4,
-            seed=42,
-            max_epochs=100,
-            train_max_samples=TRAIN_MAX_SAMPLES,
-            val_max_samples=16,
-            test_max_samples=16,
-            output_dir=Path("artifacts/sanity_overfit"),
-            resume=None,
-            run_test=True,
-            num_examples=5,
-            example_mode="best",
-        )
+    shared_main.seed_everything(42)
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    shared_main.print_hf_auth_status()
+
+    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+
+    model = build_model().to(device)
+    optimizer = build_optimizer(model)
+    trainer = shared_main.Trainer(
+        model=model,
+        optimizer=optimizer,
+        loss=build_loss(),
+        metrics=build_metrics(),
+        max_train_samples=TRAIN_MAX_SAMPLES,
+        max_val_samples=VAL_MAX_SAMPLES,
+        max_test_samples=TEST_MAX_SAMPLES,
+        output_dir=OUTPUT_DIR,
+        batch_size=4,
+        epochs=100,
+        seed=42,
+        train_crop_size=128,
+        train_random_flip=True,
+        train_random_rot90=True,
+    )
+
+    # 학습 전: train dataset 전체를 초기 모델(랜덤 가중치)로 저장
+    shared_main.save_examples_for_epoch(
+        trainer, device=device, split="train",
+        max_samples=TRAIN_MAX_SAMPLES, stage="train",
+        epoch=0,
+        output_dir=OUTPUT_DIR / "examples" / "dataset",
+        num_examples=TRAIN_MAX_SAMPLES,
+    )
+
+    history: list[dict[str, int | float]] = []
+
+    while trainer.current_epoch < trainer.epochs:
+        record = trainer.step()
+        shared_main.append_history(history, record, global_step=trainer.global_step)
+        epoch = int(record["epoch"])
+
+        # 매 SAVE_EVERY epoch마다 또는 마지막 epoch에 example 저장 + plot 갱신
+        if epoch % SAVE_EVERY == 0 or epoch == trainer.epochs:
+            save_examples(trainer, device, epoch)
+            shared_main.save_history_plot(history, OUTPUT_DIR / "history.png")
+
+    # 최종 plot
+    shared_main.save_history_plot(history, OUTPUT_DIR / "history.png")
 
 
 if __name__ == "__main__":
