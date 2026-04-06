@@ -27,4 +27,4 @@ conflicts = [
 ]
 
 [tool.uv.sources]
-cr-train = { git = "https://github.com/smturtle2/cr-train.git" }
+cr-train = { git = "https://github.com/smturtle2/cr-train.git", rev = "f64603a318397777ffb0d650cff99a9516fd745a" }
