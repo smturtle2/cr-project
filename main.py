@@ -279,7 +279,7 @@ def save_best_state(
 
 
 def save_history_plot(history: list[dict[str, int | float]], path: Path) -> None:
-    # 학습 결과를 한 장으로 남기기 위해 loss, metric, epoch 시간대를 분리해서 그린다.
+    # 학습 결과를 한 장으로 남기되, 각 metric은 서로 다른 subplot에 단독으로 그린다.
     # 파일 기반 결과물이 있으면 notebook 없이도 학습 흐름을 다시 확인하기 쉽다.
     if not history:
         return
@@ -287,36 +287,38 @@ def save_history_plot(history: list[dict[str, int | float]], path: Path) -> None
     import matplotlib.pyplot as plt
 
     metric_keys = sorted(
-        {key for row in history for key in row if key not in {"epoch", "global_step"}}
+        {
+            key
+            for row in history
+            for key in row
+            if key not in {"epoch", "global_step", "elapsed_sec"}
+        },
+        key=lambda key: (not key.endswith("_loss"), key),
     )
-    loss_keys = [key for key in metric_keys if key.endswith("_loss")]
-    time_keys = [key for key in metric_keys if key == "elapsed_sec"]
-    other_keys = [key for key in metric_keys if key not in loss_keys and key not in time_keys]
-    groups = [keys for keys in (loss_keys, other_keys, time_keys) if keys]
-    if not groups:
+    if not metric_keys:
         return
 
     epochs = [int(row["epoch"]) for row in history]
-    fig, axes = plt.subplots(len(groups), 1, figsize=(10, 4 * len(groups)), sharex=True)
-    if not isinstance(axes, np.ndarray):
-        axes = np.array([axes])
+    fig, axes = plt.subplots(
+        len(metric_keys),
+        1,
+        figsize=(10, 3.6 * len(metric_keys)),
+        sharex=True,
+    )
+    axes = np.atleast_1d(axes)
 
-    for ax, keys in zip(axes, groups):
-        for key in keys:
-            values = [row.get(key, np.nan) for row in history]
-            ax.plot(epochs, values, marker="o", linewidth=2.2, markersize=5, label=key)
+    for ax, key in zip(axes, metric_keys):
+        values = [row.get(key, np.nan) for row in history]
+        ax.plot(epochs, values, marker="o", linewidth=2.2, markersize=5)
         ax.grid(True, alpha=0.25)
-        ax.legend(frameon=False)
         ax.spines["top"].set_visible(False)
         ax.spines["right"].set_visible(False)
-        if keys == time_keys:
-            ax.set_ylabel("seconds")
-        else:
-            ax.set_ylabel("value")
+        ax.set_ylabel("value")
+        ax.set_title(key)
 
-    axes[0].set_title("training and evaluation history")
+    fig.suptitle("training and evaluation history")
     axes[-1].set_xlabel("epoch")
-    fig.tight_layout()
+    fig.tight_layout(rect=(0, 0, 1, 0.98))
     path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(path, dpi=180, bbox_inches="tight")
     plt.close(fig)

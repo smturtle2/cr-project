@@ -7,6 +7,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+import numpy as np
 import torch
 from torch import nn
 
@@ -109,6 +110,67 @@ class FakeTrainer:
             "epoch": self.current_epoch,
             "global_step": self.global_step,
         }
+
+
+class SaveHistoryPlotTest(unittest.TestCase):
+    @staticmethod
+    def _make_axis() -> mock.Mock:
+        axis = mock.Mock()
+        axis.spines = {
+            "top": mock.Mock(),
+            "right": mock.Mock(),
+        }
+        return axis
+
+    def test_save_history_plot_uses_one_subplot_per_metric_and_skips_elapsed_time(self) -> None:
+        history = [
+            {
+                "epoch": 1,
+                "global_step": 10,
+                "elapsed_sec": 99.0,
+                "train_loss": 1.2,
+                "val_loss": 0.5,
+                "val_mae": 0.6,
+            },
+            {
+                "epoch": 2,
+                "global_step": 20,
+                "elapsed_sec": 101.0,
+                "train_loss": 1.0,
+                "val_loss": 0.4,
+                "val_mae": 0.5,
+            },
+        ]
+        fig = mock.Mock()
+        axes = np.array([self._make_axis() for _ in range(3)], dtype=object)
+
+        with (
+            tempfile.TemporaryDirectory() as tmp_dir,
+            mock.patch("matplotlib.pyplot.subplots", return_value=(fig, axes)) as subplots,
+            mock.patch("matplotlib.pyplot.close") as close_plot,
+        ):
+            main.save_history_plot(history, Path(tmp_dir) / "history.png")
+
+        subplots.assert_called_once_with(3, 1, figsize=(10, 10.8), sharex=True)
+        fig.suptitle.assert_called_once_with("training and evaluation history")
+        fig.tight_layout.assert_called_once_with(rect=(0, 0, 1, 0.98))
+        fig.savefig.assert_called_once()
+        close_plot.assert_called_once_with(fig)
+
+        expected_titles = ["train_loss", "val_loss", "val_mae"]
+        expected_values = [[1.2, 1.0], [0.5, 0.4], [0.6, 0.5]]
+        plotted_values = []
+        for axis, title, values in zip(axes, expected_titles, expected_values):
+            axis.set_title.assert_called_once_with(title)
+            axis.set_ylabel.assert_called_once_with("value")
+            axis.grid.assert_called_once_with(True, alpha=0.25)
+            axis.plot.assert_called_once()
+            self.assertEqual(axis.plot.call_args.args[0], [1, 2])
+            self.assertEqual(axis.plot.call_args.args[1], values)
+            plotted_values.append(axis.plot.call_args.args[1])
+
+        self.assertNotIn([99.0, 101.0], plotted_values)
+        axes[-1].set_xlabel.assert_called_once_with("epoch")
 
 
 class MainTrainingFlowTest(unittest.TestCase):
