@@ -22,6 +22,32 @@ from cr_train.data.runtime import ensure_split_cache
 # Sentinel-2 13채널 중 사람이 보기 쉬운 RGB 조합(B4, B3, B2) 인덱스다.
 RGB_CHANNELS = (3, 2, 1)
 EXAMPLE_SPLITS = ("train", "validation", "test")
+STAGE_PLOT_STYLES = {
+    "train": {
+        "label": "Train",
+        "color": "#1f77b4",
+        "linestyle": "-",
+        "marker": "o",
+        "markersize": 4.5,
+        "linewidth": 2.2,
+    },
+    "val": {
+        "label": "Validation",
+        "color": "#ff7f0e",
+        "linestyle": "-",
+        "marker": "s",
+        "markersize": 4.5,
+        "linewidth": 2.2,
+    },
+    "test": {
+        "label": "Test",
+        "color": "#2ca02c",
+        "linestyle": "None",
+        "marker": "D",
+        "markersize": 6.5,
+        "linewidth": 0.0,
+    },
+}
 
 # Trainer가 기대하는 `(prediction, batch)` 계약을 타입으로도 분명히 적어 둔다.
 Batch = dict[str, Any]
@@ -49,6 +75,13 @@ class BestEpochSelector:
 class BestState:
     epoch: int
     score: float
+
+
+@dataclass(slots=True, frozen=True)
+class ExampleSaveConfig:
+    splits: tuple[str, ...]
+    max_samples_by_split: Mapping[str, int | None]
+    num_examples: int
 
 
 def seed_everything(seed: int) -> None:
@@ -305,19 +338,42 @@ def best_checkpoint_path(output_dir: Path) -> Path:
     return output_dir / "best.pt"
 
 
+def _selector_matches_best_payload(payload: Mapping[str, Any], *, selector: BestEpochSelector) -> bool:
+    return (
+        str(payload["selector_name"]) == selector.name
+        and str(payload["selector_mode"]) == selector.mode
+    )
+
+
+def _build_best_payload(
+    *,
+    epoch: int,
+    score: float,
+    selector: BestEpochSelector,
+    checkpoint_path: Path,
+) -> dict[str, str | int | float]:
+    checkpoint_text = str(checkpoint_path)
+    return {
+        "epoch": int(epoch),
+        "score": float(score),
+        "checkpoint_path": checkpoint_text,
+        "selector_name": selector.name,
+        "selector_mode": selector.mode,
+        "source_checkpoint_path": checkpoint_text,
+    }
+
+
 def load_best_state(output_dir: Path, *, selector: BestEpochSelector) -> BestState | None:
     metadata_path = best_metadata_path(output_dir)
     if not metadata_path.exists():
         return None
 
     payload = json.loads(metadata_path.read_text(encoding="utf-8"))
-    selector_name = str(payload["selector_name"])
-    selector_mode = str(payload["selector_mode"])
-    if selector_name != selector.name or selector_mode != selector.mode:
+    if not _selector_matches_best_payload(payload, selector=selector):
         print(
             "ignored existing best metadata:",
             f"path={metadata_path}",
-            f"selector={selector_name}/{selector_mode}",
+            f"selector={payload['selector_name']}/{payload['selector_mode']}",
             f"expected={selector.name}/{selector.mode}",
         )
         return None
@@ -337,14 +393,12 @@ def save_best_state(
     checkpoint_path: Path,
 ) -> BestState:
     output_dir.mkdir(parents=True, exist_ok=True)
-    payload = {
-        "epoch": int(epoch),
-        "score": float(score),
-        "checkpoint_path": str(checkpoint_path),
-        "selector_name": selector.name,
-        "selector_mode": selector.mode,
-        "source_checkpoint_path": str(checkpoint_path),
-    }
+    payload = _build_best_payload(
+        epoch=epoch,
+        score=score,
+        selector=selector,
+        checkpoint_path=checkpoint_path,
+    )
     best_metadata_path(output_dir).write_text(
         json.dumps(payload, indent=2, sort_keys=True) + "\n",
         encoding="utf-8",
@@ -361,13 +415,7 @@ def save_best_state(
     )
 
 
-def save_history_plot(history: list[dict[str, int | float]], path: Path) -> None:
-    # metric마다 독립 PNG를 남겨 두면 학습이 길어져도 필요한 지표만 바로 열어 보기 쉽다.
-    if not history:
-        return
-
-    import matplotlib.pyplot as plt
-
+def _collect_history_metric_names(history: Sequence[Mapping[str, int | float]]) -> list[str]:
     grouped_metrics: dict[str, set[str]] = {}
     for row in history:
         for key in row:
@@ -379,80 +427,88 @@ def save_history_plot(history: list[dict[str, int | float]], path: Path) -> None
             stage, metric = match
             grouped_metrics.setdefault(metric, set()).add(stage)
 
-    metric_names = sorted(
+    return sorted(
         grouped_metrics,
         key=lambda metric: (metric != "loss", metric),
     )
+
+
+def _history_metric_values(
+    history: Sequence[Mapping[str, int | float]],
+    *,
+    stage: Literal["train", "val", "test"],
+    metric: str,
+) -> list[tuple[int, float]]:
+    return [
+        (int(row["epoch"]), float(row[f"{stage}_{metric}"]))
+        for row in history
+        if f"{stage}_{metric}" in row
+    ]
+
+
+def _plot_metric_series(
+    ax,
+    history: Sequence[Mapping[str, int | float]],
+    *,
+    metric: str,
+) -> bool:
+    has_series = False
+    for stage in ("train", "val", "test"):
+        values = _history_metric_values(history, stage=stage, metric=metric)
+        if not values:
+            continue
+        has_series = True
+        epochs, series = zip(*values, strict=False)
+        ax.plot(
+            epochs,
+            series,
+            color=STAGE_PLOT_STYLES[stage]["color"],
+            label=STAGE_PLOT_STYLES[stage]["label"],
+            linestyle=STAGE_PLOT_STYLES[stage]["linestyle"],
+            marker=STAGE_PLOT_STYLES[stage]["marker"],
+            markersize=STAGE_PLOT_STYLES[stage]["markersize"],
+            linewidth=STAGE_PLOT_STYLES[stage]["linewidth"],
+        )
+    return has_series
+
+
+def _style_metric_axis(ax, *, metric: str, has_series: bool) -> None:
+    ax.grid(True, alpha=0.25)
+    ax.spines["top"].set_visible(False)
+    ax.spines["right"].set_visible(False)
+    ax.set_ylabel("value")
+    ax.set_title(format_metric_label(metric))
+    ax.set_xlabel("epoch")
+    if has_series:
+        ax.legend(frameon=False)
+
+
+def _save_metric_plot(history: Sequence[Mapping[str, int | float]], *, path: Path, metric: str) -> None:
+    import matplotlib.pyplot as plt
+
+    fig, ax = plt.subplots(1, 1, figsize=(10, 4.2))
+    has_series = _plot_metric_series(ax, history, metric=metric)
+    _style_metric_axis(ax, metric=metric, has_series=has_series)
+
+    output_path = build_metric_plot_path(path, metric)
+    fig.tight_layout()
+    fig.savefig(output_path, dpi=180, bbox_inches="tight")
+    plt.close(fig)
+    print(f"saved plot: {output_path}")
+
+
+def save_history_plot(history: list[dict[str, int | float]], path: Path) -> None:
+    # metric마다 독립 PNG를 남겨 두면 학습이 길어져도 필요한 지표만 바로 열어 보기 쉽다.
+    if not history:
+        return
+
+    metric_names = _collect_history_metric_names(history)
     if not metric_names:
         return
 
-    stage_styles = {
-        "train": {
-            "label": "Train",
-            "color": "#1f77b4",
-            "linestyle": "-",
-            "marker": "o",
-            "markersize": 4.5,
-            "linewidth": 2.2,
-        },
-        "val": {
-            "label": "Validation",
-            "color": "#ff7f0e",
-            "linestyle": "-",
-            "marker": "s",
-            "markersize": 4.5,
-            "linewidth": 2.2,
-        },
-        "test": {
-            "label": "Test",
-            "color": "#2ca02c",
-            "linestyle": "None",
-            "marker": "D",
-            "markersize": 6.5,
-            "linewidth": 0.0,
-        },
-    }
-
     path.parent.mkdir(parents=True, exist_ok=True)
-
     for metric in metric_names:
-        fig, ax = plt.subplots(1, 1, figsize=(10, 4.2))
-        has_series = False
-        for stage in ("train", "val", "test"):
-            values = [
-                (int(row["epoch"]), float(row[f"{stage}_{metric}"]))
-                for row in history
-                if f"{stage}_{metric}" in row
-            ]
-            if not values:
-                continue
-            has_series = True
-            epochs, series = zip(*values, strict=False)
-            ax.plot(
-                epochs,
-                series,
-                color=stage_styles[stage]["color"],
-                label=stage_styles[stage]["label"],
-                linestyle=stage_styles[stage]["linestyle"],
-                marker=stage_styles[stage]["marker"],
-                markersize=stage_styles[stage]["markersize"],
-                linewidth=stage_styles[stage]["linewidth"],
-            )
-
-        ax.grid(True, alpha=0.25)
-        ax.spines["top"].set_visible(False)
-        ax.spines["right"].set_visible(False)
-        ax.set_ylabel("value")
-        ax.set_title(format_metric_label(metric))
-        ax.set_xlabel("epoch")
-        if has_series:
-            ax.legend(frameon=False)
-
-        output_path = build_metric_plot_path(path, metric)
-        fig.tight_layout()
-        fig.savefig(output_path, dpi=180, bbox_inches="tight")
-        plt.close(fig)
-        print(f"saved plot: {output_path}")
+        _save_metric_plot(history, path=path, metric=metric)
 
 
 def build_loader(
@@ -585,6 +641,74 @@ def normalize_map(image: torch.Tensor) -> np.ndarray:
     return np.clip((array - low) / max(high - low, 1e-6), 0.0, 1.0)
 
 
+def _metadata_value(metadata: Mapping[str, Any], key: str, index: int) -> str:
+    values = metadata.get(key, [])
+    if not isinstance(values, (list, tuple)) or index >= len(values):
+        return ""
+    return str(values[index])
+
+
+def _build_example_title(
+    split_label: str,
+    *,
+    example_index: int,
+    metadata: Mapping[str, Any],
+    batch_index: int,
+) -> str:
+    season = _metadata_value(metadata, "season", batch_index)
+    scene = _metadata_value(metadata, "scene", batch_index)
+    patch = _metadata_value(metadata, "patch", batch_index)
+    return f"{split_label} example {example_index} | {season}/scene_{scene}/patch_{patch}"
+
+
+def _build_example_panels(
+    *,
+    cloudy: torch.Tensor,
+    prediction: torch.Tensor,
+    target: torch.Tensor,
+    sar: torch.Tensor,
+) -> tuple[tuple[str, np.ndarray, str | None], ...]:
+    cloudy_rgb, prediction_rgb, target_rgb = normalize_rgb_triplet(cloudy, prediction, target)
+    sar_map = normalize_map(sar.mean(dim=0))
+    error_map = normalize_map((prediction - target).abs().mean(dim=0))
+    return (
+        ("Cloudy RGB", cloudy_rgb, None),
+        ("Prediction RGB", prediction_rgb, None),
+        ("Target RGB", target_rgb, None),
+        ("SAR Mean", sar_map, "gray"),
+        ("Abs Error", error_map, "magma"),
+    )
+
+
+def _save_example_figure(
+    *,
+    output_dir: Path,
+    split_label: str,
+    example_index: int,
+    title: str,
+    panels: Sequence[tuple[str, np.ndarray, str | None]],
+) -> Path:
+    import matplotlib.pyplot as plt
+
+    fig, axes = plt.subplots(1, 5, figsize=(18, 4))
+    fig.suptitle(title, fontsize=11)
+    for ax, (panel_title, image, cmap) in zip(axes, panels):
+        if cmap is None:
+            ax.imshow(image)
+        else:
+            ax.imshow(image, cmap=cmap)
+        ax.set_title(panel_title)
+        ax.axis("off")
+
+    fig.tight_layout()
+    fig.subplots_adjust(top=0.80)
+
+    path = output_dir / f"{split_label}_example_{example_index:02d}.png"
+    fig.savefig(path, dpi=180, bbox_inches="tight")
+    plt.close(fig)
+    return path
+
+
 def _render_restoration_examples(
     trainer: Trainer,
     dataloader,
@@ -597,8 +721,6 @@ def _render_restoration_examples(
     # cloudy / prediction / target / SAR / error를 한 장에 묶어서 저장한다.
     if num_examples <= 0:
         return []
-
-    import matplotlib.pyplot as plt
 
     output_dir.mkdir(parents=True, exist_ok=True)
     was_training = trainer.model.training
@@ -624,48 +746,28 @@ def _render_restoration_examples(
                 prediction = prediction.detach().cpu()
 
                 for index in range(prediction.shape[0]):
-                    cloudy_rgb, prediction_rgb, target_rgb = normalize_rgb_triplet(
-                        cloudy[index],
-                        prediction[index],
-                        target[index],
+                    example_index = len(saved_paths) + 1
+                    panels = _build_example_panels(
+                        cloudy=cloudy[index],
+                        prediction=prediction[index],
+                        target=target[index],
+                        sar=sar[index],
                     )
-                    sar_map = normalize_map(sar[index].mean(dim=0))
-                    error_map = normalize_map((prediction[index] - target[index]).abs().mean(dim=0))
-
-                    # metadata는 batch 단위 list라서 index별 값을 직접 안전하게 꺼낸다.
-                    seasons = metadata.get("season", [])
-                    scenes = metadata.get("scene", [])
-                    patches = metadata.get("patch", [])
-                    season = str(seasons[index]) if isinstance(seasons, (list, tuple)) and index < len(seasons) else ""
-                    scene = str(scenes[index]) if isinstance(scenes, (list, tuple)) and index < len(scenes) else ""
-                    patch = str(patches[index]) if isinstance(patches, (list, tuple)) and index < len(patches) else ""
-
-                    title = f"{split_label} example {len(saved_paths) + 1} | {season}/scene_{scene}/patch_{patch}"
-
-                    fig, axes = plt.subplots(1, 5, figsize=(18, 4))
-                    fig.suptitle(title, fontsize=11)
-                    panels = (
-                        ("Cloudy RGB", cloudy_rgb, None),
-                        ("Prediction RGB", prediction_rgb, None),
-                        ("Target RGB", target_rgb, None),
-                        ("SAR Mean", sar_map, "gray"),
-                        ("Abs Error", error_map, "magma"),
+                    title = _build_example_title(
+                        split_label,
+                        example_index=example_index,
+                        metadata=metadata,
+                        batch_index=index,
                     )
-
-                    for ax, (panel_title, image, cmap) in zip(axes, panels):
-                        if cmap is None:
-                            ax.imshow(image)
-                        else:
-                            ax.imshow(image, cmap=cmap)
-                        ax.set_title(panel_title)
-                        ax.axis("off")
-
-                    fig.tight_layout()
-                    fig.subplots_adjust(top=0.80)
-                    path = output_dir / f"{split_label}_example_{len(saved_paths) + 1:02d}.png"
-                    fig.savefig(path, dpi=180, bbox_inches="tight")
-                    plt.close(fig)
-                    saved_paths.append(path)
+                    saved_paths.append(
+                        _save_example_figure(
+                            output_dir=output_dir,
+                            split_label=split_label,
+                            example_index=example_index,
+                            title=title,
+                            panels=panels,
+                        )
+                    )
 
                     if len(saved_paths) == num_examples:
                         break
@@ -676,6 +778,46 @@ def _render_restoration_examples(
 
     print(f"saved examples: {output_dir}")
     return saved_paths
+
+
+def _validate_example_split(split: str) -> str:
+    if split not in EXAMPLE_SPLITS:
+        supported = ", ".join(EXAMPLE_SPLITS)
+        raise ValueError(f"split must be one of {supported}; got: {split}")
+    return split
+
+
+def _resolve_example_request(
+    trainer: Trainer,
+    dataloader,
+    *,
+    split: str | None,
+    max_samples: int | None,
+    epoch: int | None,
+    stage: str | None,
+) -> tuple[Any, str]:
+    split_label = stage
+    if split is not None:
+        split_label = _validate_example_split(split)
+
+    if dataloader is not None:
+        if split_label is None:
+            raise TypeError("save_restoration_examples() requires either split or stage when dataloader is provided")
+        return dataloader, str(split_label)
+
+    if split is None or epoch is None:
+        raise TypeError("save_restoration_examples() requires split and epoch when dataloader is not provided")
+
+    return (
+        build_loader(
+            trainer,
+            split=split,
+            max_samples=max_samples,
+            training=False,
+            epoch_index=max(epoch - 1, 0),
+        ),
+        split,
+    )
 
 
 def save_restoration_examples(
@@ -694,25 +836,14 @@ def save_restoration_examples(
     if num_examples <= 0:
         return []
 
-    split_label = stage
-    if split is not None:
-        if split not in EXAMPLE_SPLITS:
-            supported = ", ".join(EXAMPLE_SPLITS)
-            raise ValueError(f"split must be one of {supported}; got: {split}")
-        split_label = split
-
-    if dataloader is None:
-        if split is None or epoch is None:
-            raise TypeError("save_restoration_examples() requires split and epoch when dataloader is not provided")
-        dataloader = build_loader(
-            trainer,
-            split=split,
-            max_samples=max_samples,
-            training=False,
-            epoch_index=max(epoch - 1, 0),
-        )
-    elif split_label is None:
-        raise TypeError("save_restoration_examples() requires either split or stage when dataloader is provided")
+    dataloader, split_label = _resolve_example_request(
+        trainer,
+        dataloader,
+        split=split,
+        max_samples=max_samples,
+        epoch=epoch,
+        stage=stage,
+    )
 
     return _render_restoration_examples(
         trainer=trainer,
@@ -748,6 +879,71 @@ def save_examples_for_splits(
     return saved_paths_by_split
 
 
+def build_example_save_config(
+    *,
+    train_max_samples: int | None,
+    val_max_samples: int | None,
+    test_max_samples: int | None,
+    num_examples: int,
+    example_splits: Sequence[str] | str | None,
+) -> ExampleSaveConfig:
+    return ExampleSaveConfig(
+        splits=tuple(normalize_example_splits(example_splits)),
+        max_samples_by_split=build_example_max_samples_by_split(
+            train_max_samples=train_max_samples,
+            val_max_samples=val_max_samples,
+            test_max_samples=test_max_samples,
+        ),
+        num_examples=num_examples,
+    )
+
+
+def examples_epoch_dir(output_dir: Path, *, epoch: int) -> Path:
+    return output_dir / "examples" / f"epoch_{epoch:03d}"
+
+
+def should_save_periodic_examples(epoch: int, *, save_every_n_epochs: int) -> bool:
+    if save_every_n_epochs <= 0:
+        return False
+    if epoch <= 0:
+        return False
+    return epoch % save_every_n_epochs == 0
+
+
+def maybe_save_epoch_examples(
+    trainer: Trainer,
+    *,
+    output_dir: Path,
+    epoch: int,
+    example_config: ExampleSaveConfig,
+    saved_epochs: set[int],
+) -> dict[str, list[Path]]:
+    if epoch in saved_epochs or example_config.num_examples <= 0 or not example_config.splits:
+        return {}
+
+    saved_paths_by_split = save_examples_for_splits(
+        trainer,
+        splits=example_config.splits,
+        max_samples_by_split=example_config.max_samples_by_split,
+        epoch=epoch,
+        output_dir=examples_epoch_dir(output_dir, epoch=epoch),
+        num_examples=example_config.num_examples,
+    )
+    saved_epochs.add(epoch)
+    return saved_paths_by_split
+
+
+def should_save_examples_for_epoch(
+    *,
+    example_mode: Literal["best", "after_test"],
+    best_improved: bool,
+    periodic_due: bool,
+) -> bool:
+    if periodic_due:
+        return True
+    return example_mode == "best" and best_improved
+
+
 def maybe_update_best_state(
     trainer: Trainer,
     record: StepRecord,
@@ -755,11 +951,7 @@ def maybe_update_best_state(
     output_dir: Path,
     best_state: BestState | None,
     selector: BestEpochSelector,
-    example_mode: Literal["best", "after_test"],
-    example_splits: Sequence[str],
-    example_max_samples_by_split: Mapping[str, int | None],
-    num_examples: int,
-) -> BestState | None:
+) -> tuple[BestState | None, bool]:
     epoch = int(record["epoch"])
     score = score_epoch(record, selector=selector)
     if not is_better_score(
@@ -767,7 +959,7 @@ def maybe_update_best_state(
         None if best_state is None else best_state.score,
         mode=selector.mode,
     ):
-        return best_state
+        return best_state, False
 
     checkpoint_path = trainer.save_checkpoint(best_checkpoint_path(output_dir))
     updated_best_state = save_best_state(
@@ -777,16 +969,7 @@ def maybe_update_best_state(
         selector=selector,
         checkpoint_path=checkpoint_path,
     )
-    if example_mode == "best":
-        save_examples_for_splits(
-            trainer,
-            splits=example_splits,
-            max_samples_by_split=example_max_samples_by_split,
-            epoch=epoch,
-            output_dir=output_dir / "examples" / "best" / f"epoch_{epoch:03d}",
-            num_examples=num_examples,
-        )
-    return updated_best_state
+    return updated_best_state, True
 
 
 def maybe_save_epoch_checkpoint(trainer: Trainer, *, save_every_n_epochs: int) -> Path | None:
@@ -798,30 +981,6 @@ def maybe_save_epoch_checkpoint(trainer: Trainer, *, save_every_n_epochs: int) -
     checkpoint_path = trainer.save_checkpoint()
     print(f"saved checkpoint: {checkpoint_path}")
     return checkpoint_path
-
-
-def maybe_save_periodic_examples(
-    trainer: Trainer,
-    *,
-    output_dir: Path,
-    splits: Sequence[str],
-    max_samples_by_split: Mapping[str, int | None],
-    num_examples: int,
-    save_every_n_epochs: int,
-) -> dict[str, list[Path]]:
-    if save_every_n_epochs <= 0:
-        return {}
-    if trainer.current_epoch <= 0 or trainer.current_epoch % save_every_n_epochs != 0:
-        return {}
-
-    return save_examples_for_splits(
-        trainer,
-        splits=splits,
-        max_samples_by_split=max_samples_by_split,
-        epoch=int(trainer.current_epoch),
-        output_dir=output_dir / "examples" / "periodic" / f"epoch_{trainer.current_epoch:03d}",
-        num_examples=num_examples,
-    )
 
 
 def run_test_and_record(
@@ -840,6 +999,135 @@ def run_test_and_record(
         global_step=global_step,
     )
     return test_record
+
+
+def validate_main_args(
+    *,
+    output_dir: str | Path,
+    resume: str | Path | None,
+    example_mode: Literal["best", "after_test"],
+    save_every_n_epochs: int,
+) -> tuple[Path, Path | None]:
+    resolved_output_dir = Path(output_dir)
+    resolved_resume = Path(resume) if resume is not None else None
+
+    if example_mode not in {"best", "after_test"}:
+        raise ValueError("example_mode must be either 'best' or 'after_test'")
+    if save_every_n_epochs < 0:
+        raise ValueError("save_every_n_epochs must be greater than or equal to zero")
+
+    return resolved_output_dir, resolved_resume
+
+
+def load_training_state(
+    trainer: Trainer,
+    *,
+    output_dir: Path,
+    resume: Path | None,
+    selector: BestEpochSelector,
+) -> BestState | None:
+    best_state = load_best_state(output_dir, selector=selector) if resume is not None else None
+    if resume is not None:
+        trainer.load_checkpoint(resume)
+    return best_state
+
+
+def handle_training_epoch(
+    trainer: Trainer,
+    record: StepRecord,
+    *,
+    history: list[dict[str, int | float]],
+    output_dir: Path,
+    best_state: BestState | None,
+    best_selector: BestEpochSelector,
+    example_mode: Literal["best", "after_test"],
+    example_config: ExampleSaveConfig,
+    save_every_n_epochs: int,
+    saved_example_epochs: set[int],
+) -> BestState | None:
+    epoch = int(record["epoch"])
+    append_history(history, record, global_step=trainer.global_step)
+    maybe_save_epoch_checkpoint(trainer, save_every_n_epochs=save_every_n_epochs)
+
+    next_best_state, best_improved = maybe_update_best_state(
+        trainer,
+        record,
+        output_dir=output_dir,
+        best_state=best_state,
+        selector=best_selector,
+    )
+    periodic_due = should_save_periodic_examples(epoch, save_every_n_epochs=save_every_n_epochs)
+    if should_save_examples_for_epoch(
+        example_mode=example_mode,
+        best_improved=best_improved,
+        periodic_due=periodic_due,
+    ):
+        maybe_save_epoch_examples(
+            trainer,
+            output_dir=output_dir,
+            epoch=epoch,
+            example_config=example_config,
+            saved_epochs=saved_example_epochs,
+        )
+
+    return next_best_state
+
+
+def run_training_loop(
+    trainer: Trainer,
+    *,
+    output_dir: Path,
+    best_state: BestState | None,
+    best_selector: BestEpochSelector,
+    example_mode: Literal["best", "after_test"],
+    example_config: ExampleSaveConfig,
+    save_every_n_epochs: int,
+) -> tuple[list[dict[str, int | float]], set[int]]:
+    history: list[dict[str, int | float]] = []
+    saved_example_epochs: set[int] = set()
+    current_best_state = best_state
+
+    while trainer.current_epoch < trainer.epochs:
+        record = trainer.step()
+        current_best_state = handle_training_epoch(
+            trainer,
+            record,
+            history=history,
+            output_dir=output_dir,
+            best_state=current_best_state,
+            best_selector=best_selector,
+            example_mode=example_mode,
+            example_config=example_config,
+            save_every_n_epochs=save_every_n_epochs,
+            saved_example_epochs=saved_example_epochs,
+        )
+
+    return history, saved_example_epochs
+
+
+def finalize_after_training(
+    trainer: Trainer,
+    history: list[dict[str, int | float]],
+    *,
+    output_dir: Path,
+    run_test: bool,
+    example_mode: Literal["best", "after_test"],
+    example_config: ExampleSaveConfig,
+    saved_example_epochs: set[int],
+) -> None:
+    if example_mode == "after_test":
+        run_test_and_record(trainer, history, global_step=trainer.global_step)
+        maybe_save_epoch_examples(
+            trainer,
+            output_dir=output_dir,
+            epoch=max(trainer.current_epoch, 1),
+            example_config=example_config,
+            saved_epochs=saved_example_epochs,
+        )
+    elif run_test:
+        run_test_and_record(trainer, history, global_step=trainer.global_step)
+
+    save_history_plot(history, output_dir / "history.png")
 
 
 def main(
@@ -867,18 +1155,18 @@ def main(
     # main은 "모델/옵티마이저 조립 -> Trainer 실행 -> 결과물 저장"만 담당한다.
     # Trainer가 이미 해 주는 일은 최대한 그대로 맡기고, 여기서는 프로젝트 전용 후처리만 남긴다.
     # Trainer 생성은 build_trainer()로 모으고, main은 실행 순서와 산출물 정책만 관리한다.
-    output_dir = Path(output_dir)
-    resume = Path(resume) if resume is not None else None
-    if example_mode not in {"best", "after_test"}:
-        raise ValueError("example_mode must be either 'best' or 'after_test'")
-    if save_every_n_epochs < 0:
-        raise ValueError("save_every_n_epochs must be greater than or equal to zero")
-
-    resolved_example_splits = normalize_example_splits(example_splits)
-    example_max_samples_by_split = build_example_max_samples_by_split(
+    output_dir, resume = validate_main_args(
+        output_dir=output_dir,
+        resume=resume,
+        example_mode=example_mode,
+        save_every_n_epochs=save_every_n_epochs,
+    )
+    example_config = build_example_save_config(
         train_max_samples=train_max_samples,
         val_max_samples=val_max_samples,
         test_max_samples=test_max_samples,
+        num_examples=num_examples,
+        example_splits=example_splits,
     )
 
     trainer = build_trainer(
@@ -897,50 +1185,30 @@ def main(
         train_random_rot90=train_random_rot90,
     )
     best_selector = build_best_epoch_selector()
-    best_state = load_best_state(output_dir, selector=best_selector) if resume is not None else None
-
-    if resume is not None:
-        trainer.load_checkpoint(resume)
-
-    history: list[dict[str, int | float]] = []
-    while trainer.current_epoch < trainer.epochs:
-        record = trainer.step()
-        append_history(history, record, global_step=trainer.global_step)
-        maybe_save_epoch_checkpoint(trainer, save_every_n_epochs=save_every_n_epochs)
-        best_state = maybe_update_best_state(
-            trainer,
-            record,
-            output_dir=output_dir,
-            best_state=best_state,
-            selector=best_selector,
-            example_mode=example_mode,
-            example_splits=resolved_example_splits,
-            example_max_samples_by_split=example_max_samples_by_split,
-            num_examples=num_examples,
-        )
-        maybe_save_periodic_examples(
-            trainer,
-            output_dir=output_dir,
-            splits=resolved_example_splits,
-            max_samples_by_split=example_max_samples_by_split,
-            num_examples=num_examples,
-            save_every_n_epochs=save_every_n_epochs,
-        )
-
-    if example_mode == "after_test":
-        run_test_and_record(trainer, history, global_step=trainer.global_step)
-        save_examples_for_splits(
-            trainer,
-            splits=resolved_example_splits,
-            max_samples_by_split=example_max_samples_by_split,
-            epoch=max(trainer.current_epoch, 1),
-            output_dir=output_dir / "examples" / "after_test" / f"epoch_{max(trainer.current_epoch, 1):03d}",
-            num_examples=num_examples,
-        )
-    elif run_test:
-        run_test_and_record(trainer, history, global_step=trainer.global_step)
-
-    save_history_plot(history, output_dir / "history.png")
+    best_state = load_training_state(
+        trainer,
+        output_dir=output_dir,
+        resume=resume,
+        selector=best_selector,
+    )
+    history, saved_example_epochs = run_training_loop(
+        trainer,
+        output_dir=output_dir,
+        best_state=best_state,
+        best_selector=best_selector,
+        example_mode=example_mode,
+        example_config=example_config,
+        save_every_n_epochs=save_every_n_epochs,
+    )
+    finalize_after_training(
+        trainer,
+        history,
+        output_dir=output_dir,
+        run_test=run_test,
+        example_mode=example_mode,
+        example_config=example_config,
+        saved_example_epochs=saved_example_epochs,
+    )
 
 
 if __name__ == "__main__":
