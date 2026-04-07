@@ -98,6 +98,7 @@ def main() -> None:
             run_test=True,
             num_examples=5,
             example_mode="best",
+            example_splits=["test"],
         )
 
 

@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import math
 import random
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
@@ -21,6 +21,7 @@ from cr_train.data.runtime import ensure_split_cache
 
 # Sentinel-2 13채널 중 사람이 보기 쉬운 RGB 조합(B4, B3, B2) 인덱스다.
 RGB_CHANNELS = (3, 2, 1)
+EXAMPLE_SPLITS = ("train", "validation", "test")
 
 # Trainer가 기대하는 `(prediction, batch)` 계약을 타입으로도 분명히 적어 둔다.
 Batch = dict[str, Any]
@@ -174,11 +175,7 @@ def flatten_record(record: Mapping[str, Any], *, global_step: int) -> dict[str, 
         if not summary:
             continue
 
-        if "loss" in summary:
-            row[f"{stage}_loss"] = float(summary["loss"])
-
-        for name, value in summary.get("metrics", {}).items():
-            row[f"{stage}_{name}"] = float(value)
+        write_stage_summary(row, stage=stage, summary=summary)
 
     return row
 
@@ -190,6 +187,92 @@ def append_history(
     global_step: int,
 ) -> None:
     history.append(flatten_record(record, global_step=global_step))
+
+
+def write_stage_summary(
+    row: dict[str, int | float],
+    *,
+    stage: Literal["train", "val", "test"],
+    summary: Mapping[str, Any],
+) -> None:
+    if "loss" in summary:
+        row[f"{stage}_loss"] = float(summary["loss"])
+
+    metrics = summary.get("metrics", {})
+    if isinstance(metrics, Mapping):
+        for name, value in metrics.items():
+            row[f"{stage}_{name}"] = float(value)
+
+
+def load_history_from_metrics_jsonl(path: str | Path) -> list[dict[str, int | float]]:
+    # train/validation/test 이벤트 로그를 plot용 sparse epoch row로 다시 조립한다.
+    path = Path(path)
+    merged_rows: dict[int, dict[str, int | float]] = {}
+    test_rows: list[dict[str, int | float]] = []
+    stage_by_kind: dict[str, Literal["train", "val", "test"]] = {
+        "train_epoch": "train",
+        "validation": "val",
+        "test": "test",
+    }
+
+    with path.open(encoding="utf-8") as handle:
+        for line in handle:
+            line = line.strip()
+            if not line:
+                continue
+
+            record = json.loads(line)
+            stage = stage_by_kind.get(str(record.get("kind")))
+            if stage is None:
+                continue
+
+            epoch = int(record["epoch"])
+            row = {
+                "epoch": epoch,
+                "global_step": epoch,
+            }
+            write_stage_summary(row, stage=stage, summary=record)
+
+            if stage == "test":
+                test_rows.append(row)
+                continue
+
+            merged = merged_rows.setdefault(
+                epoch,
+                {
+                    "epoch": epoch,
+                    "global_step": epoch,
+                },
+            )
+            merged.update(row)
+
+    history = [merged_rows[epoch] for epoch in sorted(merged_rows)]
+    history.extend(sorted(test_rows, key=lambda row: int(row["epoch"])))
+    return history
+
+
+def split_history_metric_key(key: str) -> tuple[Literal["train", "val", "test"], str] | None:
+    for stage in ("train", "val", "test"):
+        prefix = f"{stage}_"
+        if key.startswith(prefix) and len(key) > len(prefix):
+            return stage, key[len(prefix) :]
+    return None
+
+
+def format_metric_label(metric: str) -> str:
+    labels = {
+        "loss": "Loss",
+        "mae": "MAE",
+        "psnr": "PSNR",
+        "sam": "SAM",
+        "ssim": "SSIM",
+    }
+    return labels.get(metric, metric.replace("_", " ").title())
+
+
+def build_metric_plot_path(path: Path, metric: str) -> Path:
+    sanitized_metric = "".join(char if char.isalnum() or char in {"-", "_"} else "_" for char in metric)
+    return path.with_name(f"{path.stem}_{sanitized_metric}.png")
 
 
 def score_epoch(record: StepRecord, *, selector: BestEpochSelector) -> float:
@@ -279,50 +362,97 @@ def save_best_state(
 
 
 def save_history_plot(history: list[dict[str, int | float]], path: Path) -> None:
-    # 학습 결과를 한 장으로 남기되, 각 metric은 서로 다른 subplot에 단독으로 그린다.
-    # 파일 기반 결과물이 있으면 notebook 없이도 학습 흐름을 다시 확인하기 쉽다.
+    # metric마다 독립 PNG를 남겨 두면 학습이 길어져도 필요한 지표만 바로 열어 보기 쉽다.
     if not history:
         return
 
     import matplotlib.pyplot as plt
 
-    metric_keys = sorted(
-        {
-            key
-            for row in history
-            for key in row
-            if key not in {"epoch", "global_step", "elapsed_sec"}
-        },
-        key=lambda key: (not key.endswith("_loss"), key),
+    grouped_metrics: dict[str, set[str]] = {}
+    for row in history:
+        for key in row:
+            if key in {"epoch", "global_step", "elapsed_sec"}:
+                continue
+            match = split_history_metric_key(key)
+            if match is None:
+                continue
+            stage, metric = match
+            grouped_metrics.setdefault(metric, set()).add(stage)
+
+    metric_names = sorted(
+        grouped_metrics,
+        key=lambda metric: (metric != "loss", metric),
     )
-    if not metric_keys:
+    if not metric_names:
         return
 
-    epochs = [int(row["epoch"]) for row in history]
-    fig, axes = plt.subplots(
-        len(metric_keys),
-        1,
-        figsize=(10, 3.6 * len(metric_keys)),
-        sharex=True,
-    )
-    axes = np.atleast_1d(axes)
+    stage_styles = {
+        "train": {
+            "label": "Train",
+            "color": "#1f77b4",
+            "linestyle": "-",
+            "marker": "o",
+            "markersize": 4.5,
+            "linewidth": 2.2,
+        },
+        "val": {
+            "label": "Validation",
+            "color": "#ff7f0e",
+            "linestyle": "-",
+            "marker": "s",
+            "markersize": 4.5,
+            "linewidth": 2.2,
+        },
+        "test": {
+            "label": "Test",
+            "color": "#2ca02c",
+            "linestyle": "None",
+            "marker": "D",
+            "markersize": 6.5,
+            "linewidth": 0.0,
+        },
+    }
 
-    for ax, key in zip(axes, metric_keys):
-        values = [row.get(key, np.nan) for row in history]
-        ax.plot(epochs, values, marker="o", linewidth=2.2, markersize=5)
+    path.parent.mkdir(parents=True, exist_ok=True)
+
+    for metric in metric_names:
+        fig, ax = plt.subplots(1, 1, figsize=(10, 4.2))
+        has_series = False
+        for stage in ("train", "val", "test"):
+            values = [
+                (int(row["epoch"]), float(row[f"{stage}_{metric}"]))
+                for row in history
+                if f"{stage}_{metric}" in row
+            ]
+            if not values:
+                continue
+            has_series = True
+            epochs, series = zip(*values, strict=False)
+            ax.plot(
+                epochs,
+                series,
+                color=stage_styles[stage]["color"],
+                label=stage_styles[stage]["label"],
+                linestyle=stage_styles[stage]["linestyle"],
+                marker=stage_styles[stage]["marker"],
+                markersize=stage_styles[stage]["markersize"],
+                linewidth=stage_styles[stage]["linewidth"],
+            )
+
         ax.grid(True, alpha=0.25)
         ax.spines["top"].set_visible(False)
         ax.spines["right"].set_visible(False)
         ax.set_ylabel("value")
-        ax.set_title(key)
+        ax.set_title(format_metric_label(metric))
+        ax.set_xlabel("epoch")
+        if has_series:
+            ax.legend(frameon=False)
 
-    fig.suptitle("training and evaluation history")
-    axes[-1].set_xlabel("epoch")
-    fig.tight_layout(rect=(0, 0, 1, 0.98))
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(path, dpi=180, bbox_inches="tight")
-    plt.close(fig)
-    print(f"saved plot: {path}")
+        output_path = build_metric_plot_path(path, metric)
+        fig.tight_layout()
+        fig.savefig(output_path, dpi=180, bbox_inches="tight")
+        plt.close(fig)
+        print(f"saved plot: {output_path}")
 
 
 def build_loader(
@@ -375,6 +505,47 @@ def build_loader(
     )
 
 
+def normalize_example_splits(example_splits: Sequence[str] | str | None) -> list[str]:
+    if example_splits is None:
+        requested_splits = ["test"]
+    elif isinstance(example_splits, str):
+        requested_splits = [example_splits]
+    else:
+        requested_splits = list(example_splits)
+
+    normalized: list[str] = []
+    seen: set[str] = set()
+    invalid: list[str] = []
+    for split in requested_splits:
+        if split not in EXAMPLE_SPLITS:
+            invalid.append(str(split))
+            continue
+        if split in seen:
+            continue
+        seen.add(split)
+        normalized.append(split)
+
+    if invalid:
+        supported = ", ".join(EXAMPLE_SPLITS)
+        invalid_text = ", ".join(invalid)
+        raise ValueError(f"example_splits must contain only {supported}; got: {invalid_text}")
+
+    return normalized
+
+
+def build_example_max_samples_by_split(
+    *,
+    train_max_samples: int | None,
+    val_max_samples: int | None,
+    test_max_samples: int | None,
+) -> dict[str, int | None]:
+    return {
+        "train": train_max_samples,
+        "validation": val_max_samples,
+        "test": test_max_samples,
+    }
+
+
 def select_rgb(image: torch.Tensor) -> torch.Tensor:
     # 13채널 optical image에서 사람이 직관적으로 보는 RGB만 뽑는다.
     return image[list(RGB_CHANNELS)]
@@ -414,13 +585,13 @@ def normalize_map(image: torch.Tensor) -> np.ndarray:
     return np.clip((array - low) / max(high - low, 1e-6), 0.0, 1.0)
 
 
-def save_restoration_examples(
+def _render_restoration_examples(
     trainer: Trainer,
     dataloader,
     *,
     output_dir: Path,
     num_examples: int,
-    stage: str,
+    split_label: str,
 ) -> list[Path]:
     # 학습이 끝난 뒤 실제 복원 품질을 빠르게 확인할 수 있도록
     # cloudy / prediction / target / SAR / error를 한 장에 묶어서 저장한다.
@@ -469,10 +640,7 @@ def save_restoration_examples(
                     scene = str(scenes[index]) if isinstance(scenes, (list, tuple)) and index < len(scenes) else ""
                     patch = str(patches[index]) if isinstance(patches, (list, tuple)) and index < len(patches) else ""
 
-                    title = (
-                        f"{stage} example {len(saved_paths) + 1} | "
-                        f"{season}/scene_{scene}/patch_{patch}"
-                    )
+                    title = f"{split_label} example {len(saved_paths) + 1} | {season}/scene_{scene}/patch_{patch}"
 
                     fig, axes = plt.subplots(1, 5, figsize=(18, 4))
                     fig.suptitle(title, fontsize=11)
@@ -494,7 +662,7 @@ def save_restoration_examples(
 
                     fig.tight_layout()
                     fig.subplots_adjust(top=0.80)
-                    path = output_dir / f"{stage}_example_{len(saved_paths) + 1:02d}.png"
+                    path = output_dir / f"{split_label}_example_{len(saved_paths) + 1:02d}.png"
                     fig.savefig(path, dpi=180, bbox_inches="tight")
                     plt.close(fig)
                     saved_paths.append(path)
@@ -510,33 +678,74 @@ def save_restoration_examples(
     return saved_paths
 
 
-def save_examples_for_epoch(
+def save_restoration_examples(
     trainer: Trainer,
+    dataloader=None,
     *,
-    split: str,
-    max_samples: int | None,
-    stage: str,
-    epoch: int,
     output_dir: Path,
     num_examples: int,
+    split: str | None = None,
+    max_samples: int | None = None,
+    epoch: int | None = None,
+    stage: str | None = None,
 ) -> list[Path]:
+    # 공용 러너에서는 split/epoch만 넘기면 loader 생성부터 저장까지 한 번에 처리한다.
+    # dataloader 직접 주입은 notebook preview 호환을 위한 fallback이다.
     if num_examples <= 0:
         return []
 
-    dataloader = build_loader(
-        trainer,
-        split=split,
-        max_samples=max_samples,
-        training=False,
-        epoch_index=max(epoch - 1, 0),
-    )
-    return save_restoration_examples(
+    split_label = stage
+    if split is not None:
+        if split not in EXAMPLE_SPLITS:
+            supported = ", ".join(EXAMPLE_SPLITS)
+            raise ValueError(f"split must be one of {supported}; got: {split}")
+        split_label = split
+
+    if dataloader is None:
+        if split is None or epoch is None:
+            raise TypeError("save_restoration_examples() requires split and epoch when dataloader is not provided")
+        dataloader = build_loader(
+            trainer,
+            split=split,
+            max_samples=max_samples,
+            training=False,
+            epoch_index=max(epoch - 1, 0),
+        )
+    elif split_label is None:
+        raise TypeError("save_restoration_examples() requires either split or stage when dataloader is provided")
+
+    return _render_restoration_examples(
         trainer=trainer,
         dataloader=dataloader,
         output_dir=output_dir,
         num_examples=num_examples,
-        stage=stage,
+        split_label=str(split_label),
     )
+
+
+def save_examples_for_splits(
+    trainer: Trainer,
+    *,
+    splits: Sequence[str],
+    max_samples_by_split: Mapping[str, int | None],
+    epoch: int,
+    output_dir: Path,
+    num_examples: int,
+) -> dict[str, list[Path]]:
+    if num_examples <= 0 or not splits:
+        return {}
+
+    saved_paths_by_split: dict[str, list[Path]] = {}
+    for split in splits:
+        saved_paths_by_split[split] = save_restoration_examples(
+            trainer,
+            split=split,
+            max_samples=max_samples_by_split[split],
+            epoch=epoch,
+            output_dir=output_dir / split,
+            num_examples=num_examples,
+        )
+    return saved_paths_by_split
 
 
 def maybe_update_best_state(
@@ -547,7 +756,8 @@ def maybe_update_best_state(
     best_state: BestState | None,
     selector: BestEpochSelector,
     example_mode: Literal["best", "after_test"],
-    val_max_samples: int | None,
+    example_splits: Sequence[str],
+    example_max_samples_by_split: Mapping[str, int | None],
     num_examples: int,
 ) -> BestState | None:
     epoch = int(record["epoch"])
@@ -568,11 +778,10 @@ def maybe_update_best_state(
         checkpoint_path=checkpoint_path,
     )
     if example_mode == "best":
-        save_examples_for_epoch(
+        save_examples_for_splits(
             trainer,
-            split="validation",
-            max_samples=val_max_samples,
-            stage="val",
+            splits=example_splits,
+            max_samples_by_split=example_max_samples_by_split,
             epoch=epoch,
             output_dir=output_dir / "examples" / "best" / f"epoch_{epoch:03d}",
             num_examples=num_examples,
@@ -589,6 +798,30 @@ def maybe_save_epoch_checkpoint(trainer: Trainer, *, save_every_n_epochs: int) -
     checkpoint_path = trainer.save_checkpoint()
     print(f"saved checkpoint: {checkpoint_path}")
     return checkpoint_path
+
+
+def maybe_save_periodic_examples(
+    trainer: Trainer,
+    *,
+    output_dir: Path,
+    splits: Sequence[str],
+    max_samples_by_split: Mapping[str, int | None],
+    num_examples: int,
+    save_every_n_epochs: int,
+) -> dict[str, list[Path]]:
+    if save_every_n_epochs <= 0:
+        return {}
+    if trainer.current_epoch <= 0 or trainer.current_epoch % save_every_n_epochs != 0:
+        return {}
+
+    return save_examples_for_splits(
+        trainer,
+        splits=splits,
+        max_samples_by_split=max_samples_by_split,
+        epoch=int(trainer.current_epoch),
+        output_dir=output_dir / "examples" / "periodic" / f"epoch_{trainer.current_epoch:03d}",
+        num_examples=num_examples,
+    )
 
 
 def run_test_and_record(
@@ -629,6 +862,7 @@ def main(
     run_test: bool = True,
     num_examples: int = 4,
     example_mode: Literal["best", "after_test"] = "best",
+    example_splits: list[str] | None = None,
 ) -> None:
     # main은 "모델/옵티마이저 조립 -> Trainer 실행 -> 결과물 저장"만 담당한다.
     # Trainer가 이미 해 주는 일은 최대한 그대로 맡기고, 여기서는 프로젝트 전용 후처리만 남긴다.
@@ -639,6 +873,13 @@ def main(
         raise ValueError("example_mode must be either 'best' or 'after_test'")
     if save_every_n_epochs < 0:
         raise ValueError("save_every_n_epochs must be greater than or equal to zero")
+
+    resolved_example_splits = normalize_example_splits(example_splits)
+    example_max_samples_by_split = build_example_max_samples_by_split(
+        train_max_samples=train_max_samples,
+        val_max_samples=val_max_samples,
+        test_max_samples=test_max_samples,
+    )
 
     trainer = build_trainer(
         batch_size=batch_size,
@@ -673,19 +914,27 @@ def main(
             best_state=best_state,
             selector=best_selector,
             example_mode=example_mode,
-            val_max_samples=val_max_samples,
+            example_splits=resolved_example_splits,
+            example_max_samples_by_split=example_max_samples_by_split,
             num_examples=num_examples,
+        )
+        maybe_save_periodic_examples(
+            trainer,
+            output_dir=output_dir,
+            splits=resolved_example_splits,
+            max_samples_by_split=example_max_samples_by_split,
+            num_examples=num_examples,
+            save_every_n_epochs=save_every_n_epochs,
         )
 
     if example_mode == "after_test":
         run_test_and_record(trainer, history, global_step=trainer.global_step)
-        save_examples_for_epoch(
+        save_examples_for_splits(
             trainer,
-            split="test",
-            max_samples=test_max_samples,
-            stage="test",
+            splits=resolved_example_splits,
+            max_samples_by_split=example_max_samples_by_split,
             epoch=max(trainer.current_epoch, 1),
-            output_dir=output_dir / "examples" / "test",
+            output_dir=output_dir / "examples" / "after_test" / f"epoch_{max(trainer.current_epoch, 1):03d}",
             num_examples=num_examples,
         )
     elif run_test:
