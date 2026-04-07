@@ -1,8 +1,8 @@
 from __future__ import annotations
 
 import torch
-import torch.nn.functional as F
 from torch import nn
+from torch.nn import functional as F
 
 
 def _reshape_heads(x: torch.Tensor, heads: int) -> torch.Tensor:
@@ -36,29 +36,15 @@ class DWConvFFN(nn.Module):
         return self.net(x)
 
 
-class ShuffleUp2x(nn.Module):
-    def __init__(self, channels: int):
-        super().__init__()
-        self.scale_factor = 2
-        self.expand = nn.Conv2d(channels, channels * (self.scale_factor**2), kernel_size=1)
-        self.shuffle = nn.PixelShuffle(self.scale_factor)
-        self.act = nn.GELU()
-        self.fuse = nn.Conv2d(channels, channels, kernel_size=1)
-
+class BilinearUp2x(nn.Module):
     def forward(
         self,
         x: torch.Tensor,
-        *,
-        target_size: tuple[int, int] | None = None,
+        size: tuple[int, int] | None = None,
     ) -> torch.Tensor:
-        upsampled = self.shuffle(self.expand(x))
-        if target_size is not None:
-            target_h, target_w = target_size
-            out_h, out_w = upsampled.shape[-2:]
-            if target_h > out_h or target_w > out_w:
-                raise ValueError("target_size must not exceed the native 2x upsampled size")
-            upsampled = upsampled[..., :target_h, :target_w]
-        return self.fuse(self.act(upsampled))
+        if size is not None:
+            return F.interpolate(x, size=size, mode="bilinear", align_corners=False)
+        return F.interpolate(x, scale_factor=2.0, mode="bilinear", align_corners=False)
 
 
 class NeighborhoodCrossAttention(nn.Module):
@@ -125,7 +111,7 @@ class NeighborhoodCrossAttention(nn.Module):
         return self.out_proj(out)
 
 
-class GlobalCrossAttention(nn.Module):
+class GlobalSelfAttention(nn.Module):
     def __init__(self, dim: int, heads: int):
         super().__init__()
         self.dim = dim
@@ -136,13 +122,10 @@ class GlobalCrossAttention(nn.Module):
         self.v_proj = nn.Conv2d(dim, dim, kernel_size=1)
         self.out_proj = nn.Conv2d(dim, dim, kernel_size=1)
 
-    def forward(self, query: torch.Tensor, key: torch.Tensor, value: torch.Tensor) -> torch.Tensor:
-        if query.shape[-2:] != key.shape[-2:] or key.shape[-2:] != value.shape[-2:]:
-            raise ValueError("global cross attention expects matching spatial sizes")
-
-        q = self.q_proj(query).flatten(2).transpose(1, 2)
-        k = self.k_proj(key).flatten(2).transpose(1, 2)
-        v = self.v_proj(value).flatten(2).transpose(1, 2)
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        q = self.q_proj(x).flatten(2).transpose(1, 2)
+        k = self.k_proj(x).flatten(2).transpose(1, 2)
+        v = self.v_proj(x).flatten(2).transpose(1, 2)
 
         q_heads = _reshape_heads(q, self.heads)
         k_heads = _reshape_heads(k, self.heads)
@@ -151,8 +134,8 @@ class GlobalCrossAttention(nn.Module):
         attn = (q_heads * self.scale) @ k_heads.transpose(-2, -1)
         attn = attn.softmax(dim=-1)
         out = attn @ v_heads
-        out = out.transpose(1, 2).reshape(query.shape[0], -1, self.dim)
-        out = out.transpose(1, 2).reshape_as(query)
+        out = out.transpose(1, 2).reshape(x.shape[0], -1, self.dim)
+        out = out.transpose(1, 2).reshape_as(x)
         return self.out_proj(out)
 
 
@@ -180,28 +163,70 @@ class GlobalBlock(nn.Module):
     def __init__(self, dim: int, heads: int, ffn_expansion: int):
         super().__init__()
         self.z_attn_norm = RMSNorm2d(dim)
-        self.h_attn_norm = RMSNorm2d(dim)
-        self.attn = GlobalCrossAttention(dim=dim, heads=heads)
+        self.attn = GlobalSelfAttention(dim=dim, heads=heads)
+        self.z_downsample = nn.Conv2d(dim, dim, kernel_size=2, stride=2)
+        self.upsample = BilinearUp2x()
         self.ffn_norm = RMSNorm2d(dim)
         self.ffn = DWConvFFN(dim=dim, expansion=ffn_expansion)
 
-    def forward(self, z: torch.Tensor, h: torch.Tensor) -> torch.Tensor:
-        if min(z.shape[-2:]) < 2 or min(h.shape[-2:]) < 2:
+    def forward(self, z: torch.Tensor) -> torch.Tensor:
+        if min(z.shape[-2:]) < 2:
             z_coarse = z
-            h_coarse = h
         else:
-            z_coarse = F.max_pool2d(z, kernel_size=2, stride=2)
-            h_coarse = F.max_pool2d(h, kernel_size=2, stride=2)
+            z_coarse = self.z_downsample(z)
 
-        h_coarse_norm = self.h_attn_norm(h_coarse)
-        attn = self.attn(
-            self.z_attn_norm(z_coarse),
-            h_coarse_norm,
-            h_coarse_norm,
-        )
-        attn = F.interpolate(attn, size=z.shape[-2:], mode="bilinear", align_corners=False)
+        z_coarse_norm = self.z_attn_norm(z_coarse)
+        attn = self.attn(z_coarse_norm)
+        if attn.shape[-2:] != z.shape[-2:]:
+            attn = self.upsample(attn, size=z.shape[-2:])
         z = z + attn
         z = z + self.ffn(self.ffn_norm(z))
+        return z
+
+
+class LCRWrapperBlock(nn.Module):
+    def __init__(
+        self,
+        dim: int,
+        heads: int,
+        neighborhood_size: int,
+        ffn_expansion: int,
+        local_block_count: int,
+        global_block_count: int,
+    ):
+        super().__init__()
+        if local_block_count <= 0:
+            raise ValueError("local_block_count must be greater than zero")
+        if global_block_count <= 0:
+            raise ValueError("global_block_count must be greater than zero")
+
+        self.local_blocks = nn.ModuleList(
+            [
+                LocalBlock(
+                    dim=dim,
+                    heads=heads,
+                    neighborhood_size=neighborhood_size,
+                    ffn_expansion=ffn_expansion,
+                )
+                for _ in range(local_block_count)
+            ]
+        )
+        self.global_blocks = nn.ModuleList(
+            [
+                GlobalBlock(
+                    dim=dim,
+                    heads=heads,
+                    ffn_expansion=ffn_expansion,
+                )
+                for _ in range(global_block_count)
+            ]
+        )
+
+    def forward(self, z: torch.Tensor, h: torch.Tensor) -> torch.Tensor:
+        for local_block in self.local_blocks:
+            z = local_block(z, h)
+        for global_block in self.global_blocks:
+            z = global_block(z)
         return z
 
 
@@ -239,46 +264,30 @@ class ConvStem(nn.Module):
     def __init__(self, in_channels: int, dim: int):
         super().__init__()
         self.proj = nn.Conv2d(in_channels, dim, kernel_size=1)
-        self.down1 = nn.Conv2d(dim, dim, kernel_size=2, stride=2)
-        self.down2 = nn.Conv2d(dim, dim, kernel_size=2, stride=2)
+        self.downsample = nn.Conv2d(dim, dim, kernel_size=2, stride=2)
         self.act = nn.GELU()
 
-    def forward(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
         x = self.act(self.proj(x))
-        skip_h2 = self.act(self.down1(x))
-        latent = self.down2(skip_h2)
-        return latent, skip_h2
+        return self.act(self.downsample(x))
 
 
-class ReconstructionTrunk(nn.Module):
+class LatentDecoder(nn.Module):
     def __init__(self, dim: int, ffn_expansion: int):
         super().__init__()
-        self.proj = nn.Conv2d(dim, dim, kernel_size=1)
-        self.upsample_h2 = ShuffleUp2x(dim)
-        self.merge = nn.Conv2d(dim * 3, dim, kernel_size=1)
-        self.block_h2 = ResDWBlock(dim=dim, ffn_expansion=ffn_expansion)
-        self.upsample_full = ShuffleUp2x(dim)
-        self.proj_full = nn.Conv2d(dim, dim, kernel_size=1)
-        self.block_full = PointwiseResBlock(dim=dim, expansion=ffn_expansion)
-        self.out = nn.Conv2d(dim, dim, kernel_size=1)
+        self.full_dim = max(dim // 2, 1)
+        self.block_latent = ResDWBlock(dim=dim, ffn_expansion=ffn_expansion)
+        self.project = nn.Conv2d(dim, self.full_dim, kernel_size=1)
+        self.upsample = BilinearUp2x()
+        self.block_full = PointwiseResBlock(dim=self.full_dim, expansion=ffn_expansion)
+        self.out = nn.Conv2d(self.full_dim, self.full_dim, kernel_size=1)
 
-    def forward(
-        self,
-        z_f: torch.Tensor,
-        *,
-        sar_skip_h2: torch.Tensor,
-        hsi_skip_h2: torch.Tensor,
-        output_size: tuple[int, int],
-    ) -> torch.Tensor:
-        u0 = self.proj(z_f)
-        u1 = self.upsample_h2(u0, target_size=sar_skip_h2.shape[-2:])
-        u1 = self.merge(torch.cat([u1, sar_skip_h2, hsi_skip_h2], dim=1))
-        u1 = self.block_h2(u1)
-
-        u2 = self.upsample_full(u1, target_size=output_size)
-        u2 = self.proj_full(u2)
-        u2 = self.block_full(u2)
-        return self.out(u2)
+    def forward(self, latent: torch.Tensor, output_size: tuple[int, int]) -> torch.Tensor:
+        decoded = self.block_latent(latent)
+        decoded = self.project(decoded)
+        decoded = self.upsample(decoded, size=output_size)
+        decoded = self.block_full(decoded)
+        return self.out(decoded)
 
 
 class LCR(nn.Module):
@@ -292,6 +301,8 @@ class LCR(nn.Module):
         heads: int = 4,
         neighborhood_size: int = 7,
         ffn_expansion: int = 2,
+        local_block_count: int = 1,
+        global_block_count: int = 1,
         mask_bias_init: float = -2.0,
     ):
         super().__init__()
@@ -301,60 +312,54 @@ class LCR(nn.Module):
             raise ValueError("neighborhood_size must be a positive odd integer")
         if num_blocks <= 0:
             raise ValueError("num_blocks must be greater than zero")
+        if local_block_count <= 0:
+            raise ValueError("local_block_count must be greater than zero")
+        if global_block_count <= 0:
+            raise ValueError("global_block_count must be greater than zero")
 
         self.sar_channels = sar_channels
         self.opt_channels = opt_channels
         self.dim = dim
         self.num_blocks = num_blocks
+        self.local_block_count = local_block_count
+        self.global_block_count = global_block_count
         self.neighborhood_size = neighborhood_size
 
         self.sar_stem = ConvStem(in_channels=sar_channels, dim=dim)
         self.hsi_stem = ConvStem(in_channels=opt_channels, dim=dim)
 
-        self.local_blocks = nn.ModuleList(
+        self.wrapper_blocks = nn.ModuleList(
             [
-                LocalBlock(
+                LCRWrapperBlock(
                     dim=dim,
                     heads=heads,
                     neighborhood_size=neighborhood_size,
                     ffn_expansion=ffn_expansion,
-                )
-                for _ in range(num_blocks)
-            ]
-        )
-        self.global_blocks = nn.ModuleList(
-            [
-                GlobalBlock(
-                    dim=dim,
-                    heads=heads,
-                    ffn_expansion=ffn_expansion,
+                    local_block_count=local_block_count,
+                    global_block_count=global_block_count,
                 )
                 for _ in range(num_blocks)
             ]
         )
 
-        self.reconstruction = ReconstructionTrunk(dim=dim, ffn_expansion=ffn_expansion)
+        self.candidate_decoder = LatentDecoder(
+            dim=dim,
+            ffn_expansion=ffn_expansion,
+        )
+        self.mask_decoder = LatentDecoder(
+            dim=dim,
+            ffn_expansion=ffn_expansion,
+        )
 
         self.candidate_head = nn.Sequential(
-            nn.Conv2d(dim, dim, kernel_size=1),
+            nn.Conv2d(self.candidate_decoder.full_dim, self.candidate_decoder.full_dim, kernel_size=1),
             nn.GELU(),
-            nn.Conv2d(dim, opt_channels, kernel_size=1),
+            nn.Conv2d(self.candidate_decoder.full_dim, opt_channels, kernel_size=1),
         )
 
-        mask_hidden = max(dim // 2, 1)
-        self.mask_head_coarse = nn.Sequential(
-            nn.Conv2d(dim, mask_hidden, kernel_size=1),
-            nn.GELU(),
-            nn.Conv2d(mask_hidden, 1, kernel_size=1),
-        )
-        self.mask_head_refine = nn.Sequential(
-            nn.Conv2d(dim + 2, mask_hidden, kernel_size=1),
-            nn.GELU(),
-            nn.Conv2d(mask_hidden, 1, kernel_size=1),
-        )
+        self.mask_out = nn.Conv2d(self.mask_decoder.full_dim, 1, kernel_size=1)
 
-        nn.init.constant_(self.mask_head_coarse[-1].bias, mask_bias_init)
-        nn.init.constant_(self.mask_head_refine[-1].bias, mask_bias_init)
+        nn.init.constant_(self.mask_out.bias, mask_bias_init)
 
     def forward(self, sar: torch.Tensor, cloudy: torch.Tensor) -> torch.Tensor:
         if sar.shape[0] != cloudy.shape[0] or sar.shape[-2:] != cloudy.shape[-2:]:
@@ -365,31 +370,18 @@ class LCR(nn.Module):
             raise ValueError(
                 f"expected cloudy to have {self.opt_channels} channels, got {cloudy.shape[1]}"
             )
+        if sar.shape[-2] % 4 != 0 or sar.shape[-1] % 4 != 0:
+            raise ValueError("LCR expects spatial dimensions divisible by 4")
 
-        z, sar_skip_h2 = self.sar_stem(sar)
-        h, hsi_skip_h2 = self.hsi_stem(cloudy)
+        z = self.sar_stem(sar)
+        h = self.hsi_stem(cloudy)
 
-        for local_block, global_block in zip(self.local_blocks, self.global_blocks, strict=True):
-            z = local_block(z, h)
-            z = global_block(z, h)
+        for wrapper_block in self.wrapper_blocks:
+            z = wrapper_block(z, h)
 
-        reconstruction = self.reconstruction(
-            z,
-            sar_skip_h2=sar_skip_h2,
-            hsi_skip_h2=hsi_skip_h2,
-            output_size=cloudy.shape[-2:],
-        )
-        candidate = self.candidate_head(reconstruction)
-        mask_coarse_logits = self.mask_head_coarse(z)
-        mask_coarse = torch.sigmoid(mask_coarse_logits)
-        mask_coarse_up = F.interpolate(
-            mask_coarse,
-            size=cloudy.shape[-2:],
-            mode="bilinear",
-            align_corners=False,
-        )
-        diff = (candidate - cloudy).abs().mean(dim=1, keepdim=True)
-        mask_logits = self.mask_head_refine(torch.cat([mask_coarse_up, reconstruction, diff], dim=1))
+        output_size = cloudy.shape[-2:]
+        candidate = self.candidate_head(self.candidate_decoder(z, output_size=output_size))
+        mask_logits = self.mask_out(self.mask_decoder(z, output_size=output_size))
         mask = torch.sigmoid(mask_logits)
 
         return (1.0 - mask) * cloudy + mask * candidate
