@@ -4,10 +4,10 @@ import copy
 import json
 import tempfile
 import unittest
+from collections.abc import Sequence
 from pathlib import Path
 from unittest import mock
 
-import numpy as np
 import torch
 from torch import nn
 
@@ -20,10 +20,15 @@ def make_epoch_record(
     train_loss: float,
     val_loss: float,
     val_metrics: dict[str, float] | None = None,
+    train_lrs: Sequence[float] | None = None,
 ) -> dict[str, object]:
+    train_summary: dict[str, object] = {"loss": train_loss, "metrics": {}}
+    if train_lrs is not None:
+        train_summary["lr"] = list(train_lrs)
+
     return {
         "epoch": epoch,
-        "train": {"loss": train_loss, "metrics": {}},
+        "train": train_summary,
         "val": {"loss": val_loss, "metrics": dict(val_metrics or {})},
         "elapsed_sec": 1.0,
     }
@@ -43,6 +48,8 @@ class FakeTrainer:
         optimizer: torch.optim.Optimizer,
         loss,
         metrics,
+        scheduler,
+        scheduler_monitor,
         max_train_samples,
         max_val_samples,
         max_test_samples,
@@ -60,6 +67,8 @@ class FakeTrainer:
         del loss, metrics, max_train_samples, max_val_samples, max_test_samples
         self.model = model
         self.optimizer = optimizer
+        self.scheduler = scheduler
+        self.scheduler_monitor = scheduler_monitor
         self.output_dir = Path(output_dir)
         self.batch_size = batch_size
         self.epochs = epochs
@@ -112,7 +121,7 @@ class FakeTrainer:
         }
 
 
-class SaveHistoryPlotTest(unittest.TestCase):
+class HistoryRecordTest(unittest.TestCase):
     @staticmethod
     def _make_axis() -> mock.Mock:
         axis = mock.Mock()
@@ -122,13 +131,74 @@ class SaveHistoryPlotTest(unittest.TestCase):
         }
         return axis
 
-    def test_save_history_plot_uses_one_subplot_per_metric_and_skips_elapsed_time(self) -> None:
+    def test_flatten_record_keeps_single_scheduler_learning_rate(self) -> None:
+        row = main.flatten_record(
+            make_epoch_record(
+                epoch=2,
+                train_loss=0.8,
+                val_loss=0.4,
+                train_lrs=[1e-3],
+            ),
+            global_step=20,
+        )
+
+        self.assertEqual(row["train_lr"], 1e-3)
+        self.assertNotIn("train_lr_group_0", row)
+
+    def test_load_history_from_metrics_jsonl_restores_multi_group_learning_rates(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            path = Path(tmp_dir) / "metrics.jsonl"
+            path.write_text(
+                "\n".join(
+                    [
+                        json.dumps(
+                            {
+                                "kind": "train_epoch",
+                                "epoch": 1,
+                                "loss": 1.2,
+                                "metrics": {},
+                                "lr": [1e-3, 5e-4],
+                            }
+                        ),
+                        json.dumps(
+                            {
+                                "kind": "validation",
+                                "epoch": 1,
+                                "loss": 0.5,
+                                "metrics": {"mae": 0.6},
+                            }
+                        ),
+                    ]
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            history = main.load_history_from_metrics_jsonl(path)
+
+        self.assertEqual(
+            history,
+            [
+                {
+                    "epoch": 1,
+                    "global_step": 1,
+                    "train_loss": 1.2,
+                    "train_lr_group_0": 1e-3,
+                    "train_lr_group_1": 5e-4,
+                    "val_loss": 0.5,
+                    "val_mae": 0.6,
+                }
+            ],
+        )
+
+    def test_save_history_plot_writes_loss_lr_then_metric_plots(self) -> None:
         history = [
             {
                 "epoch": 1,
                 "global_step": 10,
                 "elapsed_sec": 99.0,
                 "train_loss": 1.2,
+                "train_lr": 1e-3,
                 "val_loss": 0.5,
                 "val_mae": 0.6,
             },
@@ -137,40 +207,57 @@ class SaveHistoryPlotTest(unittest.TestCase):
                 "global_step": 20,
                 "elapsed_sec": 101.0,
                 "train_loss": 1.0,
+                "train_lr": 5e-4,
                 "val_loss": 0.4,
                 "val_mae": 0.5,
             },
         ]
-        fig = mock.Mock()
-        axes = np.array([self._make_axis() for _ in range(3)], dtype=object)
 
         with (
             tempfile.TemporaryDirectory() as tmp_dir,
-            mock.patch("matplotlib.pyplot.subplots", return_value=(fig, axes)) as subplots,
+            mock.patch.object(main, "_save_metric_plot") as save_metric_plot,
+        ):
+            path = Path(tmp_dir) / "history.png"
+            main.save_history_plot(history, path)
+
+        self.assertEqual(
+            [call.kwargs["metric"] for call in save_metric_plot.call_args_list],
+            ["loss", "lr", "mae"],
+        )
+        self.assertTrue(all(call.kwargs["path"] == path for call in save_metric_plot.call_args_list))
+
+    def test_save_metric_plot_uses_lr_group_label_and_filename(self) -> None:
+        history = [
+            {
+                "epoch": 1,
+                "global_step": 10,
+                "train_lr_group_0": 1e-3,
+                "train_lr_group_1": 5e-4,
+            },
+            {
+                "epoch": 2,
+                "global_step": 20,
+                "train_lr_group_0": 8e-4,
+                "train_lr_group_1": 4e-4,
+            },
+        ]
+        fig = mock.Mock()
+        axis = self._make_axis()
+
+        with (
+            tempfile.TemporaryDirectory() as tmp_dir,
+            mock.patch("matplotlib.pyplot.subplots", return_value=(fig, axis)),
             mock.patch("matplotlib.pyplot.close") as close_plot,
         ):
-            main.save_history_plot(history, Path(tmp_dir) / "history.png")
+            path = Path(tmp_dir) / "history.png"
+            main._save_metric_plot(history, path=path, metric="lr_group_1")
 
-        subplots.assert_called_once_with(3, 1, figsize=(10, 10.8), sharex=True)
-        fig.suptitle.assert_called_once_with("training and evaluation history")
-        fig.tight_layout.assert_called_once_with(rect=(0, 0, 1, 0.98))
-        fig.savefig.assert_called_once()
+        axis.set_title.assert_called_once_with("LR (Group 1)")
+        axis.plot.assert_called_once()
+        self.assertEqual(axis.plot.call_args.args[0], (1, 2))
+        self.assertEqual(axis.plot.call_args.args[1], (5e-4, 4e-4))
+        self.assertEqual(Path(fig.savefig.call_args.args[0]), Path(tmp_dir) / "history_lr_group_1.png")
         close_plot.assert_called_once_with(fig)
-
-        expected_titles = ["train_loss", "val_loss", "val_mae"]
-        expected_values = [[1.2, 1.0], [0.5, 0.4], [0.6, 0.5]]
-        plotted_values = []
-        for axis, title, values in zip(axes, expected_titles, expected_values):
-            axis.set_title.assert_called_once_with(title)
-            axis.set_ylabel.assert_called_once_with("value")
-            axis.grid.assert_called_once_with(True, alpha=0.25)
-            axis.plot.assert_called_once()
-            self.assertEqual(axis.plot.call_args.args[0], [1, 2])
-            self.assertEqual(axis.plot.call_args.args[1], values)
-            plotted_values.append(axis.plot.call_args.args[1])
-
-        self.assertNotIn([99.0, 101.0], plotted_values)
-        axes[-1].set_xlabel.assert_called_once_with("epoch")
 
 
 class MainTrainingFlowTest(unittest.TestCase):
@@ -250,21 +337,15 @@ class MainTrainingFlowTest(unittest.TestCase):
             self.assertFalse((output_dir / "epoch-0003.pt").exists())
 
             self.assertEqual(result["trainer"].test_calls, 0)
-            self.assertEqual(result["build_loader"].call_count, 2)
-            first_call = result["build_loader"].call_args_list[0]
-            second_call = result["build_loader"].call_args_list[1]
-            self.assertEqual(first_call.kwargs["split"], "validation")
-            self.assertEqual(first_call.kwargs["epoch_index"], 0)
-            self.assertEqual(second_call.kwargs["split"], "validation")
-            self.assertEqual(second_call.kwargs["epoch_index"], 1)
-
             self.assertEqual(result["save_examples"].call_count, 2)
             first_output_dir = result["save_examples"].call_args_list[0].kwargs["output_dir"]
             second_output_dir = result["save_examples"].call_args_list[1].kwargs["output_dir"]
-            self.assertEqual(first_output_dir, output_dir / "examples" / "best" / "epoch_001")
-            self.assertEqual(second_output_dir, output_dir / "examples" / "best" / "epoch_002")
-            self.assertEqual(result["save_examples"].call_args_list[0].kwargs["stage"], "val")
-            self.assertEqual(result["save_examples"].call_args_list[1].kwargs["stage"], "val")
+            self.assertEqual(first_output_dir, output_dir / "examples" / "epoch_001" / "test")
+            self.assertEqual(second_output_dir, output_dir / "examples" / "epoch_002" / "test")
+            self.assertEqual(result["save_examples"].call_args_list[0].kwargs["split"], "test")
+            self.assertEqual(result["save_examples"].call_args_list[1].kwargs["split"], "test")
+            self.assertEqual(result["save_examples"].call_args_list[0].kwargs["epoch"], 1)
+            self.assertEqual(result["save_examples"].call_args_list[1].kwargs["epoch"], 2)
 
     def test_after_test_mode_runs_test_once_and_saves_test_examples(self) -> None:
         records = [
@@ -283,15 +364,34 @@ class MainTrainingFlowTest(unittest.TestCase):
             )
 
             self.assertEqual(result["trainer"].test_calls, 1)
-            self.assertEqual(result["build_loader"].call_count, 1)
-            self.assertEqual(result["build_loader"].call_args.kwargs["split"], "test")
-            self.assertEqual(result["build_loader"].call_args.kwargs["epoch_index"], 1)
             self.assertEqual(result["save_examples"].call_count, 1)
-            self.assertEqual(result["save_examples"].call_args.kwargs["stage"], "test")
+            self.assertEqual(result["save_examples"].call_args.kwargs["split"], "test")
+            self.assertEqual(result["save_examples"].call_args.kwargs["epoch"], 2)
             self.assertEqual(
                 result["save_examples"].call_args.kwargs["output_dir"],
-                output_dir / "examples" / "test",
+                output_dir / "examples" / "epoch_002" / "test",
             )
+
+    def test_build_trainer_passes_scheduler_hooks_to_trainer(self) -> None:
+        model = nn.Linear(1, 1)
+        scheduler = object()
+
+        with (
+            mock.patch.object(main, "Trainer", FakeTrainer),
+            mock.patch.object(main, "build_model", return_value=model),
+            mock.patch.object(main, "build_optimizer", side_effect=lambda current_model: torch.optim.SGD(current_model.parameters(), lr=0.1)),
+            mock.patch.object(main, "build_loss", return_value=lambda prediction, batch: torch.tensor(0.0)),
+            mock.patch.object(main, "build_metrics", return_value={}),
+            mock.patch.object(main, "build_scheduler", return_value=scheduler),
+            mock.patch.object(main, "build_scheduler_monitor", return_value="val.metrics.mae"),
+            mock.patch.object(main, "seed_everything"),
+            mock.patch.object(main, "print_hf_auth_status"),
+            mock.patch.object(main.torch.cuda, "is_available", return_value=False),
+        ):
+            trainer = main.build_trainer(output_dir=Path("artifacts"))
+
+        self.assertIs(trainer.scheduler, scheduler)
+        self.assertEqual(trainer.scheduler_monitor, "val.metrics.mae")
 
     def test_custom_best_selector_can_change_best_epoch(self) -> None:
         records = [
@@ -408,6 +508,8 @@ class MainTrainingFlowTest(unittest.TestCase):
         build_loader = mock.Mock(side_effect=lambda *args, **kwargs: {"loader": kwargs})
         save_examples = mock.Mock(return_value=[])
         history_plot = mock.Mock()
+        build_scheduler = mock.Mock(return_value=None)
+        build_scheduler_monitor = mock.Mock(return_value=None)
 
         model = nn.Linear(1, 1)
         if selector is None:
@@ -419,6 +521,8 @@ class MainTrainingFlowTest(unittest.TestCase):
             mock.patch.object(main, "build_optimizer", side_effect=lambda current_model: torch.optim.SGD(current_model.parameters(), lr=0.1)),
             mock.patch.object(main, "build_loss", return_value=lambda prediction, batch: torch.tensor(0.0)),
             mock.patch.object(main, "build_metrics", return_value={}),
+            mock.patch.object(main, "build_scheduler", build_scheduler),
+            mock.patch.object(main, "build_scheduler_monitor", build_scheduler_monitor),
             mock.patch.object(main, "build_best_epoch_selector", return_value=selector),
             mock.patch.object(main, "build_loader", build_loader),
             mock.patch.object(main, "save_restoration_examples", save_examples),
@@ -446,6 +550,8 @@ class MainTrainingFlowTest(unittest.TestCase):
         return {
             "trainer": FakeTrainer.instances[-1],
             "build_loader": build_loader,
+            "build_scheduler": build_scheduler,
+            "build_scheduler_monitor": build_scheduler_monitor,
             "save_examples": save_examples,
             "history_plot": history_plot,
         }

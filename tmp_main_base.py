@@ -15,6 +15,8 @@ from torch import nn
 _DEFAULT_BUILD_LOSS = shared_main.build_loss
 _DEFAULT_BUILD_METRICS = shared_main.build_metrics
 _DEFAULT_BUILD_BEST_EPOCH_SELECTOR = shared_main.build_best_epoch_selector
+_DEFAULT_BUILD_SCHEDULER = shared_main.build_scheduler
+_DEFAULT_BUILD_SCHEDULER_MONITOR = shared_main.build_scheduler_monitor
 
 
 # 이 파일은 그대로 실행하는 용도가 아니라 개인 작업용 템플릿이다.
@@ -58,6 +60,17 @@ def build_best_epoch_selector() -> shared_main.BestEpochSelector:
     return _DEFAULT_BUILD_BEST_EPOCH_SELECTOR()
 
 
+def build_scheduler(optimizer: torch.optim.Optimizer) -> torch.optim.lr_scheduler.LRScheduler | None:
+    # scheduler가 필요하면 `tmp_main.py`에서 이 함수를 덮어써서 optimizer 기준으로 붙이면 된다.
+    # 기본 템플릿은 공용 `main.py`와 마찬가지로 scheduler 없이 둔다.
+    return _DEFAULT_BUILD_SCHEDULER(optimizer)
+
+
+def build_scheduler_monitor() -> str | None:
+    # ReduceLROnPlateau를 쓸 때만 monitor 경로를 지정하면 된다.
+    return _DEFAULT_BUILD_SCHEDULER_MONITOR()
+
+
 @contextmanager
 def use_local_builds() -> Iterator[None]:
     # 공용 러너는 `main.py`에 두고,
@@ -70,6 +83,8 @@ def use_local_builds() -> Iterator[None]:
         "build_loss": build_loss,
         "build_metrics": build_metrics,
         "build_best_epoch_selector": build_best_epoch_selector,
+        "build_scheduler": build_scheduler,
+        "build_scheduler_monitor": build_scheduler_monitor,
     }
     originals = {name: getattr(shared_main, name) for name in overrides}
 

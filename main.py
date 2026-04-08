@@ -12,6 +12,7 @@ import numpy as np
 import torch
 from huggingface_hub import get_token
 from torch import nn
+from torch.optim.lr_scheduler import LRScheduler
 
 from cr_train import Trainer
 from cr_train.data import DATASET_ID, build_dataloader
@@ -146,6 +147,19 @@ def build_best_epoch_selector() -> BestEpochSelector:
     )
 
 
+def build_scheduler(optimizer: torch.optim.Optimizer) -> LRScheduler | None:
+    # scheduler가 필요하면 optimizer를 받아 여기서 연결한다.
+    # 기본값은 scheduler 없이 학습한다.
+    del optimizer
+    return None
+
+
+def build_scheduler_monitor() -> str | None:
+    # ReduceLROnPlateau를 쓸 때만 monitor 경로를 넘기면 된다.
+    # 기본값 None이면 cr-train 기본 monitor(`val.loss`)를 따른다.
+    return None
+
+
 def build_trainer(
     *,
     batch_size: int = 8,
@@ -170,11 +184,14 @@ def build_trainer(
 
     model = build_model().to(resolve_device())
     optimizer = build_optimizer(model)
+    scheduler = build_scheduler(optimizer)
     return Trainer(
         model=model,
         optimizer=optimizer,
         loss=build_loss(),
         metrics=build_metrics(),
+        scheduler=scheduler,
+        scheduler_monitor=build_scheduler_monitor(),
         max_train_samples=train_max_samples,
         max_val_samples=val_max_samples,
         max_test_samples=test_max_samples,
@@ -189,6 +206,34 @@ def build_trainer(
         train_random_flip=train_random_flip,
         train_random_rot90=train_random_rot90,
     )
+
+
+def _normalize_learning_rates(values: Any) -> list[float]:
+    if not isinstance(values, Sequence) or isinstance(values, (str, bytes)):
+        return []
+
+    learning_rates: list[float] = []
+    for value in values:
+        learning_rates.append(float(value))
+    return learning_rates
+
+
+def _write_learning_rates(
+    row: dict[str, int | float],
+    *,
+    stage: Literal["train", "val", "test"],
+    values: Any,
+) -> None:
+    learning_rates = _normalize_learning_rates(values)
+    if not learning_rates:
+        return
+
+    if len(learning_rates) == 1:
+        row[f"{stage}_lr"] = learning_rates[0]
+        return
+
+    for index, learning_rate in enumerate(learning_rates):
+        row[f"{stage}_lr_group_{index}"] = learning_rate
 
 
 def flatten_record(record: Mapping[str, Any], *, global_step: int) -> dict[str, int | float]:
@@ -230,6 +275,9 @@ def write_stage_summary(
 ) -> None:
     if "loss" in summary:
         row[f"{stage}_loss"] = float(summary["loss"])
+
+    if "lr" in summary:
+        _write_learning_rates(row, stage=stage, values=summary["lr"])
 
     metrics = summary.get("metrics", {})
     if isinstance(metrics, Mapping):
@@ -293,6 +341,13 @@ def split_history_metric_key(key: str) -> tuple[Literal["train", "val", "test"],
 
 
 def format_metric_label(metric: str) -> str:
+    if metric == "lr":
+        return "LR"
+    if metric.startswith("lr_group_"):
+        group_index = metric.removeprefix("lr_group_")
+        if group_index.isdigit():
+            return f"LR (Group {int(group_index)})"
+
     labels = {
         "loss": "Loss",
         "mae": "MAE",
@@ -427,10 +482,19 @@ def _collect_history_metric_names(history: Sequence[Mapping[str, int | float]]) 
             stage, metric = match
             grouped_metrics.setdefault(metric, set()).add(stage)
 
-    return sorted(
-        grouped_metrics,
-        key=lambda metric: (metric != "loss", metric),
-    )
+    def metric_sort_key(metric: str) -> tuple[int, int, str]:
+        if metric == "loss":
+            return (0, 0, metric)
+        if metric == "lr":
+            return (1, 0, metric)
+        if metric.startswith("lr_group_"):
+            group_index = metric.removeprefix("lr_group_")
+            if group_index.isdigit():
+                return (1, int(group_index) + 1, metric)
+            return (1, 10_000, metric)
+        return (2, 0, metric)
+
+    return sorted(grouped_metrics, key=metric_sort_key)
 
 
 def _history_metric_values(
