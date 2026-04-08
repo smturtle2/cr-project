@@ -47,9 +47,11 @@ class BilinearUp2x(nn.Module):
         return F.interpolate(x, scale_factor=2.0, mode="bilinear", align_corners=False)
 
 
-class NeighborhoodCrossAttention(nn.Module):
+class NeighborhoodAttn(nn.Module):
     def __init__(self, dim: int, heads: int, neighborhood_size: int):
         super().__init__()
+        if dim % heads != 0:
+            raise ValueError("dim must be divisible by heads")
         if neighborhood_size <= 0 or neighborhood_size % 2 == 0:
             raise ValueError("neighborhood_size must be a positive odd integer")
         self.dim = dim
@@ -65,9 +67,19 @@ class NeighborhoodCrossAttention(nn.Module):
         offset_grid = torch.stack(torch.meshgrid(offsets, offsets, indexing="ij"), dim=-1)
         self.register_buffer("offsets", offset_grid.view(-1, 2), persistent=False)
 
-    def forward(self, query: torch.Tensor, key: torch.Tensor, value: torch.Tensor) -> torch.Tensor:
+    def forward(
+        self,
+        query: torch.Tensor,
+        key: torch.Tensor | None = None,
+        value: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        if key is None and value is None:
+            key = query
+            value = query
+        elif key is None or value is None:
+            raise ValueError("neighborhood attn expects both key and value when used as cross attn")
         if query.shape[-2:] != key.shape[-2:] or key.shape[-2:] != value.shape[-2:]:
-            raise ValueError("neighborhood cross attention expects matching spatial sizes")
+            raise ValueError("neighborhood attn expects matching spatial sizes")
 
         q = self.q_proj(query)
         k = self.k_proj(key)
@@ -111,9 +123,11 @@ class NeighborhoodCrossAttention(nn.Module):
         return self.out_proj(out)
 
 
-class GlobalSelfAttention(nn.Module):
+class GlobalSelfAttn(nn.Module):
     def __init__(self, dim: int, heads: int):
         super().__init__()
+        if dim % heads != 0:
+            raise ValueError("dim must be divisible by heads")
         self.dim = dim
         self.heads = heads
         self.scale = (dim // heads) ** -0.5
@@ -144,7 +158,7 @@ class LocalBlock(nn.Module):
         super().__init__()
         self.z_attn_norm = RMSNorm2d(dim)
         self.h_attn_norm = RMSNorm2d(dim)
-        self.attn = NeighborhoodCrossAttention(
+        self.attn = NeighborhoodAttn(
             dim=dim,
             heads=heads,
             neighborhood_size=neighborhood_size,
@@ -163,7 +177,7 @@ class GlobalBlock(nn.Module):
     def __init__(self, dim: int, heads: int, ffn_expansion: int):
         super().__init__()
         self.z_attn_norm = RMSNorm2d(dim)
-        self.attn = GlobalSelfAttention(dim=dim, heads=heads)
+        self.attn = GlobalSelfAttn(dim=dim, heads=heads)
         self.z_downsample = nn.Conv2d(dim, dim, kernel_size=2, stride=2)
         self.upsample = BilinearUp2x()
         self.ffn_norm = RMSNorm2d(dim)
@@ -260,16 +274,23 @@ class PointwiseResBlock(nn.Module):
         return x + self.net(self.norm(x))
 
 
-class ConvStem(nn.Module):
-    def __init__(self, in_channels: int, dim: int):
+class AttnStem(nn.Module):
+    def __init__(self, in_channels: int, dim: int, heads: int, neighborhood_size: int):
         super().__init__()
         self.proj = nn.Conv2d(in_channels, dim, kernel_size=1)
         self.downsample = nn.Conv2d(dim, dim, kernel_size=2, stride=2)
+        self.attn_norm = RMSNorm2d(dim)
+        self.attn = NeighborhoodAttn(
+            dim=dim,
+            heads=heads,
+            neighborhood_size=neighborhood_size,
+        )
         self.act = nn.GELU()
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         x = self.act(self.proj(x))
-        return self.act(self.downsample(x))
+        x = self.act(self.downsample(x))
+        return x + self.attn(self.attn_norm(x))
 
 
 class LatentDecoder(nn.Module):
@@ -325,8 +346,18 @@ class LCR(nn.Module):
         self.global_block_count = global_block_count
         self.neighborhood_size = neighborhood_size
 
-        self.sar_stem = ConvStem(in_channels=sar_channels, dim=dim)
-        self.hsi_stem = ConvStem(in_channels=opt_channels, dim=dim)
+        self.sar_stem = AttnStem(
+            in_channels=sar_channels,
+            dim=dim,
+            heads=heads,
+            neighborhood_size=neighborhood_size,
+        )
+        self.hsi_stem = AttnStem(
+            in_channels=opt_channels,
+            dim=dim,
+            heads=heads,
+            neighborhood_size=neighborhood_size,
+        )
 
         self.wrapper_blocks = nn.ModuleList(
             [
