@@ -3,7 +3,13 @@ from __future__ import annotations
 import math
 
 import torch
-from torch.optim.lr_scheduler import LRScheduler
+from torch.optim.lr_scheduler import (
+    CosineAnnealingLR,
+    CosineAnnealingWarmRestarts,
+    LRScheduler,
+    LinearLR,
+    SequentialLR,
+)
 
 
 class _LCRWarmupCosineLR(LRScheduler):
@@ -69,4 +75,98 @@ def build_lcr_warmup_cosine_scheduler(
         warmup_epochs=warmup_epochs,
         max_lr=max_lr,
         min_lr=min_lr,
+    )
+
+
+def build_lcr_warmup_cawr_scheduler(
+    optimizer: torch.optim.Optimizer,
+    *,
+    warmup_epochs: int = 8,
+    peak_lr: float = 1.6e-4,
+    start_lr: float = 1e-5,
+    restart_t0: int = 15,
+    restart_t_mult: int = 2,
+    eta_min: float = 1.2e-5,
+) -> LRScheduler:
+    if warmup_epochs <= 0:
+        raise ValueError("warmup_epochs must be greater than zero")
+    if peak_lr <= 0.0:
+        raise ValueError("peak_lr must be greater than zero")
+    if start_lr <= 0.0:
+        raise ValueError("start_lr must be greater than zero")
+    if start_lr > peak_lr:
+        raise ValueError("start_lr must be smaller than or equal to peak_lr")
+    if restart_t0 <= 0:
+        raise ValueError("restart_t0 must be greater than zero")
+    if restart_t_mult <= 0:
+        raise ValueError("restart_t_mult must be greater than zero")
+    if eta_min < 0.0:
+        raise ValueError("eta_min must be greater than or equal to zero")
+    if eta_min >= peak_lr:
+        raise ValueError("eta_min must be smaller than peak_lr")
+
+    for param_group in optimizer.param_groups:
+        param_group["lr"] = peak_lr
+
+    warmup = LinearLR(
+        optimizer,
+        start_factor=start_lr / peak_lr,
+        end_factor=1.0,
+        total_iters=warmup_epochs,
+    )
+    restarts = CosineAnnealingWarmRestarts(
+        optimizer,
+        T_0=restart_t0,
+        T_mult=restart_t_mult,
+        eta_min=eta_min,
+    )
+    return SequentialLR(
+        optimizer,
+        schedulers=[warmup, restarts],
+        milestones=[warmup_epochs],
+    )
+
+
+def build_lcr_warmup_cosine_decay_scheduler(
+    optimizer: torch.optim.Optimizer,
+    *,
+    total_epochs: int,
+    warmup_epochs: int = 8,
+    peak_lr: float = 1.6e-4,
+    start_lr: float = 1e-5,
+    eta_min: float = 0.0,
+) -> LRScheduler:
+    if total_epochs <= warmup_epochs:
+        raise ValueError("total_epochs must be greater than warmup_epochs")
+    if warmup_epochs <= 0:
+        raise ValueError("warmup_epochs must be greater than zero")
+    if peak_lr <= 0.0:
+        raise ValueError("peak_lr must be greater than zero")
+    if start_lr <= 0.0:
+        raise ValueError("start_lr must be greater than zero")
+    if start_lr > peak_lr:
+        raise ValueError("start_lr must be smaller than or equal to peak_lr")
+    if eta_min < 0.0:
+        raise ValueError("eta_min must be greater than or equal to zero")
+    if eta_min >= peak_lr:
+        raise ValueError("eta_min must be smaller than peak_lr")
+
+    for param_group in optimizer.param_groups:
+        param_group["lr"] = peak_lr
+
+    warmup = LinearLR(
+        optimizer,
+        start_factor=start_lr / peak_lr,
+        end_factor=1.0,
+        total_iters=warmup_epochs,
+    )
+    cosine = CosineAnnealingLR(
+        optimizer,
+        T_max=total_epochs - warmup_epochs,
+        eta_min=eta_min,
+    )
+    return SequentialLR(
+        optimizer,
+        schedulers=[warmup, cosine],
+        milestones=[warmup_epochs],
     )
