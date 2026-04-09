@@ -337,7 +337,7 @@ requires-dist = [
 [[package]]
 name = "cr-train"
 version = "0.1.0"
-source = { git = "https://github.com/smturtle2/cr-train.git#541be1c2dc6bc0e011c3694150cebc8e0234803e" }
+source = { git = "https://github.com/smturtle2/cr-train.git#e64f4c7b0b69da219e2c95579cc9c7d69dc71348" }
 dependencies = [
     { name = "datasets" },
     { name = "numpy" },
