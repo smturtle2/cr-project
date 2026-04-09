@@ -49,6 +49,7 @@ class FakeTrainer:
         loss,
         metrics,
         scheduler,
+        scheduler_timing,
         scheduler_monitor,
         max_train_samples,
         max_val_samples,
@@ -56,6 +57,7 @@ class FakeTrainer:
         output_dir,
         cache_dir,
         batch_size,
+        accum_steps,
         epochs,
         seed,
         num_workers,
@@ -68,9 +70,11 @@ class FakeTrainer:
         self.model = model
         self.optimizer = optimizer
         self.scheduler = scheduler
+        self.scheduler_timing = scheduler_timing
         self.scheduler_monitor = scheduler_monitor
         self.output_dir = Path(output_dir)
         self.batch_size = batch_size
+        self.accum_steps = accum_steps
         self.epochs = epochs
         self.seed = seed
         self.multiprocessing_context = multiprocessing_context
@@ -372,7 +376,7 @@ class MainTrainingFlowTest(unittest.TestCase):
                 output_dir / "examples" / "epoch_002" / "test",
             )
 
-    def test_build_trainer_passes_scheduler_hooks_to_trainer(self) -> None:
+    def test_build_trainer_passes_scheduler_options_to_trainer(self) -> None:
         model = nn.Linear(1, 1)
         scheduler = object()
 
@@ -388,9 +392,15 @@ class MainTrainingFlowTest(unittest.TestCase):
             mock.patch.object(main, "print_hf_auth_status"),
             mock.patch.object(main.torch.cuda, "is_available", return_value=False),
         ):
-            trainer = main.build_trainer(output_dir=Path("artifacts"))
+            trainer = main.build_trainer(
+                output_dir=Path("artifacts"),
+                accum_steps=4,
+                scheduler_timing="after_optimizer_step",
+            )
 
         self.assertIs(trainer.scheduler, scheduler)
+        self.assertEqual(trainer.accum_steps, 4)
+        self.assertEqual(trainer.scheduler_timing, "after_optimizer_step")
         self.assertEqual(trainer.scheduler_monitor, "val.metrics.mae")
 
     def test_custom_best_selector_can_change_best_epoch(self) -> None:

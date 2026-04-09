@@ -68,6 +68,7 @@ def build_scheduler(optimizer: torch.optim.Optimizer) -> torch.optim.lr_schedule
 
 def build_scheduler_monitor() -> str | None:
     # ReduceLROnPlateau를 쓸 때만 monitor 경로를 지정하면 된다.
+    # 최신 cr-train에서는 scheduler_timing="after_validation"일 때만 사용된다.
     return _DEFAULT_BUILD_SCHEDULER_MONITOR()
 
 
@@ -102,12 +103,14 @@ def main() -> None:
     with use_local_builds():
         shared_main.main(
             batch_size=4,
+            accum_steps=1,
             seed=42,
             max_epochs=10,
             train_max_samples=4096,
             val_max_samples=512,
             test_max_samples=512,
             num_workers="auto",
+            scheduler_timing="after_validation",
             output_dir=Path("artifacts"),
             save_every_n_epochs=0,
             run_test=True,

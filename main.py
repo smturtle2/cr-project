@@ -55,6 +55,7 @@ Batch = dict[str, Any]
 LossFn = Callable[[torch.Tensor, Batch], torch.Tensor]
 MetricFn = Callable[[torch.Tensor, Batch], torch.Tensor]
 StepRecord = Mapping[str, Any]
+SchedulerTiming = Literal["after_validation", "before_optimizer_step", "after_optimizer_step"]
 
 
 @dataclass(slots=True, frozen=True)
@@ -156,6 +157,7 @@ def build_scheduler(optimizer: torch.optim.Optimizer) -> LRScheduler | None:
 
 def build_scheduler_monitor() -> str | None:
     # ReduceLROnPlateau를 쓸 때만 monitor 경로를 넘기면 된다.
+    # 최신 cr-train에서는 scheduler_timing="after_validation"일 때만 유효하다.
     # 기본값 None이면 cr-train 기본 monitor(`val.loss`)를 따른다.
     return None
 
@@ -163,6 +165,7 @@ def build_scheduler_monitor() -> str | None:
 def build_trainer(
     *,
     batch_size: int = 8,
+    accum_steps: int = 1,
     seed: int = 42,
     max_epochs: int = 10,
     train_max_samples: int = 16384,
@@ -172,6 +175,7 @@ def build_trainer(
     cache_dir: str | Path | None = None,
     num_workers: int | str = "auto",
     multiprocessing_context: str | None = None,
+    scheduler_timing: SchedulerTiming = "after_validation",
     train_crop_size: int | None = 128,
     train_random_flip: bool = True,
     train_random_rot90: bool = True,
@@ -191,6 +195,7 @@ def build_trainer(
         loss=build_loss(),
         metrics=build_metrics(),
         scheduler=scheduler,
+        scheduler_timing=scheduler_timing,
         scheduler_monitor=build_scheduler_monitor(),
         max_train_samples=train_max_samples,
         max_val_samples=val_max_samples,
@@ -198,6 +203,7 @@ def build_trainer(
         output_dir=output_dir,
         cache_dir=cache_dir,
         batch_size=batch_size,
+        accum_steps=accum_steps,
         epochs=max_epochs,
         seed=seed,
         num_workers=num_workers,
@@ -239,6 +245,7 @@ def _write_learning_rates(
 def flatten_record(record: Mapping[str, Any], *, global_step: int) -> dict[str, int | float]:
     # epoch 단위 결과를 plot용 row 하나로 바꾼다.
     # Trainer가 이미 사람이 읽기 좋은 요약을 출력하므로, 여기서는 시각화에 필요한 값만 남긴다.
+    # 최신 cr-train에서 global_step은 micro-batch가 아니라 optimizer update 수다.
     # 최신 cr-train은 epoch 전체 소요 시간도 함께 주므로, 표/그래프에서 같이 볼 수 있게 보존한다.
     row: dict[str, int | float] = {
         "epoch": int(record["epoch"]),
@@ -287,6 +294,8 @@ def write_stage_summary(
 
 def load_history_from_metrics_jsonl(path: str | Path) -> list[dict[str, int | float]]:
     # train/validation/test 이벤트 로그를 plot용 sparse epoch row로 다시 조립한다.
+    # metrics.jsonl epoch 요약에는 optimizer update 기준 global_step이 따로 없으므로
+    # 여기서는 실제 step 복원이 아니라 epoch 번호를 fallback 값으로 넣는다.
     path = Path(path)
     merged_rows: dict[int, dict[str, int | float]] = {}
     test_rows: list[dict[str, int | float]] = []
@@ -1197,6 +1206,7 @@ def finalize_after_training(
 def main(
     *,
     batch_size: int = 8,
+    accum_steps: int = 1,
     seed: int = 42,
     max_epochs: int = 10,
     train_max_samples: int = 16384,
@@ -1207,6 +1217,7 @@ def main(
     resume: str | Path | None = None,
     num_workers: int | str = "auto",
     multiprocessing_context: str | None = None,
+    scheduler_timing: SchedulerTiming = "after_validation",
     train_crop_size: int | None = 128,
     train_random_flip: bool = True,
     train_random_rot90: bool = True,
@@ -1235,6 +1246,7 @@ def main(
 
     trainer = build_trainer(
         batch_size=batch_size,
+        accum_steps=accum_steps,
         seed=seed,
         max_epochs=max_epochs,
         train_max_samples=train_max_samples,
@@ -1244,6 +1256,7 @@ def main(
         cache_dir=cache_dir,
         num_workers=num_workers,
         multiprocessing_context=multiprocessing_context,
+        scheduler_timing=scheduler_timing,
         train_crop_size=train_crop_size,
         train_random_flip=train_random_flip,
         train_random_rot90=train_random_rot90,
