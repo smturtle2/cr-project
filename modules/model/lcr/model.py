@@ -11,6 +11,12 @@ def _reshape_heads(x: torch.Tensor, heads: int) -> torch.Tensor:
     return x.view(batch, tokens, heads, head_dim).transpose(1, 2)
 
 
+def _validate_dropout_prob(name: str, value: float) -> float:
+    if not 0.0 <= value < 1.0:
+        raise ValueError(f"{name} must be in [0.0, 1.0), got {value}")
+    return value
+
+
 class RMSNorm2d(nn.Module):
     def __init__(self, channels: int, eps: float = 1e-8):
         super().__init__()
@@ -154,8 +160,16 @@ class GlobalSelfAttn(nn.Module):
 
 
 class LocalBlock(nn.Module):
-    def __init__(self, dim: int, heads: int, neighborhood_size: int, ffn_expansion: int):
+    def __init__(
+        self,
+        dim: int,
+        heads: int,
+        neighborhood_size: int,
+        ffn_expansion: int,
+        dropout: float = 0.0,
+    ):
         super().__init__()
+        dropout = _validate_dropout_prob("dropout", dropout)
         self.z_attn_norm = RMSNorm2d(dim)
         self.h_attn_norm = RMSNorm2d(dim)
         self.attn = NeighborhoodAttn(
@@ -163,25 +177,36 @@ class LocalBlock(nn.Module):
             heads=heads,
             neighborhood_size=neighborhood_size,
         )
+        self.attn_dropout = nn.Dropout(p=dropout)
         self.ffn_norm = RMSNorm2d(dim)
         self.ffn = DWConvFFN(dim=dim, expansion=ffn_expansion)
+        self.ffn_dropout = nn.Dropout(p=dropout)
 
     def forward(self, z: torch.Tensor, h: torch.Tensor) -> torch.Tensor:
         h_norm = self.h_attn_norm(h)
-        z = z + self.attn(self.z_attn_norm(z), h_norm, h_norm)
-        z = z + self.ffn(self.ffn_norm(z))
+        z = z + self.attn_dropout(self.attn(self.z_attn_norm(z), h_norm, h_norm))
+        z = z + self.ffn_dropout(self.ffn(self.ffn_norm(z)))
         return z
 
 
 class GlobalBlock(nn.Module):
-    def __init__(self, dim: int, heads: int, ffn_expansion: int):
+    def __init__(
+        self,
+        dim: int,
+        heads: int,
+        ffn_expansion: int,
+        dropout: float = 0.0,
+    ):
         super().__init__()
+        dropout = _validate_dropout_prob("dropout", dropout)
         self.z_attn_norm = RMSNorm2d(dim)
         self.attn = GlobalSelfAttn(dim=dim, heads=heads)
+        self.attn_dropout = nn.Dropout(p=dropout)
         self.z_downsample = nn.Conv2d(dim, dim, kernel_size=2, stride=2)
         self.upsample = BilinearUp2x()
         self.ffn_norm = RMSNorm2d(dim)
         self.ffn = DWConvFFN(dim=dim, expansion=ffn_expansion)
+        self.ffn_dropout = nn.Dropout(p=dropout)
 
     def forward(self, z: torch.Tensor) -> torch.Tensor:
         if min(z.shape[-2:]) < 2:
@@ -193,8 +218,8 @@ class GlobalBlock(nn.Module):
         attn = self.attn(z_coarse_norm)
         if attn.shape[-2:] != z.shape[-2:]:
             attn = self.upsample(attn, size=z.shape[-2:])
-        z = z + attn
-        z = z + self.ffn(self.ffn_norm(z))
+        z = z + self.attn_dropout(attn)
+        z = z + self.ffn_dropout(self.ffn(self.ffn_norm(z)))
         return z
 
 
@@ -207,12 +232,14 @@ class LCRWrapperBlock(nn.Module):
         ffn_expansion: int,
         local_block_count: int,
         global_block_count: int,
+        block_dropout: float = 0.0,
     ):
         super().__init__()
         if local_block_count <= 0:
             raise ValueError("local_block_count must be greater than zero")
         if global_block_count <= 0:
             raise ValueError("global_block_count must be greater than zero")
+        block_dropout = _validate_dropout_prob("block_dropout", block_dropout)
 
         self.local_blocks = nn.ModuleList(
             [
@@ -221,6 +248,7 @@ class LCRWrapperBlock(nn.Module):
                     heads=heads,
                     neighborhood_size=neighborhood_size,
                     ffn_expansion=ffn_expansion,
+                    dropout=block_dropout,
                 )
                 for _ in range(local_block_count)
             ]
@@ -231,6 +259,7 @@ class LCRWrapperBlock(nn.Module):
                     dim=dim,
                     heads=heads,
                     ffn_expansion=ffn_expansion,
+                    dropout=block_dropout,
                 )
                 for _ in range(global_block_count)
             ]
@@ -245,23 +274,27 @@ class LCRWrapperBlock(nn.Module):
 
 
 class ResDWBlock(nn.Module):
-    def __init__(self, dim: int, ffn_expansion: int):
+    def __init__(self, dim: int, ffn_expansion: int, dropout: float = 0.0):
         super().__init__()
+        dropout = _validate_dropout_prob("dropout", dropout)
         self.conv_norm = RMSNorm2d(dim)
         self.conv = nn.Conv2d(dim, dim, kernel_size=1)
+        self.conv_dropout = nn.Dropout(p=dropout)
         self.ffn_norm = RMSNorm2d(dim)
         self.ffn = DWConvFFN(dim=dim, expansion=ffn_expansion)
+        self.ffn_dropout = nn.Dropout(p=dropout)
         self.act = nn.GELU()
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        x = x + self.conv(self.act(self.conv_norm(x)))
-        x = x + self.ffn(self.ffn_norm(x))
+        x = x + self.conv_dropout(self.conv(self.act(self.conv_norm(x))))
+        x = x + self.ffn_dropout(self.ffn(self.ffn_norm(x)))
         return x
 
 
 class PointwiseResBlock(nn.Module):
-    def __init__(self, dim: int, expansion: int):
+    def __init__(self, dim: int, expansion: int, dropout: float = 0.0):
         super().__init__()
+        dropout = _validate_dropout_prob("dropout", dropout)
         hidden_dim = dim * expansion
         self.norm = RMSNorm2d(dim)
         self.net = nn.Sequential(
@@ -269,9 +302,10 @@ class PointwiseResBlock(nn.Module):
             nn.GELU(),
             nn.Conv2d(hidden_dim, dim, kernel_size=1),
         )
+        self.residual_dropout = nn.Dropout(p=dropout)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return x + self.net(self.norm(x))
+        return x + self.residual_dropout(self.net(self.norm(x)))
 
 
 class AttnStem(nn.Module):
@@ -294,13 +328,18 @@ class AttnStem(nn.Module):
 
 
 class LatentDecoder(nn.Module):
-    def __init__(self, dim: int, ffn_expansion: int):
+    def __init__(self, dim: int, ffn_expansion: int, dropout: float = 0.0):
         super().__init__()
+        dropout = _validate_dropout_prob("dropout", dropout)
         self.full_dim = max(dim // 2, 1)
-        self.block_latent = ResDWBlock(dim=dim, ffn_expansion=ffn_expansion)
+        self.block_latent = ResDWBlock(dim=dim, ffn_expansion=ffn_expansion, dropout=dropout)
         self.project = nn.Conv2d(dim, self.full_dim, kernel_size=1)
         self.upsample = BilinearUp2x()
-        self.block_full = PointwiseResBlock(dim=self.full_dim, expansion=ffn_expansion)
+        self.block_full = PointwiseResBlock(
+            dim=self.full_dim,
+            expansion=ffn_expansion,
+            dropout=dropout,
+        )
         self.out = nn.Conv2d(self.full_dim, self.full_dim, kernel_size=1)
 
     def forward(self, latent: torch.Tensor, output_size: tuple[int, int]) -> torch.Tensor:
@@ -325,6 +364,8 @@ class LCR(nn.Module):
         local_block_count: int = 1,
         global_block_count: int = 1,
         mask_bias_init: float = -2.0,
+        block_dropout: float = 0.08,
+        decoder_dropout: float = 0.05,
     ):
         super().__init__()
         if dim % heads != 0:
@@ -337,6 +378,8 @@ class LCR(nn.Module):
             raise ValueError("local_block_count must be greater than zero")
         if global_block_count <= 0:
             raise ValueError("global_block_count must be greater than zero")
+        block_dropout = _validate_dropout_prob("block_dropout", block_dropout)
+        decoder_dropout = _validate_dropout_prob("decoder_dropout", decoder_dropout)
 
         self.sar_channels = sar_channels
         self.opt_channels = opt_channels
@@ -345,6 +388,8 @@ class LCR(nn.Module):
         self.local_block_count = local_block_count
         self.global_block_count = global_block_count
         self.neighborhood_size = neighborhood_size
+        self.block_dropout = block_dropout
+        self.decoder_dropout = decoder_dropout
 
         self.sar_stem = AttnStem(
             in_channels=sar_channels,
@@ -368,6 +413,7 @@ class LCR(nn.Module):
                     ffn_expansion=ffn_expansion,
                     local_block_count=local_block_count,
                     global_block_count=global_block_count,
+                    block_dropout=block_dropout,
                 )
                 for _ in range(num_blocks)
             ]
@@ -376,10 +422,12 @@ class LCR(nn.Module):
         self.candidate_decoder = LatentDecoder(
             dim=dim,
             ffn_expansion=ffn_expansion,
+            dropout=decoder_dropout,
         )
         self.mask_decoder = LatentDecoder(
             dim=dim,
             ffn_expansion=ffn_expansion,
+            dropout=decoder_dropout,
         )
 
         self.candidate_head = nn.Sequential(
