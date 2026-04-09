@@ -5,9 +5,25 @@ description = "Add your description here"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
-    "cr-train",
     "matplotlib>=3.10.8",
+]
+
+[project.optional-dependencies]
+torch26 = [
+    "cr-train",
     "torch==2.6.*",
+]
+latest = [
+    "cr-train",
+    "torch>=2.11",
+]
+
+[tool.uv]
+conflicts = [
+    [
+        { extra = "torch26" },
+        { extra = "latest" },
+    ],
 ]
 
 [tool.uv.sources]

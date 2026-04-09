@@ -2,9 +2,14 @@
 
 ## Dependency Policy
 
-이 프로젝트는 서버 간 CUDA 호환성을 맞추기 위해 `torch 2.6.x`로 고정합니다.
+서버 호환성에 따라 학습 의존성을 둘 중 하나로 설치합니다.
 
-- 의존성 설치는 `uv sync`를 사용합니다
+- `torch 2.6.x`가 필요한 서버: `uv sync --extra torch26`
+- 최신 `torch`가 필요한 서버: `uv sync --extra latest`
+- 위 두 명령은 모두 `cr-train`과 해당 `torch` 버전을 함께 설치합니다
+- 현재 `latest` extra는 `torch>=2.11` 기준으로 잠기며, `uv lock --upgrade-package torch`로 최신 stable을 다시 반영할 수 있습니다
+- bare `uv sync`만 실행하면 학습 의존성인 `cr-train`, `torch`가 설치되지 않습니다
+- `torch26`와 `latest`는 동시에 선택할 수 없습니다
 - 버전 확인은 `uv run python -c "import torch; print(torch.__version__)"`로 확인합니다
 
 ## Protected Files
@@ -25,6 +30,7 @@ uv run python tmp_main.py
 - `tmp_main.py` 에서는 `build_model()`, `build_optimizer()` 를 구현하고 필요하면 `build_loss()`, `build_metrics()` 도 덮어쓰면 됩니다
 - 학습 설정은 CLI parse 대신 `main(...)` 호출 인자로 직접 넘깁니다
 - 실행 자체는 공용 `main.py` 가 담당하므로 학습 루프와 결과 저장 흐름은 동일하게 유지됩니다
+- 노트북/임시 러너에서도 `torch`가 필요하면 먼저 `uv sync --extra torch26` 또는 `uv sync --extra latest`로 환경을 맞춥니다
 
 ### 한 번만 설정
 
