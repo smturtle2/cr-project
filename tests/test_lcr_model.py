@@ -11,16 +11,25 @@ from modules.model.lcr import LCR
 from modules.model.lcr.model import (
     BilinearUp2x,
     GlobalBlock,
-    GlobalSelfAttention,
+    GlobalSelfAttn,
     LCRWrapperBlock,
     LatentDecoder,
-    NeighborhoodCrossAttention,
+    NeighborhoodAttn,
+    _AttentionCore,
+    _exclude_self_value_component,
 )
 
 
 class LCRModelTest(unittest.TestCase):
     def setUp(self) -> None:
         torch.manual_seed(0)
+
+    @staticmethod
+    def _set_identity_projection(conv: torch.nn.Conv2d) -> None:
+        with torch.no_grad():
+            torch.nn.init.dirac_(conv.weight)
+            if conv.bias is not None:
+                conv.bias.zero_()
 
     def test_forward_returns_full_resolution_prediction(self) -> None:
         model = LCR(
@@ -97,7 +106,7 @@ class LCRModelTest(unittest.TestCase):
             )
         )
 
-    def test_global_self_attention_parameters_receive_gradients(self) -> None:
+    def test_global_self_attention_parameters_receive_gradients_in_both_branches(self) -> None:
         model = LCR(
             dim=32,
             num_blocks=1,
@@ -116,21 +125,114 @@ class LCRModelTest(unittest.TestCase):
         loss = loss_fn(prediction, target)
         loss.backward()
 
-        global_attn = model.wrapper_blocks[0].global_blocks[0].attn
-        grad_tensors = [
-            global_attn.q_proj.weight.grad,
-            global_attn.k_proj.weight.grad,
-            global_attn.v_proj.weight.grad,
-            global_attn.out_proj.weight.grad,
-        ]
-        self.assertTrue(
-            all(
-                grad is not None
-                and bool(torch.isfinite(grad).all().item())
-                and float(grad.abs().sum()) > 0.0
-                for grad in grad_tensors
+        for global_attn in (
+            model.c_wrapper_blocks[0].global_blocks[0].attn,
+            model.m_wrapper_blocks[0].global_blocks[0].attn,
+        ):
+            grad_tensors = [
+                global_attn.q_proj.weight.grad,
+                global_attn.k_proj.weight.grad,
+                global_attn.v_proj.weight.grad,
+                global_attn.out_proj.weight.grad,
+            ]
+            self.assertTrue(
+                all(
+                    grad is not None
+                    and bool(torch.isfinite(grad).all().item())
+                    and float(grad.abs().sum()) > 0.0
+                    for grad in grad_tensors
+                )
             )
+
+    def test_c_and_m_branches_use_distinct_wrapper_parameters(self) -> None:
+        model = LCR(dim=32, num_blocks=2, heads=4, neighborhood_size=7)
+
+        self.assertEqual(len(model.c_wrapper_blocks), 2)
+        self.assertEqual(len(model.m_wrapper_blocks), 2)
+        self.assertIsNot(model.c_wrapper_blocks[0], model.m_wrapper_blocks[0])
+        self.assertIsNot(
+            model.c_wrapper_blocks[0].global_blocks[0].attn.q_proj.weight,
+            model.m_wrapper_blocks[0].global_blocks[0].attn.q_proj.weight,
         )
+
+    def test_exclude_self_value_component_removes_self_projection(self) -> None:
+        attn_out = torch.tensor([[[3.0, 4.0], [1.0, 2.0]]], dtype=torch.float32)
+        self_value = torch.tensor([[[0.0, 5.0], [2.0, 0.0]]], dtype=torch.float32)
+
+        out = _exclude_self_value_component(attn_out, self_value)
+        self_value_unit = torch.nn.functional.normalize(self_value, dim=-1)
+        alignment = (out * self_value_unit).sum(dim=-1)
+
+        self.assertTrue(torch.allclose(alignment, torch.zeros_like(alignment), atol=1e-6))
+
+    def test_attention_core_supports_dense_and_gathered_contexts(self) -> None:
+        core = _AttentionCore(scale=1.0)
+
+        dense_query = torch.tensor([[[[1.0, 0.0], [0.0, 1.0]]]], dtype=torch.float32)
+        dense_key = dense_query.clone()
+        dense_value = dense_query.clone()
+        dense_mask = torch.tensor([[[[True, False], [True, True]]]])
+
+        dense_out = core(dense_query, dense_key, dense_value, valid_mask=dense_mask)
+
+        sparse_query = torch.tensor([[[[1.0, 0.0], [0.0, 1.0]]]], dtype=torch.float32)
+        sparse_key = torch.tensor(
+            [[[[[1.0, 0.0], [0.0, 1.0]], [[0.0, 1.0], [1.0, 0.0]]]]],
+            dtype=torch.float32,
+        )
+        sparse_value = sparse_key.clone()
+        sparse_mask = torch.tensor([[[[True, False], [True, True]]]])
+
+        sparse_out = core(
+            sparse_query,
+            sparse_key,
+            sparse_value,
+            valid_mask=sparse_mask,
+            self_value=sparse_query,
+        )
+
+        self.assertEqual(dense_out.shape, dense_query.shape)
+        self.assertEqual(sparse_out.shape, sparse_query.shape)
+        self.assertTrue(bool(torch.isfinite(dense_out).all().item()))
+        self.assertTrue(bool(torch.isfinite(sparse_out).all().item()))
+
+    def test_neighborhood_and_global_attn_share_attention_core(self) -> None:
+        neighborhood_attn = NeighborhoodAttn(dim=4, heads=2, neighborhood_size=3)
+        global_attn = GlobalSelfAttn(dim=4, heads=2)
+
+        self.assertIsInstance(neighborhood_attn.core, _AttentionCore)
+        self.assertIsInstance(global_attn.core, _AttentionCore)
+
+    def test_global_self_attn_excludes_self_value_direction(self) -> None:
+        attn = GlobalSelfAttn(dim=4, heads=2)
+        for proj in (attn.q_proj, attn.k_proj, attn.v_proj, attn.out_proj):
+            self._set_identity_projection(proj)
+
+        x = torch.zeros(1, 4, 2, 2)
+        x[:, 0] = 1.0
+        x[:, 2] = 1.0
+
+        out = attn(x)
+
+        self.assertTrue(torch.allclose(out, torch.zeros_like(out), atol=1e-6))
+
+    def test_neighborhood_attn_applies_xsa_only_in_query_only_mode(self) -> None:
+        attn = NeighborhoodAttn(dim=2, heads=1, neighborhood_size=3)
+        for proj in (attn.q_proj, attn.k_proj, attn.v_proj, attn.out_proj):
+            self._set_identity_projection(proj)
+
+        x = torch.zeros(1, 2, 2, 2)
+        x[:, 0] = 1.0
+
+        self_mode_out = attn(x)
+        explicit_kv_out = attn(x, x, x)
+
+        self_alignment = (self_mode_out[:, 0] * x[:, 0] + self_mode_out[:, 1] * x[:, 1]).abs().max()
+        explicit_alignment = (explicit_kv_out[:, 0] * x[:, 0] + explicit_kv_out[:, 1] * x[:, 1]).abs().max()
+
+        self.assertTrue(torch.allclose(self_mode_out, torch.zeros_like(self_mode_out), atol=1e-6))
+        self.assertGreater(float(explicit_alignment.detach()), 0.5)
+        self.assertLess(float(self_alignment.detach()), 1e-6)
 
     def test_model_uses_single_downsample_stem_and_bilinear_decoder(self) -> None:
         model = LCR(
@@ -141,7 +243,8 @@ class LCRModelTest(unittest.TestCase):
             heads=4,
             neighborhood_size=7,
         )
-        wrapper = model.wrapper_blocks[0]
+        c_wrapper = model.c_wrapper_blocks[0]
+        m_wrapper = model.m_wrapper_blocks[0]
 
         self.assertIsInstance(model.sar_stem.downsample, torch.nn.Conv2d)
         self.assertIsInstance(model.hsi_stem.downsample, torch.nn.Conv2d)
@@ -155,13 +258,21 @@ class LCRModelTest(unittest.TestCase):
         self.assertFalse(hasattr(model.sar_stem, "down2"))
         self.assertFalse(hasattr(model.hsi_stem, "down1"))
         self.assertFalse(hasattr(model.hsi_stem, "down2"))
-        self.assertEqual(len(model.wrapper_blocks), 1)
-        self.assertIsInstance(wrapper, LCRWrapperBlock)
-        self.assertEqual(len(wrapper.local_blocks), 1)
-        self.assertEqual(len(wrapper.global_blocks), 1)
-        self.assertIsInstance(wrapper.local_blocks[0].attn, NeighborhoodCrossAttention)
-        self.assertIsInstance(wrapper.global_blocks[0], GlobalBlock)
-        self.assertIsInstance(wrapper.global_blocks[0].attn, GlobalSelfAttention)
+        self.assertEqual(len(model.c_wrapper_blocks), 1)
+        self.assertEqual(len(model.m_wrapper_blocks), 1)
+        self.assertIsInstance(c_wrapper, LCRWrapperBlock)
+        self.assertIsInstance(m_wrapper, LCRWrapperBlock)
+        self.assertIsNot(c_wrapper, m_wrapper)
+        self.assertEqual(len(c_wrapper.local_blocks), 1)
+        self.assertEqual(len(c_wrapper.global_blocks), 1)
+        self.assertEqual(len(m_wrapper.local_blocks), 1)
+        self.assertEqual(len(m_wrapper.global_blocks), 1)
+        self.assertIsInstance(c_wrapper.local_blocks[0].attn, NeighborhoodAttn)
+        self.assertIsInstance(c_wrapper.global_blocks[0], GlobalBlock)
+        self.assertIsInstance(c_wrapper.global_blocks[0].attn, GlobalSelfAttn)
+        self.assertIsInstance(m_wrapper.local_blocks[0].attn, NeighborhoodAttn)
+        self.assertIsInstance(m_wrapper.global_blocks[0], GlobalBlock)
+        self.assertIsInstance(m_wrapper.global_blocks[0].attn, GlobalSelfAttn)
         self.assertIsInstance(model.candidate_decoder, LatentDecoder)
         self.assertIsInstance(model.mask_decoder, LatentDecoder)
         self.assertIsNot(model.candidate_decoder, model.mask_decoder)
@@ -182,6 +293,7 @@ class LCRModelTest(unittest.TestCase):
         self.assertIsInstance(model.mask_decoder.upsample, BilinearUp2x)
         self.assertEqual(model.mask_out.kernel_size, (1, 1))
         self.assertEqual(model.mask_out.in_channels, 16)
+        self.assertFalse(hasattr(model, "wrapper_blocks"))
         self.assertFalse(hasattr(model, "local_blocks"))
         self.assertFalse(hasattr(model, "global_blocks"))
         self.assertFalse(hasattr(model, "reconstruction"))
@@ -205,10 +317,14 @@ class LCRModelTest(unittest.TestCase):
         self.assertEqual(model.num_blocks, 2)
         self.assertEqual(model.local_block_count, 3)
         self.assertEqual(model.global_block_count, 2)
-        self.assertEqual(len(model.wrapper_blocks), 2)
-        self.assertTrue(all(isinstance(wrapper, LCRWrapperBlock) for wrapper in model.wrapper_blocks))
-        self.assertTrue(all(len(wrapper.local_blocks) == 3 for wrapper in model.wrapper_blocks))
-        self.assertTrue(all(len(wrapper.global_blocks) == 2 for wrapper in model.wrapper_blocks))
+        self.assertEqual(len(model.c_wrapper_blocks), 2)
+        self.assertEqual(len(model.m_wrapper_blocks), 2)
+        self.assertTrue(all(isinstance(wrapper, LCRWrapperBlock) for wrapper in model.c_wrapper_blocks))
+        self.assertTrue(all(isinstance(wrapper, LCRWrapperBlock) for wrapper in model.m_wrapper_blocks))
+        self.assertTrue(all(len(wrapper.local_blocks) == 3 for wrapper in model.c_wrapper_blocks))
+        self.assertTrue(all(len(wrapper.global_blocks) == 2 for wrapper in model.c_wrapper_blocks))
+        self.assertTrue(all(len(wrapper.local_blocks) == 3 for wrapper in model.m_wrapper_blocks))
+        self.assertTrue(all(len(wrapper.global_blocks) == 2 for wrapper in model.m_wrapper_blocks))
 
     def test_lcr_contains_no_3x3_convolutions(self) -> None:
         model = LCR(dim=32, num_blocks=1, heads=4, neighborhood_size=7)
