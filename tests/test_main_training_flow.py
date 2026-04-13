@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import copy
 import json
+import io
 import tempfile
 import unittest
 from collections.abc import Sequence
@@ -60,13 +61,14 @@ class FakeTrainer:
         accum_steps,
         epochs,
         seed,
+        streaming,
         num_workers,
         multiprocessing_context,
         train_crop_size,
         train_random_flip,
         train_random_rot90,
     ) -> None:
-        del loss, metrics, max_train_samples, max_val_samples, max_test_samples
+        del loss, metrics
         self.model = model
         self.optimizer = optimizer
         self.scheduler = scheduler
@@ -77,6 +79,10 @@ class FakeTrainer:
         self.accum_steps = accum_steps
         self.epochs = epochs
         self.seed = seed
+        self.streaming = streaming
+        self.max_train_samples = max_train_samples
+        self.max_val_samples = max_val_samples
+        self.max_test_samples = max_test_samples
         self.multiprocessing_context = multiprocessing_context
         self.train_crop_size = train_crop_size
         self.train_random_flip = train_random_flip
@@ -395,13 +401,44 @@ class MainTrainingFlowTest(unittest.TestCase):
             trainer = main.build_trainer(
                 output_dir=Path("artifacts"),
                 accum_steps=4,
+                streaming=False,
                 scheduler_timing="after_optimizer_step",
             )
 
         self.assertIs(trainer.scheduler, scheduler)
         self.assertEqual(trainer.accum_steps, 4)
+        self.assertIs(trainer.streaming, False)
         self.assertEqual(trainer.scheduler_timing, "after_optimizer_step")
         self.assertEqual(trainer.scheduler_monitor, "val.metrics.mae")
+
+    def test_main_non_streaming_ignores_sample_limits_and_warns(self) -> None:
+        records = [
+            make_epoch_record(epoch=1, train_loss=1.0, val_loss=0.6),
+        ]
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            output_dir = Path(tmp_dir)
+            with mock.patch("sys.stdout", new_callable=io.StringIO) as stdout:
+                result = self._run_main(
+                    output_dir=output_dir,
+                    step_records=records,
+                    example_mode="best",
+                    run_test=False,
+                    num_examples=2,
+                    streaming=False,
+                    train_max_samples=128,
+                    val_max_samples=64,
+                    test_max_samples=32,
+                )
+
+        trainer = result["trainer"]
+        self.assertIs(trainer.streaming, False)
+        self.assertIsNone(trainer.max_train_samples)
+        self.assertIsNone(trainer.max_val_samples)
+        self.assertIsNone(trainer.max_test_samples)
+        self.assertIn("streaming=false uses the full dataset", stdout.getvalue())
+        self.assertIn("train_max_samples=128", stdout.getvalue())
+        self.assertEqual(result["save_examples"].call_args.kwargs["max_samples"], None)
 
     def test_custom_best_selector_can_change_best_epoch(self) -> None:
         records = [
@@ -508,6 +545,10 @@ class MainTrainingFlowTest(unittest.TestCase):
         selector: main.BestEpochSelector | None = None,
         save_every_n_epochs: int = 0,
         resume: Path | None = None,
+        streaming: bool = True,
+        train_max_samples: int | None = 16384,
+        val_max_samples: int | None = 2048,
+        test_max_samples: int | None = 2048,
     ) -> dict[str, object]:
         FakeTrainer.step_records = copy.deepcopy(step_records)
         FakeTrainer.instances = []
@@ -547,6 +588,10 @@ class MainTrainingFlowTest(unittest.TestCase):
                 "example_mode": example_mode,
                 "num_examples": num_examples,
                 "save_every_n_epochs": save_every_n_epochs,
+                "streaming": streaming,
+                "train_max_samples": train_max_samples,
+                "val_max_samples": val_max_samples,
+                "test_max_samples": test_max_samples,
             }
             if run_test is not None:
                 kwargs["run_test"] = run_test
@@ -565,6 +610,71 @@ class MainTrainingFlowTest(unittest.TestCase):
             "save_examples": save_examples,
             "history_plot": history_plot,
         }
+
+
+class BuildLoaderTest(unittest.TestCase):
+    def _make_trainer(self, *, streaming: bool) -> mock.Mock:
+        trainer = mock.Mock()
+        trainer.streaming = streaming
+        trainer.seed = 7
+        trainer.cache_root = Path("/tmp/cache-root")
+        trainer.batch_size = 4
+        trainer.num_workers = 2
+        trainer.include_metadata = True
+        trainer.pin_memory = False
+        trainer.multiprocessing_context = None
+        trainer.persistent_workers = False
+        trainer.prefetch_factor = 2
+        trainer.drop_last = False
+        trainer.train_crop_size = 128
+        trainer.train_random_flip = True
+        trainer.train_random_rot90 = True
+        return trainer
+
+    def test_build_loader_non_streaming_skips_cache_warmup_and_passes_streaming_flag(self) -> None:
+        trainer = self._make_trainer(streaming=False)
+        prepared = object()
+
+        with (
+            mock.patch.object(main, "ensure_split_cache") as ensure_split_cache,
+            mock.patch.object(main, "prepare_split", return_value=prepared) as prepare_split,
+            mock.patch.object(main, "build_dataloader", return_value="loader") as build_dataloader,
+        ):
+            result = main.build_loader(
+                trainer,
+                split="validation",
+                max_samples=None,
+                training=False,
+                epoch_index=3,
+            )
+
+        self.assertEqual(result, "loader")
+        ensure_split_cache.assert_not_called()
+        self.assertIs(prepare_split.call_args.kwargs["streaming"], False)
+        self.assertEqual(prepare_split.call_args.kwargs["max_samples"], None)
+        self.assertEqual(build_dataloader.call_args.kwargs["crop_size"], None)
+        self.assertEqual(build_dataloader.call_args.kwargs["crop_mode"], "none")
+
+    def test_build_loader_streaming_warms_cache_before_prepare_split(self) -> None:
+        trainer = self._make_trainer(streaming=True)
+        prepared = object()
+
+        with (
+            mock.patch.object(main, "ensure_split_cache") as ensure_split_cache,
+            mock.patch.object(main, "prepare_split", return_value=prepared) as prepare_split,
+            mock.patch.object(main, "build_dataloader", return_value="loader"),
+        ):
+            main.build_loader(
+                trainer,
+                split="train",
+                max_samples=256,
+                training=True,
+                epoch_index=1,
+            )
+
+        ensure_split_cache.assert_called_once()
+        self.assertIs(prepare_split.call_args.kwargs["streaming"], True)
+        self.assertEqual(prepare_split.call_args.kwargs["max_samples"], 256)
 
 
 if __name__ == "__main__":

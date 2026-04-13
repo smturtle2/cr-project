@@ -168,9 +168,10 @@ def build_trainer(
     accum_steps: int = 1,
     seed: int = 42,
     max_epochs: int = 10,
-    train_max_samples: int = 16384,
-    val_max_samples: int = 2048,
-    test_max_samples: int = 2048,
+    train_max_samples: int | None = 16384,
+    val_max_samples: int | None = 2048,
+    test_max_samples: int | None = 2048,
+    streaming: bool = True,
     output_dir: str | Path = Path("artifacts"),
     cache_dir: str | Path | None = None,
     num_workers: int | str = "auto",
@@ -206,6 +207,7 @@ def build_trainer(
         accum_steps=accum_steps,
         epochs=max_epochs,
         seed=seed,
+        streaming=streaming,
         num_workers=num_workers,
         multiprocessing_context=multiprocessing_context,
         train_crop_size=train_crop_size,
@@ -594,14 +596,15 @@ def build_loader(
 ):
     # 예시 이미지를 만들거나 notebook에서 배치 shape를 확인할 때만 별도 loader가 필요하다.
     # 이때도 데이터 준비 자체는 cr-train의 공개 data API를 그대로 사용한다.
-    ensure_split_cache(
-        split=split,
-        dataset_name=DATASET_ID,
-        revision=None,
-        max_samples=max_samples,
-        seed=trainer.seed,
-        cache_root=trainer.cache_root,
-    )
+    if trainer.streaming:
+        ensure_split_cache(
+            split=split,
+            dataset_name=DATASET_ID,
+            revision=None,
+            max_samples=max_samples,
+            seed=trainer.seed,
+            cache_root=trainer.cache_root,
+        )
 
     prepared = prepare_split(
         split=split,
@@ -612,6 +615,7 @@ def build_loader(
         epoch=epoch_index,
         training=training,
         cache_root=trainer.cache_root,
+        streaming=trainer.streaming,
     )
 
     return build_dataloader(
@@ -1092,6 +1096,31 @@ def validate_main_args(
     return resolved_output_dir, resolved_resume
 
 
+def normalize_data_loading_config(
+    *,
+    streaming: bool,
+    train_max_samples: int | None,
+    val_max_samples: int | None,
+    test_max_samples: int | None,
+) -> tuple[int | None, int | None, int | None]:
+    if streaming:
+        return train_max_samples, val_max_samples, test_max_samples
+
+    ignored_limits = {
+        name: value
+        for name, value in (
+            ("train_max_samples", train_max_samples),
+            ("val_max_samples", val_max_samples),
+            ("test_max_samples", test_max_samples),
+        )
+        if value is not None
+    }
+    if ignored_limits:
+        ignored_text = ", ".join(f"{name}={value}" for name, value in ignored_limits.items())
+        print(f"streaming=false uses the full dataset; ignoring sample limits: {ignored_text}")
+    return None, None, None
+
+
 def load_training_state(
     trainer: Trainer,
     *,
@@ -1209,9 +1238,10 @@ def main(
     accum_steps: int = 1,
     seed: int = 42,
     max_epochs: int = 10,
-    train_max_samples: int = 16384,
-    val_max_samples: int = 2048,
-    test_max_samples: int = 2048,
+    train_max_samples: int | None = 16384,
+    val_max_samples: int | None = 2048,
+    test_max_samples: int | None = 2048,
+    streaming: bool = True,
     output_dir: str | Path = Path("artifacts"),
     cache_dir: str | Path | None = None,
     resume: str | Path | None = None,
@@ -1236,6 +1266,12 @@ def main(
         example_mode=example_mode,
         save_every_n_epochs=save_every_n_epochs,
     )
+    train_max_samples, val_max_samples, test_max_samples = normalize_data_loading_config(
+        streaming=streaming,
+        train_max_samples=train_max_samples,
+        val_max_samples=val_max_samples,
+        test_max_samples=test_max_samples,
+    )
     example_config = build_example_save_config(
         train_max_samples=train_max_samples,
         val_max_samples=val_max_samples,
@@ -1252,6 +1288,7 @@ def main(
         train_max_samples=train_max_samples,
         val_max_samples=val_max_samples,
         test_max_samples=test_max_samples,
+        streaming=streaming,
         output_dir=output_dir,
         cache_dir=cache_dir,
         num_workers=num_workers,

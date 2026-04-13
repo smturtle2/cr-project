@@ -106,6 +106,7 @@ def main() -> None:
             accum_steps=1,
             seed=42,
             max_epochs=10,
+            streaming=True,
             train_max_samples=4096,
             val_max_samples=512,
             test_max_samples=512,
