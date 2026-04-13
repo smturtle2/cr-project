@@ -5,16 +5,76 @@ from torch import nn
 from torch.nn import functional as F
 
 
-def _reshape_heads(x: torch.Tensor, heads: int) -> torch.Tensor:
-    batch, tokens, channels = x.shape
+def _reshape_spatial_heads(x: torch.Tensor, heads: int) -> torch.Tensor:
+    batch, channels, height, width = x.shape
     head_dim = channels // heads
-    return x.view(batch, tokens, heads, head_dim).transpose(1, 2)
+    return x.view(batch, heads, head_dim, height, width).permute(0, 1, 3, 4, 2)
+
+
+def _flatten_spatial_heads(x: torch.Tensor) -> torch.Tensor:
+    batch, heads, height, width, head_dim = x.shape
+    return x.reshape(batch, heads, height * width, head_dim)
+
+
+def _restore_spatial_heads(x: torch.Tensor, height: int, width: int) -> torch.Tensor:
+    batch, heads, _, head_dim = x.shape
+    return x.reshape(batch, heads, height, width, head_dim).permute(0, 1, 4, 2, 3).reshape(
+        batch, heads * head_dim, height, width
+    )
+
+
+def _exclude_self_value_component(
+    attn_out: torch.Tensor,
+    self_value: torch.Tensor,
+    eps: float = 1e-12,
+) -> torch.Tensor:
+    self_value_unit = F.normalize(self_value, dim=-1, eps=eps)
+    return attn_out - (attn_out * self_value_unit).sum(dim=-1, keepdim=True) * self_value_unit
 
 
 def _validate_dropout_prob(name: str, value: float) -> float:
     if not 0.0 <= value < 1.0:
         raise ValueError(f"{name} must be in [0.0, 1.0), got {value}")
     return value
+
+
+class _AttentionCore(nn.Module):
+    def __init__(self, scale: float):
+        super().__init__()
+        self.scale = scale
+
+    def forward(
+        self,
+        query: torch.Tensor,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        *,
+        valid_mask: torch.Tensor | None = None,
+        self_value: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        if query.ndim != 4:
+            raise ValueError("attention core expects query to have shape (batch, heads, tokens, head_dim)")
+        if key.ndim == query.ndim:
+            scores = (query * self.scale) @ key.transpose(-2, -1)
+        elif key.ndim == query.ndim + 1:
+            scores = torch.einsum("bhtd,bhtkd->bhtk", query, key) * self.scale
+        else:
+            raise ValueError("attention core expects dense or gathered key/value tensors")
+
+        if valid_mask is not None:
+            scores = scores.masked_fill(~valid_mask, torch.finfo(scores.dtype).min)
+        attn = scores.softmax(dim=-1)
+
+        if value.ndim == query.ndim:
+            out = attn @ value
+        elif value.ndim == query.ndim + 1:
+            out = torch.einsum("bhtk,bhtkd->bhtd", attn, value)
+        else:
+            raise ValueError("attention core expects dense or gathered key/value tensors")
+
+        if self_value is not None:
+            out = _exclude_self_value_component(out, self_value)
+        return out
 
 
 class RMSNorm2d(nn.Module):
@@ -65,6 +125,7 @@ class NeighborhoodAttn(nn.Module):
         self.neighborhood_size = neighborhood_size
         self.radius = neighborhood_size // 2
         self.scale = (dim // heads) ** -0.5
+        self.core = _AttentionCore(scale=self.scale)
         self.q_proj = nn.Conv2d(dim, dim, kernel_size=1)
         self.k_proj = nn.Conv2d(dim, dim, kernel_size=1)
         self.v_proj = nn.Conv2d(dim, dim, kernel_size=1)
@@ -79,7 +140,8 @@ class NeighborhoodAttn(nn.Module):
         key: torch.Tensor | None = None,
         value: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        if key is None and value is None:
+        is_self_attn = key is None and value is None
+        if is_self_attn:
             key = query
             value = query
         elif key is None or value is None:
@@ -93,9 +155,9 @@ class NeighborhoodAttn(nn.Module):
 
         batch, _, height, width = q.shape
         head_dim = self.dim // self.heads
-        q_heads = q.view(batch, self.heads, head_dim, height, width).permute(0, 1, 3, 4, 2)
-        k_heads = k.view(batch, self.heads, head_dim, height, width).permute(0, 1, 3, 4, 2)
-        v_heads = v.view(batch, self.heads, head_dim, height, width).permute(0, 1, 3, 4, 2)
+        q_heads = _reshape_spatial_heads(q, self.heads)
+        k_heads = _reshape_spatial_heads(k, self.heads)
+        v_heads = _reshape_spatial_heads(v, self.heads)
 
         y_coords = torch.arange(height, device=q.device, dtype=torch.long)
         x_coords = torch.arange(width, device=q.device, dtype=torch.long)
@@ -120,12 +182,20 @@ class NeighborhoodAttn(nn.Module):
 
         k_neighbors = k_heads[batch_idx, head_idx, neighbor_y, neighbor_x]
         v_neighbors = v_heads[batch_idx, head_idx, neighbor_y, neighbor_x]
+        query_tokens = _flatten_spatial_heads(q_heads)
+        key_tokens = k_neighbors.reshape(batch, self.heads, height * width, -1, head_dim)
+        value_tokens = v_neighbors.reshape(batch, self.heads, height * width, -1, head_dim)
+        valid_mask = valid.reshape(1, 1, height * width, -1)
+        self_value = _flatten_spatial_heads(v_heads) if is_self_attn else None
 
-        attn = (q_heads.unsqueeze(-2) * k_neighbors).sum(dim=-1) * self.scale
-        attn = attn.masked_fill(~valid, torch.finfo(attn.dtype).min)
-        attn = attn.softmax(dim=-1)
-        out = (attn.unsqueeze(-1) * v_neighbors).sum(dim=-2)
-        out = out.permute(0, 1, 4, 2, 3).reshape(batch, self.dim, height, width)
+        out = self.core(
+            query_tokens,
+            key_tokens,
+            value_tokens,
+            valid_mask=valid_mask,
+            self_value=self_value,
+        )
+        out = _restore_spatial_heads(out, height, width)
         return self.out_proj(out)
 
 
@@ -137,25 +207,19 @@ class GlobalSelfAttn(nn.Module):
         self.dim = dim
         self.heads = heads
         self.scale = (dim // heads) ** -0.5
+        self.core = _AttentionCore(scale=self.scale)
         self.q_proj = nn.Conv2d(dim, dim, kernel_size=1)
         self.k_proj = nn.Conv2d(dim, dim, kernel_size=1)
         self.v_proj = nn.Conv2d(dim, dim, kernel_size=1)
         self.out_proj = nn.Conv2d(dim, dim, kernel_size=1)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        q = self.q_proj(x).flatten(2).transpose(1, 2)
-        k = self.k_proj(x).flatten(2).transpose(1, 2)
-        v = self.v_proj(x).flatten(2).transpose(1, 2)
+        q_heads = _flatten_spatial_heads(_reshape_spatial_heads(self.q_proj(x), self.heads))
+        k_heads = _flatten_spatial_heads(_reshape_spatial_heads(self.k_proj(x), self.heads))
+        v_heads = _flatten_spatial_heads(_reshape_spatial_heads(self.v_proj(x), self.heads))
 
-        q_heads = _reshape_heads(q, self.heads)
-        k_heads = _reshape_heads(k, self.heads)
-        v_heads = _reshape_heads(v, self.heads)
-
-        attn = (q_heads * self.scale) @ k_heads.transpose(-2, -1)
-        attn = attn.softmax(dim=-1)
-        out = attn @ v_heads
-        out = out.transpose(1, 2).reshape(x.shape[0], -1, self.dim)
-        out = out.transpose(1, 2).reshape_as(x)
+        out = self.core(q_heads, k_heads, v_heads, self_value=v_heads)
+        out = _restore_spatial_heads(out, *x.shape[-2:])
         return self.out_proj(out)
 
 
@@ -404,7 +468,21 @@ class LCR(nn.Module):
             neighborhood_size=neighborhood_size,
         )
 
-        self.wrapper_blocks = nn.ModuleList(
+        self.c_wrapper_blocks = nn.ModuleList(
+            [
+                LCRWrapperBlock(
+                    dim=dim,
+                    heads=heads,
+                    neighborhood_size=neighborhood_size,
+                    ffn_expansion=ffn_expansion,
+                    local_block_count=local_block_count,
+                    global_block_count=global_block_count,
+                    block_dropout=block_dropout,
+                )
+                for _ in range(num_blocks)
+            ]
+        )
+        self.m_wrapper_blocks = nn.ModuleList(
             [
                 LCRWrapperBlock(
                     dim=dim,
@@ -452,15 +530,19 @@ class LCR(nn.Module):
         if sar.shape[-2] % 4 != 0 or sar.shape[-1] % 4 != 0:
             raise ValueError("LCR expects spatial dimensions divisible by 4")
 
-        z = self.sar_stem(sar)
+        z0 = self.sar_stem(sar)
         h = self.hsi_stem(cloudy)
+        c = z0
+        m = z0
 
-        for wrapper_block in self.wrapper_blocks:
-            z = wrapper_block(z, h)
+        for wrapper_block in self.c_wrapper_blocks:
+            c = wrapper_block(c, h)
+        for wrapper_block in self.m_wrapper_blocks:
+            m = wrapper_block(m, h)
 
         output_size = cloudy.shape[-2:]
-        candidate = self.candidate_head(self.candidate_decoder(z, output_size=output_size))
-        mask_logits = self.mask_out(self.mask_decoder(z, output_size=output_size))
+        candidate = self.candidate_head(self.candidate_decoder(c, output_size=output_size))
+        mask_logits = self.mask_out(self.mask_decoder(m, output_size=output_size))
         mask = torch.sigmoid(mask_logits)
 
         return (1.0 - mask) * cloudy + mask * candidate
