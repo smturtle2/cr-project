@@ -468,21 +468,7 @@ class LCR(nn.Module):
             neighborhood_size=neighborhood_size,
         )
 
-        self.c_wrapper_blocks = nn.ModuleList(
-            [
-                LCRWrapperBlock(
-                    dim=dim,
-                    heads=heads,
-                    neighborhood_size=neighborhood_size,
-                    ffn_expansion=ffn_expansion,
-                    local_block_count=local_block_count,
-                    global_block_count=global_block_count,
-                    block_dropout=block_dropout,
-                )
-                for _ in range(num_blocks)
-            ]
-        )
-        self.m_wrapper_blocks = nn.ModuleList(
+        self.wrapper_blocks = nn.ModuleList(
             [
                 LCRWrapperBlock(
                     dim=dim,
@@ -532,17 +518,14 @@ class LCR(nn.Module):
 
         z0 = self.sar_stem(sar)
         h = self.hsi_stem(cloudy)
-        c = z0
-        m = z0
+        z = z0
 
-        for wrapper_block in self.c_wrapper_blocks:
-            c = wrapper_block(c, h)
-        for wrapper_block in self.m_wrapper_blocks:
-            m = wrapper_block(m, h)
+        for wrapper_block in self.wrapper_blocks:
+            z = wrapper_block(z, h)
 
         output_size = cloudy.shape[-2:]
-        candidate = self.candidate_head(self.candidate_decoder(c, output_size=output_size))
-        mask_logits = self.mask_out(self.mask_decoder(m, output_size=output_size))
+        candidate = self.candidate_head(self.candidate_decoder(z, output_size=output_size))
+        mask_logits = self.mask_out(self.mask_decoder(z, output_size=output_size))
         mask = torch.sigmoid(mask_logits)
 
         return (1.0 - mask) * cloudy + mask * candidate
