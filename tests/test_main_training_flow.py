@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import copy
 import json
-import io
 import tempfile
 import unittest
 from collections.abc import Sequence
@@ -61,7 +60,6 @@ class FakeTrainer:
         accum_steps,
         epochs,
         seed,
-        streaming,
         num_workers,
         multiprocessing_context,
         train_crop_size,
@@ -79,7 +77,6 @@ class FakeTrainer:
         self.accum_steps = accum_steps
         self.epochs = epochs
         self.seed = seed
-        self.streaming = streaming
         self.max_train_samples = max_train_samples
         self.max_val_samples = max_val_samples
         self.max_test_samples = max_test_samples
@@ -401,44 +398,37 @@ class MainTrainingFlowTest(unittest.TestCase):
             trainer = main.build_trainer(
                 output_dir=Path("artifacts"),
                 accum_steps=4,
-                streaming=False,
                 scheduler_timing="after_optimizer_step",
             )
 
         self.assertIs(trainer.scheduler, scheduler)
         self.assertEqual(trainer.accum_steps, 4)
-        self.assertIs(trainer.streaming, False)
         self.assertEqual(trainer.scheduler_timing, "after_optimizer_step")
         self.assertEqual(trainer.scheduler_monitor, "val.metrics.mae")
 
-    def test_main_non_streaming_ignores_sample_limits_and_warns(self) -> None:
+    def test_main_preserves_sample_limits(self) -> None:
         records = [
             make_epoch_record(epoch=1, train_loss=1.0, val_loss=0.6),
         ]
 
         with tempfile.TemporaryDirectory() as tmp_dir:
             output_dir = Path(tmp_dir)
-            with mock.patch("sys.stdout", new_callable=io.StringIO) as stdout:
-                result = self._run_main(
-                    output_dir=output_dir,
-                    step_records=records,
-                    example_mode="best",
-                    run_test=False,
-                    num_examples=2,
-                    streaming=False,
-                    train_max_samples=128,
-                    val_max_samples=64,
-                    test_max_samples=32,
-                )
+            result = self._run_main(
+                output_dir=output_dir,
+                step_records=records,
+                example_mode="best",
+                run_test=False,
+                num_examples=2,
+                train_max_samples=128,
+                val_max_samples=64,
+                test_max_samples=32,
+            )
 
         trainer = result["trainer"]
-        self.assertIs(trainer.streaming, False)
-        self.assertIsNone(trainer.max_train_samples)
-        self.assertIsNone(trainer.max_val_samples)
-        self.assertIsNone(trainer.max_test_samples)
-        self.assertIn("streaming=false uses the full dataset", stdout.getvalue())
-        self.assertIn("train_max_samples=128", stdout.getvalue())
-        self.assertEqual(result["save_examples"].call_args.kwargs["max_samples"], None)
+        self.assertEqual(trainer.max_train_samples, 128)
+        self.assertEqual(trainer.max_val_samples, 64)
+        self.assertEqual(trainer.max_test_samples, 32)
+        self.assertEqual(result["save_examples"].call_args.kwargs["max_samples"], 32)
 
     def test_custom_best_selector_can_change_best_epoch(self) -> None:
         records = [
@@ -545,7 +535,6 @@ class MainTrainingFlowTest(unittest.TestCase):
         selector: main.BestEpochSelector | None = None,
         save_every_n_epochs: int = 0,
         resume: Path | None = None,
-        streaming: bool = True,
         train_max_samples: int | None = 16384,
         val_max_samples: int | None = 2048,
         test_max_samples: int | None = 2048,
@@ -588,7 +577,6 @@ class MainTrainingFlowTest(unittest.TestCase):
                 "example_mode": example_mode,
                 "num_examples": num_examples,
                 "save_every_n_epochs": save_every_n_epochs,
-                "streaming": streaming,
                 "train_max_samples": train_max_samples,
                 "val_max_samples": val_max_samples,
                 "test_max_samples": test_max_samples,
@@ -613,9 +601,8 @@ class MainTrainingFlowTest(unittest.TestCase):
 
 
 class BuildLoaderTest(unittest.TestCase):
-    def _make_trainer(self, *, streaming: bool) -> mock.Mock:
+    def _make_trainer(self) -> mock.Mock:
         trainer = mock.Mock()
-        trainer.streaming = streaming
         trainer.seed = 7
         trainer.cache_root = Path("/tmp/cache-root")
         trainer.batch_size = 4
@@ -631,8 +618,8 @@ class BuildLoaderTest(unittest.TestCase):
         trainer.train_random_rot90 = True
         return trainer
 
-    def test_build_loader_non_streaming_skips_cache_warmup_and_passes_streaming_flag(self) -> None:
-        trainer = self._make_trainer(streaming=False)
+    def test_build_loader_warms_cache_before_prepare_split(self) -> None:
+        trainer = self._make_trainer()
         prepared = object()
 
         with (
@@ -649,14 +636,14 @@ class BuildLoaderTest(unittest.TestCase):
             )
 
         self.assertEqual(result, "loader")
-        ensure_split_cache.assert_not_called()
-        self.assertIs(prepare_split.call_args.kwargs["streaming"], False)
+        ensure_split_cache.assert_called_once()
+        self.assertNotIn("streaming", prepare_split.call_args.kwargs)
         self.assertEqual(prepare_split.call_args.kwargs["max_samples"], None)
         self.assertEqual(build_dataloader.call_args.kwargs["crop_size"], None)
         self.assertEqual(build_dataloader.call_args.kwargs["crop_mode"], "none")
 
-    def test_build_loader_streaming_warms_cache_before_prepare_split(self) -> None:
-        trainer = self._make_trainer(streaming=True)
+    def test_build_loader_passes_training_options(self) -> None:
+        trainer = self._make_trainer()
         prepared = object()
 
         with (
@@ -673,7 +660,7 @@ class BuildLoaderTest(unittest.TestCase):
             )
 
         ensure_split_cache.assert_called_once()
-        self.assertIs(prepare_split.call_args.kwargs["streaming"], True)
+        self.assertNotIn("streaming", prepare_split.call_args.kwargs)
         self.assertEqual(prepare_split.call_args.kwargs["max_samples"], 256)
 
 

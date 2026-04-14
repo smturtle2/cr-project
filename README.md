@@ -31,8 +31,8 @@ uv run python tmp_main.py
 - 학습 설정은 CLI parse 대신 `main(...)` 호출 인자로 직접 넘깁니다
 - 실행 자체는 공용 `main.py` 가 담당하므로 학습 루프와 결과 저장 흐름은 동일하게 유지됩니다
 - 노트북/임시 러너에서도 `torch`가 필요하면 먼저 `uv sync --extra torch26` 또는 `uv sync --extra latest`로 환경을 맞춥니다
-- 기본값 `streaming=True` 는 `cr-train` block-cache streaming 경로를 사용합니다
-- `streaming=False` 는 full dataset 전용입니다. 이때 `train_max_samples`, `val_max_samples`, `test_max_samples` 값은 무시되고 전체 split을 읽습니다
+- 최신 `cr-train` 기준으로 데이터 로딩은 항상 block-cache streaming 경로를 사용합니다
+- 전체 split을 쓰려면 `train_max_samples=None`, `val_max_samples=None`, `test_max_samples=None` 처럼 sample limit을 `None` 으로 넘기면 됩니다
 
 ### 한 번만 설정
 
