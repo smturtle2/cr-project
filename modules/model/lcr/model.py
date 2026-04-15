@@ -186,14 +186,12 @@ class NeighborhoodAttn(nn.Module):
         key_tokens = k_neighbors.reshape(batch, self.heads, height * width, -1, head_dim)
         value_tokens = v_neighbors.reshape(batch, self.heads, height * width, -1, head_dim)
         valid_mask = valid.reshape(1, 1, height * width, -1)
-        self_value = _flatten_spatial_heads(v_heads) if is_self_attn else None
 
         out = self.core(
             query_tokens,
             key_tokens,
             value_tokens,
             valid_mask=valid_mask,
-            self_value=self_value,
         )
         out = _restore_spatial_heads(out, height, width)
         return self.out_proj(out)
@@ -373,22 +371,29 @@ class PointwiseResBlock(nn.Module):
 
 
 class AttnStem(nn.Module):
-    def __init__(self, in_channels: int, dim: int, heads: int, neighborhood_size: int):
+    def __init__(
+        self,
+        in_channels: int,
+        dim: int,
+        heads: int,
+        ffn_expansion: int,
+        dropout: float = 0.0,
+    ):
         super().__init__()
         self.proj = nn.Conv2d(in_channels, dim, kernel_size=1)
         self.downsample = nn.Conv2d(dim, dim, kernel_size=2, stride=2)
-        self.attn_norm = RMSNorm2d(dim)
-        self.attn = NeighborhoodAttn(
+        self.attn = GlobalBlock(
             dim=dim,
             heads=heads,
-            neighborhood_size=neighborhood_size,
+            ffn_expansion=ffn_expansion,
+            dropout=dropout,
         )
         self.act = nn.GELU()
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         x = self.act(self.proj(x))
         x = self.act(self.downsample(x))
-        return x + self.attn(self.attn_norm(x))
+        return self.attn(x)
 
 
 class LatentDecoder(nn.Module):
@@ -459,13 +464,15 @@ class LCR(nn.Module):
             in_channels=sar_channels,
             dim=dim,
             heads=heads,
-            neighborhood_size=neighborhood_size,
+            ffn_expansion=ffn_expansion,
+            dropout=block_dropout,
         )
         self.hsi_stem = AttnStem(
             in_channels=opt_channels,
             dim=dim,
             heads=heads,
-            neighborhood_size=neighborhood_size,
+            ffn_expansion=ffn_expansion,
+            dropout=block_dropout,
         )
 
         self.wrapper_blocks = nn.ModuleList(
