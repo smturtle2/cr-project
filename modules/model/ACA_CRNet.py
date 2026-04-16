@@ -26,6 +26,7 @@ from torch.nn import init
 
 from .ca import ConAttn
 from .cafm import CloudDensityEstimator, CAFM  # [수정] CAFM 모듈 임포트
+from .cross_modal import SARLightEncoder, CrossModalBlock  # [XMODAL] 모듈 ① 임포트
 
 
 # ============================================================================
@@ -106,9 +107,10 @@ class ACA_CRNet(nn.Module):
     변경점 (원본 대비):
         1) forward(sar, cloudy) — cr-train이 model(*inputs)로 호출
         2) in_channels=15 (S2 13ch + S1 2ch), out_channels=13 (S2 복원)
-        3) body1/body2/body3 분리 — CAFM 삽입 지점
+        3) body1/body2/body3 분리 — CAFM/모듈① 삽입 지점
         4) Optical-only 잔차 — cloudy + net_output
         5) use_cafm 플래그 — False면 원본과 동일 동작 (Ablation용)
+        6) use_cross_modal 플래그 — 모듈① SAR-Optical Cross-Modal Transformer
 
     Args:
         sar_channels: S1 SAR 채널 수 (기본 2)
@@ -118,16 +120,23 @@ class ACA_CRNet(nn.Module):
         feature_sizes: 내부 feature 채널 수 (원본 기본값 256)
         use_cafm: CAFM 모듈 사용 여부 (False면 원본 동작)
         cafm_feat_dim: CAFM 밀도 추정 프로젝션 차원 (기본 32)
+        use_cross_modal: 모듈① Cross-Modal Transformer 사용 여부
+        cross_modal_heads: cross-modal attention head 수 (기본 4)
+        cross_modal_ffn_expansion: GDFN hidden 확장 배수 (기본 2.0)
     """
 
     def __init__(self, sar_channels: int = 2, opt_channels: int = 13,
                  alpha: float = 0.1, num_layers: int = 16,
                  feature_sizes: int = 256,
                  use_cafm: bool = True,       # [수정] CAFM on/off
-                 cafm_feat_dim: int = 32):    # [수정] 밀도 추정 차원
+                 cafm_feat_dim: int = 32,     # [수정] 밀도 추정 차원
+                 use_cross_modal: bool = False,            # [XMODAL] 모듈① on/off
+                 cross_modal_heads: int = 4,               # [XMODAL] attention head 수
+                 cross_modal_ffn_expansion: float = 2.0):  # [XMODAL] GDFN 확장
         super(ACA_CRNet, self).__init__()
 
         self.use_cafm = use_cafm
+        self.use_cross_modal = use_cross_modal  # [XMODAL]
         self.opt_channels = opt_channels
         in_channels = sar_channels + opt_channels  # [수정] 15ch 입력
 
@@ -178,20 +187,41 @@ class ACA_CRNet(nn.Module):
             self.cafm1 = CAFM(feature_sizes)  # body1(ResBlock_att #1) 직후
             self.cafm2 = CAFM(feature_sizes)  # body2(ResBlock_att #2) 직후
 
+        # ── [XMODAL] 모듈① SAR-Optical Cross-Modal Transformer ──
+        if use_cross_modal:
+            self.sar_encoder = SARLightEncoder(
+                sar_channels=sar_channels,
+                feature_channels=feature_sizes,
+                num_blocks=2,
+            )
+            self.cross_modal = CrossModalBlock(
+                dim=feature_sizes,
+                num_heads=cross_modal_heads,
+                ffn_expansion=cross_modal_ffn_expansion,
+            )
+
         # [수정] 커스텀 Loss/시각화에서 참조할 속성
         self.last_density = None   # 마지막 forward의 밀도맵
         self.last_cloudy = None    # 마지막 forward의 cloudy 입력
+        self.last_sar_feat = None  # [XMODAL] 모듈① 시각화/디버깅용 (loss 영향 없음)
 
         # 가중치 초기화 (원본 방식 유지)
         init_weights(self, "kaiming-uniform")
 
-        # [수정] zero_module 재적용: init_weights가 CAFM의 zero-init을 덮어쓰므로
-        # 마지막 Linear 레이어를 다시 0으로 초기화하여 학습 초기 항등 함수 보장
+        # [수정] zero_module 재적용: init_weights가 플러그인의 zero-init을 덮어쓰므로
+        # 마지막 Linear/Conv 레이어를 다시 0으로 초기화하여 학습 초기 항등 함수 보장
         if use_cafm:
             from .cafm import zero_module
             for cafm_module in [self.cafm1, self.cafm2]:
                 zero_module(cafm_module.modulator.scale_net[-1])
                 zero_module(cafm_module.modulator.shift_net[-1])
+
+        # [XMODAL] 모듈① CrossModalBlock의 두 출력 projection을 0-init
+        # → 학습 초기에 블록 전체가 항등함수로 동작, baseline 성능을 해치지 않음
+        if use_cross_modal:
+            from .cafm import zero_module
+            zero_module(self.cross_modal.attn.project_out)
+            zero_module(self.cross_modal.ffn.proj_out)
 
     def forward(self, sar: torch.Tensor, cloudy: torch.Tensor) -> torch.Tensor:
         """cr-train 호환 forward.
@@ -223,6 +253,16 @@ class ACA_CRNet(nn.Module):
 
         # ── Body 구간 1 → ResBlock_att (layer 8) ──
         feat = self.body1(feat)
+
+        # [수정] 모듈①: SAR feature 추출 + cross-modal attention 주입
+        # Q=feat(Optical), K/V=f_sar(SAR), Residual=Q → optical 공간 유지
+        if self.use_cross_modal:
+            f_sar = self.sar_encoder(sar)
+            feat = self.cross_modal(feat, f_sar)
+            self.last_sar_feat = f_sar
+        else:
+            self.last_sar_feat = None
+
         # [수정] CAFM #1: 중간 feature 변조
         if self.use_cafm:
             feat = self.cafm1(feat, self.last_density)

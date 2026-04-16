@@ -1,3 +1,7 @@
-﻿from .CAFM_loss import CloudAdaptiveLoss, SimpleMSELoss
+from .CAFM_loss import CloudAdaptiveLoss, SimpleMSELoss
 
 __all__ = ["CloudAdaptiveLoss", "SimpleMSELoss"]
+
+
+def __init__():
+    pass
