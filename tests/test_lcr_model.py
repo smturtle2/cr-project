@@ -9,10 +9,12 @@ from modules.model.lcr import LCR
 from modules.model.lcr.model import (
     Attn,
     AttnBlock,
+    DWConvFFN,
     EncoderSpatialBlock,
     LCRWrapperBlock,
     LatentDecoder,
     LatentEncoder,
+    ResDWBlock,
     _AttnCore,
     _exclude_self_value_component,
 )
@@ -323,6 +325,34 @@ class LCRModelTest(unittest.TestCase):
         self.assertEqual(out.shape, query.shape)
         self.assertTrue(bool(torch.isfinite(out).all().item()))
 
+    def test_dwconv_ffn_uses_depthwise_3x3_between_pointwise_layers(self) -> None:
+        ffn = DWConvFFN(dim=8, expansion=3)
+        x = torch.randn(1, 8, 6, 7)
+
+        out = ffn(x)
+        depthwise = ffn.net[2]
+
+        self.assertEqual(out.shape, x.shape)
+        self.assertIsInstance(depthwise, torch.nn.Conv2d)
+        self.assertEqual(depthwise.kernel_size, (3, 3))
+        self.assertEqual(depthwise.padding, (1, 1))
+        self.assertEqual(depthwise.in_channels, 24)
+        self.assertEqual(depthwise.out_channels, 24)
+        self.assertEqual(depthwise.groups, 24)
+
+    def test_resdw_block_uses_depthwise_3x3_conv(self) -> None:
+        block = ResDWBlock(dim=8, ffn_expansion=2)
+        x = torch.randn(1, 8, 6, 7)
+
+        out = block(x)
+
+        self.assertEqual(out.shape, x.shape)
+        self.assertEqual(block.conv.kernel_size, (3, 3))
+        self.assertEqual(block.conv.padding, (1, 1))
+        self.assertEqual(block.conv.in_channels, 8)
+        self.assertEqual(block.conv.out_channels, 8)
+        self.assertEqual(block.conv.groups, 8)
+
     def test_latent_encoder_uses_patch_embedding_grid_and_conv_residual_blocks(self) -> None:
         encoder = LatentEncoder(
             in_channels=2,
@@ -414,6 +444,7 @@ class LCRModelTest(unittest.TestCase):
             self_block_count=1,
             heads=4,
             patch_size=2,
+            encoder_block_count=1,
         )
         wrapper = model.wrapper_blocks[0]
 
@@ -507,7 +538,7 @@ class LCRModelTest(unittest.TestCase):
         self.assertEqual(model.candidate_decoder.upsample.upscale_factor, 3)
         self.assertEqual(model.candidate_decoder.expand.out_channels, 16 * 3 * 3)
 
-    def test_lcr_uses_3x3_depthwise_spatial_mixing_only_in_encoder(self) -> None:
+    def test_lcr_uses_depthwise_for_all_3x3_spatial_mixing(self) -> None:
         model = LCR(dim=32, num_blocks=1, heads=4)
 
         convs_3x3 = [
@@ -518,7 +549,19 @@ class LCRModelTest(unittest.TestCase):
         ]
         self.assertTrue(convs_3x3)
         self.assertTrue(all(conv.groups == conv.in_channels == conv.out_channels for conv in convs_3x3))
-        self.assertEqual(len(convs_3x3), model.encoder_block_count * 2)
+        expected_encoder_convs = model.encoder_block_count * 2
+        expected_encoder_ffns = model.encoder_block_count * 2
+        expected_wrapper_ffns = model.num_blocks * (model.cross_block_count + model.self_block_count)
+        expected_decoder_resdw_convs = 2
+        expected_decoder_resdw_ffns = 2
+        self.assertEqual(
+            len(convs_3x3),
+            expected_encoder_convs
+            + expected_encoder_ffns
+            + expected_wrapper_ffns
+            + expected_decoder_resdw_convs
+            + expected_decoder_resdw_ffns,
+        )
 
     def test_attn_block_uses_same_resolution_attn(self) -> None:
         block = AttnBlock(dim=32, heads=4, ffn_expansion=2)

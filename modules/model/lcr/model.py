@@ -86,6 +86,8 @@ class DWConvFFN(nn.Module):
         self.net = nn.Sequential(
             nn.Conv2d(dim, hidden_dim, kernel_size=1),
             nn.GELU(),
+            nn.Conv2d(hidden_dim, hidden_dim, kernel_size=3, padding=1, groups=hidden_dim),
+            nn.GELU(),
             nn.Conv2d(hidden_dim, dim, kernel_size=1),
         )
 
@@ -216,7 +218,7 @@ class ResDWBlock(nn.Module):
         super().__init__()
         dropout = _validate_dropout_prob("dropout", dropout)
         self.conv_norm = RMSNorm2d(dim)
-        self.conv = nn.Conv2d(dim, dim, kernel_size=1)
+        self.conv = nn.Conv2d(dim, dim, kernel_size=3, padding=1, groups=dim)
         self.conv_dropout = nn.Dropout(p=dropout)
         self.ffn_norm = RMSNorm2d(dim)
         self.ffn = DWConvFFN(dim=dim, expansion=ffn_expansion)
@@ -259,12 +261,18 @@ class EncoderSpatialBlock(nn.Module):
         self.ffn_dropout = nn.Dropout(p=dropout)
         self.act = nn.GELU()
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def _spatial_residual(self, x: torch.Tensor) -> torch.Tensor:
         spatial = self.spatial_norm(x)
         spatial = self.depthwise(spatial)
         spatial = self.pointwise(self.act(spatial))
-        x = x + self.spatial_dropout(spatial)
-        x = x + self.ffn_dropout(self.ffn(self.ffn_norm(x)))
+        return self.spatial_dropout(spatial)
+
+    def _ffn_residual(self, x: torch.Tensor) -> torch.Tensor:
+        return self.ffn_dropout(self.ffn(self.ffn_norm(x)))
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x = x + self._spatial_residual(x)
+        x = x + self._ffn_residual(x)
         return x
 
 
@@ -290,12 +298,21 @@ class LatentEncoder(nn.Module):
         )
         self.act = nn.GELU()
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        x = self.act(self.proj(x))
-        x = self.act(self.patch_embed(x))
+    def _project(self, x: torch.Tensor) -> torch.Tensor:
+        return self.act(self.proj(x))
+
+    def _embed_patches(self, x: torch.Tensor) -> torch.Tensor:
+        return self.act(self.patch_embed(x))
+
+    def _run_encoder_blocks(self, x: torch.Tensor) -> torch.Tensor:
         for encoder_block in self.encoder_blocks:
             x = encoder_block(x)
         return x
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x = self._project(x)
+        x = self._embed_patches(x)
+        return self._run_encoder_blocks(x)
 
 
 class LatentDecoder(nn.Module):
@@ -427,7 +444,7 @@ class LCR(nn.Module):
 
         nn.init.constant_(self.mask_out.bias, mask_bias_init)
 
-    def forward(self, sar: torch.Tensor, cloudy: torch.Tensor) -> torch.Tensor:
+    def _validate_inputs(self, sar: torch.Tensor, cloudy: torch.Tensor) -> None:
         if sar.shape[0] != cloudy.shape[0] or sar.shape[-2:] != cloudy.shape[-2:]:
             raise ValueError("sar and cloudy inputs must share the same batch and spatial size")
         if sar.shape[1] != self.sar_channels:
@@ -437,15 +454,27 @@ class LCR(nn.Module):
                 f"expected cloudy to have {self.opt_channels} channels, got {cloudy.shape[1]}"
             )
 
-        z0 = self.sar_encoder(sar)
-        h = self.hsi_encoder(cloudy)
-        z = z0
-
+    def _run_wrapper_blocks(self, z: torch.Tensor, h: torch.Tensor) -> torch.Tensor:
         for wrapper_block in self.wrapper_blocks:
             z = wrapper_block(z, h)
+        return z
 
-        candidate = self.candidate_head(self.candidate_decoder(z))
-        mask_logits = self.mask_out(self.mask_decoder(z))
-        mask = torch.sigmoid(mask_logits)
+    def _decode_candidate(self, z: torch.Tensor) -> torch.Tensor:
+        candidate_features = self.candidate_decoder(z)
+        return self.candidate_head(candidate_features)
 
+    def _decode_mask(self, z: torch.Tensor) -> torch.Tensor:
+        mask_features = self.mask_decoder(z)
+        mask_logits = self.mask_out(mask_features)
+        return torch.sigmoid(mask_logits)
+
+    def forward(self, sar: torch.Tensor, cloudy: torch.Tensor) -> torch.Tensor:
+        self._validate_inputs(sar, cloudy)
+
+        z = self.sar_encoder(sar)
+        h = self.hsi_encoder(cloudy)
+        z = self._run_wrapper_blocks(z, h)
+
+        candidate = self._decode_candidate(z)
+        mask = self._decode_mask(z)
         return (1.0 - mask) * cloudy + mask * candidate
