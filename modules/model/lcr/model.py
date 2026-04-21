@@ -246,49 +246,73 @@ class PointwiseResBlock(nn.Module):
         return x + self.residual_dropout(self.net(self.norm(x)))
 
 
+class EncoderSpatialBlock(nn.Module):
+    def __init__(self, dim: int, ffn_expansion: int, dropout: float = 0.0):
+        super().__init__()
+        dropout = _validate_dropout_prob("dropout", dropout)
+        self.spatial_norm = RMSNorm2d(dim)
+        self.depthwise = nn.Conv2d(dim, dim, kernel_size=3, padding=1, groups=dim)
+        self.pointwise = nn.Conv2d(dim, dim, kernel_size=1)
+        self.spatial_dropout = nn.Dropout(p=dropout)
+        self.ffn_norm = RMSNorm2d(dim)
+        self.ffn = DWConvFFN(dim=dim, expansion=ffn_expansion)
+        self.ffn_dropout = nn.Dropout(p=dropout)
+        self.act = nn.GELU()
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        spatial = self.spatial_norm(x)
+        spatial = self.depthwise(spatial)
+        spatial = self.pointwise(self.act(spatial))
+        x = x + self.spatial_dropout(spatial)
+        x = x + self.ffn_dropout(self.ffn(self.ffn_norm(x)))
+        return x
+
+
 class LatentEncoder(nn.Module):
     def __init__(
         self,
         in_channels: int,
         dim: int,
-        heads: int,
         ffn_expansion: int,
-        self_block_count: int,
+        encoder_block_count: int,
+        patch_size: int,
         dropout: float = 0.0,
     ):
         super().__init__()
+        self.patch_size = patch_size
         self.proj = nn.Conv2d(in_channels, dim, kernel_size=1)
-        self.downsample = nn.Conv2d(dim, dim, kernel_size=2, stride=2)
-        self.self_blocks = nn.ModuleList(
+        self.patch_embed = nn.Conv2d(dim, dim, kernel_size=patch_size, stride=patch_size)
+        self.encoder_blocks = nn.ModuleList(
             [
-                AttnBlock(
-                    dim=dim,
-                    heads=heads,
-                    ffn_expansion=ffn_expansion,
-                    dropout=dropout,
-                    exclude_self_value=True,
-                )
-                for _ in range(self_block_count)
+                EncoderSpatialBlock(dim=dim, ffn_expansion=ffn_expansion, dropout=dropout)
+                for _ in range(encoder_block_count)
             ]
         )
         self.act = nn.GELU()
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         x = self.act(self.proj(x))
-        x = self.act(self.downsample(x))
-        for self_block in self.self_blocks:
-            x = self_block(x)
+        x = self.act(self.patch_embed(x))
+        for encoder_block in self.encoder_blocks:
+            x = encoder_block(x)
         return x
 
 
 class LatentDecoder(nn.Module):
-    def __init__(self, dim: int, ffn_expansion: int, dropout: float = 0.0):
+    def __init__(
+        self,
+        dim: int,
+        patch_size: int,
+        ffn_expansion: int,
+        dropout: float = 0.0,
+    ):
         super().__init__()
         dropout = _validate_dropout_prob("dropout", dropout)
+        self.patch_size = patch_size
         self.full_dim = max(dim // 2, 1)
         self.block_latent = ResDWBlock(dim=dim, ffn_expansion=ffn_expansion, dropout=dropout)
-        self.expand = nn.Conv2d(dim, 4 * self.full_dim, kernel_size=1)
-        self.upsample = nn.PixelShuffle(2)
+        self.expand = nn.Conv2d(dim, self.full_dim * patch_size * patch_size, kernel_size=1)
+        self.upsample = nn.PixelShuffle(patch_size)
         self.block_full = PointwiseResBlock(
             dim=self.full_dim,
             expansion=ffn_expansion,
@@ -316,6 +340,8 @@ class LCR(nn.Module):
         ffn_expansion: int = 2,
         cross_block_count: int = 1,
         self_block_count: int = 1,
+        encoder_block_count: int = 4,
+        patch_size: int = 2,
         mask_bias_init: float = -2.0,
         block_dropout: float = 0.08,
         decoder_dropout: float = 0.05,
@@ -329,6 +355,10 @@ class LCR(nn.Module):
             raise ValueError("cross_block_count must be greater than zero")
         if self_block_count <= 0:
             raise ValueError("self_block_count must be greater than zero")
+        if encoder_block_count <= 0:
+            raise ValueError("encoder_block_count must be greater than zero")
+        if patch_size <= 0:
+            raise ValueError("patch_size must be greater than zero")
         block_dropout = _validate_dropout_prob("block_dropout", block_dropout)
         decoder_dropout = _validate_dropout_prob("decoder_dropout", decoder_dropout)
 
@@ -338,23 +368,25 @@ class LCR(nn.Module):
         self.num_blocks = num_blocks
         self.cross_block_count = cross_block_count
         self.self_block_count = self_block_count
+        self.encoder_block_count = encoder_block_count
+        self.patch_size = patch_size
         self.block_dropout = block_dropout
         self.decoder_dropout = decoder_dropout
 
         self.sar_encoder = LatentEncoder(
             in_channels=sar_channels,
             dim=dim,
-            heads=heads,
             ffn_expansion=ffn_expansion,
-            self_block_count=self_block_count,
+            encoder_block_count=encoder_block_count,
+            patch_size=patch_size,
             dropout=block_dropout,
         )
         self.hsi_encoder = LatentEncoder(
             in_channels=opt_channels,
             dim=dim,
-            heads=heads,
             ffn_expansion=ffn_expansion,
-            self_block_count=self_block_count,
+            encoder_block_count=encoder_block_count,
+            patch_size=patch_size,
             dropout=block_dropout,
         )
 
@@ -374,11 +406,13 @@ class LCR(nn.Module):
 
         self.candidate_decoder = LatentDecoder(
             dim=dim,
+            patch_size=patch_size,
             ffn_expansion=ffn_expansion,
             dropout=decoder_dropout,
         )
         self.mask_decoder = LatentDecoder(
             dim=dim,
+            patch_size=patch_size,
             ffn_expansion=ffn_expansion,
             dropout=decoder_dropout,
         )
@@ -402,8 +436,6 @@ class LCR(nn.Module):
             raise ValueError(
                 f"expected cloudy to have {self.opt_channels} channels, got {cloudy.shape[1]}"
             )
-        if sar.shape[-2] % 2 != 0 or sar.shape[-1] % 2 != 0:
-            raise ValueError("LCR expects spatial dimensions divisible by 2")
 
         z0 = self.sar_encoder(sar)
         h = self.hsi_encoder(cloudy)
