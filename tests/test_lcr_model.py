@@ -9,6 +9,7 @@ from modules.model.lcr import LCR
 from modules.model.lcr.model import (
     Attn,
     AttnBlock,
+    EncoderSpatialBlock,
     LCRWrapperBlock,
     LatentDecoder,
     LatentEncoder,
@@ -54,14 +55,49 @@ class LCRModelTest(unittest.TestCase):
 
         self.assertEqual(prediction.shape, (1, 13, 34, 38))
 
-    def test_forward_rejects_odd_spatial_size(self) -> None:
-        model = LCR(dim=32, num_blocks=1, heads=4)
+    def test_forward_uses_configured_patch_size(self) -> None:
+        model = LCR(dim=32, num_blocks=1, heads=4, patch_size=4)
 
-        sar = torch.randn(1, 2, 246, 261)
-        cloudy = torch.randn(1, 13, 246, 261)
+        sar = torch.randn(1, 2, 16, 20)
+        cloudy = torch.randn(1, 13, 16, 20)
 
-        with self.assertRaisesRegex(ValueError, "divisible by 2"):
-            model(sar, cloudy)
+        prediction = model(sar, cloudy)
+
+        self.assertEqual(model.patch_size, 4)
+        self.assertEqual(prediction.shape, (1, 13, 16, 20))
+
+    def test_default_initialization_does_not_collapse_to_cloudy_input(self) -> None:
+        model = LCR(dim=32, num_blocks=1, heads=4).eval()
+
+        sar = torch.randn(1, 2, 32, 32)
+        cloudy = torch.randn(1, 13, 32, 32)
+
+        with torch.no_grad():
+            prediction = model(sar, cloudy)
+
+        self.assertGreater(float((prediction - cloudy).abs().mean()), 1e-3)
+
+    def test_default_initialization_keeps_mask_and_trunk_gradients_alive(self) -> None:
+        model = LCR(dim=32, num_blocks=1, cross_block_count=1, self_block_count=1, heads=4)
+        loss_fn = LCRLoss()
+
+        sar = torch.randn(1, 2, 32, 32)
+        cloudy = torch.randn(1, 13, 32, 32)
+        target = torch.randn(1, 13, 32, 32)
+
+        loss = loss_fn(model(sar, cloudy), target)
+        loss.backward()
+
+        mask_bias_grad = model.mask_out.bias.grad
+        cross_q_grad = model.wrapper_blocks[0].cross_blocks[0].attn.q_proj.weight.grad
+        encoder_conv_grad = model.sar_encoder.encoder_blocks[0].depthwise.weight.grad
+
+        self.assertIsNotNone(mask_bias_grad)
+        self.assertIsNotNone(cross_q_grad)
+        self.assertIsNotNone(encoder_conv_grad)
+        self.assertGreater(float(mask_bias_grad.abs().mean()), 1e-4)
+        self.assertGreater(float(cross_q_grad.abs().mean()), 1e-7)
+        self.assertGreater(float(encoder_conv_grad.abs().mean()), 1e-7)
 
     def test_mismatched_spatial_size_raises(self) -> None:
         model = LCR(dim=32, num_blocks=1, heads=4)
@@ -71,6 +107,14 @@ class LCRModelTest(unittest.TestCase):
 
         with self.assertRaisesRegex(ValueError, "same batch and spatial size"):
             model(sar, cloudy)
+
+    def test_invalid_patch_size_config_raises(self) -> None:
+        with self.assertRaisesRegex(ValueError, "patch_size must be greater than zero"):
+            LCR(dim=32, num_blocks=1, heads=4, patch_size=0)
+
+    def test_invalid_encoder_block_count_config_raises(self) -> None:
+        with self.assertRaisesRegex(ValueError, "encoder_block_count must be greater than zero"):
+            LCR(dim=32, num_blocks=1, heads=4, encoder_block_count=0)
 
     def test_lcr_loss_backward_is_finite(self) -> None:
         model = LCR(
@@ -279,6 +323,73 @@ class LCRModelTest(unittest.TestCase):
         self.assertEqual(out.shape, query.shape)
         self.assertTrue(bool(torch.isfinite(out).all().item()))
 
+    def test_latent_encoder_uses_patch_embedding_grid_and_conv_residual_blocks(self) -> None:
+        encoder = LatentEncoder(
+            in_channels=2,
+            dim=8,
+            ffn_expansion=2,
+            encoder_block_count=1,
+            patch_size=4,
+        )
+        x = torch.randn(1, 2, 16, 20)
+
+        encoded = encoder(x)
+
+        self.assertEqual(encoder.patch_size, 4)
+        self.assertIsInstance(encoder.proj, torch.nn.Conv2d)
+        self.assertEqual(encoder.proj.kernel_size, (1, 1))
+        self.assertEqual(encoder.proj.in_channels, 2)
+        self.assertEqual(encoder.proj.out_channels, 8)
+        self.assertIsInstance(encoder.patch_embed, torch.nn.Conv2d)
+        self.assertEqual(encoder.patch_embed.kernel_size, (4, 4))
+        self.assertEqual(encoder.patch_embed.stride, (4, 4))
+        self.assertEqual(encoder.patch_embed.in_channels, 8)
+        self.assertEqual(encoder.patch_embed.out_channels, 8)
+        self.assertFalse(hasattr(encoder, "self_blocks"))
+        self.assertEqual(len(encoder.encoder_blocks), 1)
+        self.assertIsInstance(encoder.encoder_blocks[0], EncoderSpatialBlock)
+        self.assertEqual(encoder.encoder_blocks[0].depthwise.kernel_size, (3, 3))
+        self.assertEqual(encoder.encoder_blocks[0].depthwise.padding, (1, 1))
+        self.assertEqual(encoder.encoder_blocks[0].depthwise.groups, 8)
+        self.assertFalse(any(isinstance(module, AttnBlock) for module in encoder.modules()))
+        self.assertEqual(encoded.shape, (1, 8, 4, 5))
+
+    def test_lcr_attention_receives_patch_grid_tokens(self) -> None:
+        model = LCR(
+            dim=8,
+            num_blocks=1,
+            cross_block_count=1,
+            self_block_count=1,
+            heads=2,
+            patch_size=4,
+        )
+        seen: dict[str, tuple[int, ...]] = {}
+
+        class RecordingCore(torch.nn.Module):
+            def forward(
+                self,
+                query: torch.Tensor,
+                key: torch.Tensor,
+                value: torch.Tensor,
+                *,
+                self_value: torch.Tensor | None = None,
+            ) -> torch.Tensor:
+                seen["query_shape"] = tuple(query.shape)
+                seen["key_shape"] = tuple(key.shape)
+                seen["value_shape"] = tuple(value.shape)
+                return value
+
+        model.wrapper_blocks[0].cross_blocks[0].attn.core = RecordingCore()
+        sar = torch.randn(1, 2, 16, 20)
+        cloudy = torch.randn(1, 13, 16, 20)
+
+        prediction = model(sar, cloudy)
+
+        self.assertEqual(prediction.shape, cloudy.shape)
+        self.assertEqual(seen["query_shape"], (1, 2, 20, 4))
+        self.assertEqual(seen["key_shape"], (1, 2, 20, 4))
+        self.assertEqual(seen["value_shape"], (1, 2, 20, 4))
+
     @unittest.skipUnless(torch.cuda.is_available(), "CUDA is required for flash attention smoke test")
     def test_lcr_cuda_fp32_uses_flash_attention_backend(self) -> None:
         from torch.nn.attention import SDPBackend, sdpa_kernel
@@ -295,32 +406,40 @@ class LCRModelTest(unittest.TestCase):
         self.assertEqual(prediction.dtype, torch.float32)
         self.assertTrue(bool(torch.isfinite(prediction).all().item()))
 
-    def test_model_uses_attn_block_encoders_and_pixelshuffle_decoder(self) -> None:
+    def test_model_uses_patch_encoders_candidate_blend_and_pixelshuffle_decoder(self) -> None:
         model = LCR(
             dim=32,
             num_blocks=1,
             cross_block_count=1,
             self_block_count=1,
             heads=4,
+            patch_size=2,
         )
         wrapper = model.wrapper_blocks[0]
 
         self.assertIsInstance(model.sar_encoder, LatentEncoder)
         self.assertIsInstance(model.hsi_encoder, LatentEncoder)
-        self.assertIsInstance(model.sar_encoder.downsample, torch.nn.Conv2d)
-        self.assertIsInstance(model.hsi_encoder.downsample, torch.nn.Conv2d)
-        self.assertEqual(model.sar_encoder.downsample.kernel_size, (2, 2))
-        self.assertEqual(model.sar_encoder.downsample.stride, (2, 2))
-        self.assertEqual(model.sar_encoder.downsample.padding, (0, 0))
-        self.assertEqual(model.hsi_encoder.downsample.kernel_size, (2, 2))
-        self.assertEqual(model.hsi_encoder.downsample.stride, (2, 2))
-        self.assertEqual(model.hsi_encoder.downsample.padding, (0, 0))
-        self.assertEqual(len(model.sar_encoder.self_blocks), 1)
-        self.assertEqual(len(model.hsi_encoder.self_blocks), 1)
-        self.assertIsInstance(model.sar_encoder.self_blocks[0], AttnBlock)
-        self.assertIsInstance(model.sar_encoder.self_blocks[0].attn, Attn)
-        self.assertIsInstance(model.hsi_encoder.self_blocks[0], AttnBlock)
-        self.assertIsInstance(model.hsi_encoder.self_blocks[0].attn, Attn)
+        self.assertEqual(model.sar_encoder.patch_size, 2)
+        self.assertIsInstance(model.sar_encoder.proj, torch.nn.Conv2d)
+        self.assertEqual(model.sar_encoder.proj.kernel_size, (1, 1))
+        self.assertEqual(model.sar_encoder.proj.in_channels, 2)
+        self.assertEqual(model.hsi_encoder.proj.in_channels, 13)
+        self.assertEqual(model.sar_encoder.proj.out_channels, 32)
+        self.assertEqual(model.hsi_encoder.proj.out_channels, 32)
+        self.assertIsInstance(model.sar_encoder.patch_embed, torch.nn.Conv2d)
+        self.assertEqual(model.sar_encoder.patch_embed.kernel_size, (2, 2))
+        self.assertEqual(model.sar_encoder.patch_embed.stride, (2, 2))
+        self.assertFalse(hasattr(model.sar_encoder, "self_blocks"))
+        self.assertFalse(hasattr(model.hsi_encoder, "self_blocks"))
+        self.assertEqual(len(model.sar_encoder.encoder_blocks), 1)
+        self.assertEqual(len(model.hsi_encoder.encoder_blocks), 1)
+        self.assertIsInstance(model.sar_encoder.encoder_blocks[0], EncoderSpatialBlock)
+        self.assertIsInstance(model.hsi_encoder.encoder_blocks[0], EncoderSpatialBlock)
+        self.assertEqual(model.sar_encoder.encoder_blocks[0].depthwise.kernel_size, (3, 3))
+        self.assertEqual(model.sar_encoder.encoder_blocks[0].depthwise.groups, 32)
+        self.assertEqual(model.hsi_encoder.encoder_blocks[0].depthwise.groups, 32)
+        self.assertFalse(any(isinstance(module, AttnBlock) for module in model.sar_encoder.modules()))
+        self.assertFalse(any(isinstance(module, AttnBlock) for module in model.hsi_encoder.modules()))
         self.assertEqual(len(model.wrapper_blocks), 1)
         self.assertIsInstance(model.wrapper_blocks, torch.nn.ModuleList)
         self.assertIsInstance(wrapper, LCRWrapperBlock)
@@ -333,11 +452,13 @@ class LCRModelTest(unittest.TestCase):
         self.assertIsInstance(model.candidate_decoder, LatentDecoder)
         self.assertIsInstance(model.mask_decoder, LatentDecoder)
         self.assertIsNot(model.candidate_decoder, model.mask_decoder)
+        self.assertFalse(hasattr(model, "delta_decoder"))
+        self.assertFalse(hasattr(model, "delta_head"))
         self.assertEqual(model.candidate_decoder.full_dim, 16)
         self.assertIsInstance(model.candidate_decoder.expand, torch.nn.Conv2d)
         self.assertEqual(model.candidate_decoder.expand.kernel_size, (1, 1))
         self.assertEqual(model.candidate_decoder.expand.in_channels, 32)
-        self.assertEqual(model.candidate_decoder.expand.out_channels, 64)
+        self.assertEqual(model.candidate_decoder.expand.out_channels, 16 * 2 * 2)
         self.assertIsInstance(model.candidate_decoder.upsample, torch.nn.PixelShuffle)
         self.assertEqual(model.candidate_decoder.upsample.upscale_factor, 2)
         self.assertEqual(model.candidate_decoder.out.kernel_size, (1, 1))
@@ -345,14 +466,15 @@ class LCRModelTest(unittest.TestCase):
         self.assertEqual(model.candidate_head[0].out_channels, 16)
         self.assertEqual(model.candidate_head[0].kernel_size, (1, 1))
         self.assertEqual(model.candidate_head[2].kernel_size, (1, 1))
-        self.assertEqual(model.candidate_head[2].in_channels, 16)
+        self.assertEqual(model.candidate_head[2].out_channels, 13)
         self.assertIsInstance(model.mask_decoder.expand, torch.nn.Conv2d)
-        self.assertEqual(model.mask_decoder.expand.out_channels, 64)
+        self.assertEqual(model.mask_decoder.expand.out_channels, 16 * 2 * 2)
         self.assertIsInstance(model.mask_decoder.upsample, torch.nn.PixelShuffle)
         self.assertEqual(model.mask_decoder.upsample.upscale_factor, 2)
         self.assertEqual(model.mask_out.kernel_size, (1, 1))
         self.assertEqual(model.mask_out.in_channels, 16)
         self.assertTrue(hasattr(model, "wrapper_blocks"))
+        self.assertFalse(any(isinstance(module, torch.nn.PixelUnshuffle) for module in model.modules()))
         self.assertTrue(any(isinstance(module, torch.nn.PixelShuffle) for module in model.modules()))
 
     def test_wrapper_stack_tracks_configured_inner_block_counts(self) -> None:
@@ -361,29 +483,42 @@ class LCRModelTest(unittest.TestCase):
             num_blocks=2,
             cross_block_count=3,
             self_block_count=2,
+            encoder_block_count=2,
             heads=4,
         )
 
         self.assertEqual(model.num_blocks, 2)
         self.assertEqual(model.cross_block_count, 3)
         self.assertEqual(model.self_block_count, 2)
+        self.assertEqual(model.encoder_block_count, 2)
         self.assertEqual(len(model.wrapper_blocks), 2)
         self.assertTrue(all(isinstance(wrapper, LCRWrapperBlock) for wrapper in model.wrapper_blocks))
         self.assertTrue(all(len(wrapper.cross_blocks) == 3 for wrapper in model.wrapper_blocks))
         self.assertTrue(all(len(wrapper.self_blocks) == 2 for wrapper in model.wrapper_blocks))
-        self.assertEqual(len(model.sar_encoder.self_blocks), 2)
-        self.assertEqual(len(model.hsi_encoder.self_blocks), 2)
+        self.assertEqual(len(model.sar_encoder.encoder_blocks), 2)
+        self.assertEqual(len(model.hsi_encoder.encoder_blocks), 2)
 
-    def test_lcr_contains_no_3x3_convolutions(self) -> None:
+    def test_lcr_patch_embed_kernel_tracks_patch_size(self) -> None:
+        model = LCR(dim=32, num_blocks=1, heads=4, patch_size=3)
+
+        self.assertEqual(model.sar_encoder.patch_embed.kernel_size, (3, 3))
+        self.assertEqual(model.sar_encoder.patch_embed.stride, (3, 3))
+        self.assertEqual(model.hsi_encoder.patch_embed.kernel_size, (3, 3))
+        self.assertEqual(model.candidate_decoder.upsample.upscale_factor, 3)
+        self.assertEqual(model.candidate_decoder.expand.out_channels, 16 * 3 * 3)
+
+    def test_lcr_uses_3x3_depthwise_spatial_mixing_only_in_encoder(self) -> None:
         model = LCR(dim=32, num_blocks=1, heads=4)
 
-        kernel_sizes = [
-            module.kernel_size
+        convs_3x3 = [
+            module
             for module in model.modules()
             if isinstance(module, torch.nn.Conv2d)
+            and module.kernel_size == (3, 3)
         ]
-        self.assertTrue(kernel_sizes)
-        self.assertFalse(any(kernel_size == (3, 3) for kernel_size in kernel_sizes))
+        self.assertTrue(convs_3x3)
+        self.assertTrue(all(conv.groups == conv.in_channels == conv.out_channels for conv in convs_3x3))
+        self.assertEqual(len(convs_3x3), model.encoder_block_count * 2)
 
     def test_attn_block_uses_same_resolution_attn(self) -> None:
         block = AttnBlock(dim=32, heads=4, ffn_expansion=2)
@@ -397,14 +532,18 @@ class LCRModelTest(unittest.TestCase):
 
         self.assertEqual(out.shape, z.shape)
 
-    def test_latent_decoder_pixelshuffle_doubles_spatial_size_and_sets_full_dim_channels(self) -> None:
-        decoder = LatentDecoder(dim=8, ffn_expansion=2)
+    def test_latent_decoder_pixelshuffle_restores_patch_resolution(self) -> None:
+        decoder = LatentDecoder(dim=8, patch_size=4, ffn_expansion=2)
         latent = torch.randn(1, 8, 5, 7)
 
         decoded = decoder(latent)
 
+        self.assertEqual(decoder.patch_size, 4)
         self.assertEqual(decoder.full_dim, 4)
-        self.assertEqual(decoded.shape, (1, 4, 10, 14))
+        self.assertEqual(decoder.expand.out_channels, 4 * 4 * 4)
+        self.assertIsInstance(decoder.upsample, torch.nn.PixelShuffle)
+        self.assertEqual(decoder.upsample.upscale_factor, 4)
+        self.assertEqual(decoded.shape, (1, 4, 20, 28))
 
     def test_mask_out_bias_uses_mask_bias_init(self) -> None:
         model = LCR(dim=32, num_blocks=1, heads=4, mask_bias_init=-1.5)
