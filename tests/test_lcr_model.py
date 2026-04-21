@@ -14,6 +14,7 @@ from modules.model.lcr.model import (
     LCRWrapperBlock,
     LatentDecoder,
     LatentEncoder,
+    PointwiseFFN,
     ResDWBlock,
     _AttnCore,
     _exclude_self_value_component,
@@ -340,6 +341,23 @@ class LCRModelTest(unittest.TestCase):
         self.assertEqual(depthwise.out_channels, 24)
         self.assertEqual(depthwise.groups, 24)
 
+    def test_attn_block_uses_pointwise_ffn_without_spatial_conv(self) -> None:
+        block = AttnBlock(dim=8, heads=2, ffn_expansion=3)
+        x = torch.randn(1, 8, 6, 7)
+
+        out = block.ffn(x)
+        ffn_convs = [
+            module
+            for module in block.ffn.modules()
+            if isinstance(module, torch.nn.Conv2d)
+        ]
+
+        self.assertEqual(out.shape, x.shape)
+        self.assertIsInstance(block.ffn, PointwiseFFN)
+        self.assertNotIsInstance(block.ffn, DWConvFFN)
+        self.assertEqual(len(ffn_convs), 2)
+        self.assertTrue(all(conv.kernel_size == (1, 1) for conv in ffn_convs))
+
     def test_resdw_block_uses_depthwise_3x3_conv(self) -> None:
         block = ResDWBlock(dim=8, ffn_expansion=2)
         x = torch.randn(1, 8, 6, 7)
@@ -547,18 +565,23 @@ class LCRModelTest(unittest.TestCase):
             if isinstance(module, torch.nn.Conv2d)
             and module.kernel_size == (3, 3)
         ]
+        wrapper_convs_3x3 = [
+            module
+            for module in model.wrapper_blocks.modules()
+            if isinstance(module, torch.nn.Conv2d)
+            and module.kernel_size == (3, 3)
+        ]
         self.assertTrue(convs_3x3)
         self.assertTrue(all(conv.groups == conv.in_channels == conv.out_channels for conv in convs_3x3))
         expected_encoder_convs = model.encoder_block_count * 2
         expected_encoder_ffns = model.encoder_block_count * 2
-        expected_wrapper_ffns = model.num_blocks * (model.cross_block_count + model.self_block_count)
         expected_decoder_resdw_convs = 2
         expected_decoder_resdw_ffns = 2
+        self.assertEqual(wrapper_convs_3x3, [])
         self.assertEqual(
             len(convs_3x3),
             expected_encoder_convs
             + expected_encoder_ffns
-            + expected_wrapper_ffns
             + expected_decoder_resdw_convs
             + expected_decoder_resdw_ffns,
         )

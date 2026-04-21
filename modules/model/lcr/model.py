@@ -95,6 +95,20 @@ class DWConvFFN(nn.Module):
         return self.net(x)
 
 
+class PointwiseFFN(nn.Module):
+    def __init__(self, dim: int, expansion: int = 2):
+        super().__init__()
+        hidden_dim = dim * expansion
+        self.net = nn.Sequential(
+            nn.Conv2d(dim, hidden_dim, kernel_size=1),
+            nn.GELU(),
+            nn.Conv2d(hidden_dim, dim, kernel_size=1),
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.net(x)
+
+
 class Attn(nn.Module):
     def __init__(self, dim: int, heads: int):
         super().__init__()
@@ -150,7 +164,7 @@ class AttnBlock(nn.Module):
         self.attn = Attn(dim=dim, heads=heads)
         self.attn_dropout = nn.Dropout(p=dropout)
         self.ffn_norm = RMSNorm2d(dim)
-        self.ffn = DWConvFFN(dim=dim, expansion=ffn_expansion)
+        self.ffn = PointwiseFFN(dim=dim, expansion=ffn_expansion)
         self.ffn_dropout = nn.Dropout(p=dropout)
 
     def forward(self, z: torch.Tensor, context: torch.Tensor | None = None) -> torch.Tensor:
