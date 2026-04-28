@@ -23,13 +23,13 @@ def _restore_spatial_heads(x: torch.Tensor, height: int, width: int) -> torch.Te
     )
 
 
-def _exclude_self_value_component(
+def _apply_xsa(
     attn_out: torch.Tensor,
-    self_value: torch.Tensor,
+    xsa_self_value: torch.Tensor,
     eps: float = 1e-12,
 ) -> torch.Tensor:
-    self_value_unit = F.normalize(self_value, dim=-1, eps=eps)
-    return attn_out - (attn_out * self_value_unit).sum(dim=-1, keepdim=True) * self_value_unit
+    xsa_self_value_unit = F.normalize(xsa_self_value, dim=-1, eps=eps)
+    return attn_out - (attn_out * xsa_self_value_unit).sum(dim=-1, keepdim=True) * xsa_self_value_unit
 
 
 def _validate_dropout_prob(name: str, value: float) -> float:
@@ -45,7 +45,8 @@ class _AttnCore(nn.Module):
         key: torch.Tensor,
         value: torch.Tensor,
         *,
-        self_value: torch.Tensor | None = None,
+        use_xsa: bool = False,
+        xsa_self_value: torch.Tensor | None = None,
     ) -> torch.Tensor:
         output_dtype = query.dtype
         if query.is_cuda and query.dtype == torch.float32:
@@ -63,8 +64,10 @@ class _AttnCore(nn.Module):
             dropout_p=0.0,
         ).to(dtype=output_dtype)
 
-        if self_value is not None:
-            out = _exclude_self_value_component(out, self_value)
+        if use_xsa:
+            if xsa_self_value is None:
+                raise ValueError("xsa_self_value must be provided when use_xsa=True")
+            out = _apply_xsa(out, xsa_self_value)
         return out
 
 
@@ -110,39 +113,44 @@ class PointwiseFFN(nn.Module):
 
 
 class Attn(nn.Module):
-    def __init__(self, dim: int, heads: int):
+    def __init__(self, dim: int, heads: int, use_xsa: bool = False):
         super().__init__()
         if dim % heads != 0:
             raise ValueError("dim must be divisible by heads")
         self.dim = dim
         self.heads = heads
+        self.use_xsa = use_xsa
         self.core = _AttnCore()
         self.q_proj = nn.Conv2d(dim, dim, kernel_size=1)
-        self.k_proj = nn.Conv2d(dim, dim, kernel_size=1)
-        self.v_proj = nn.Conv2d(dim, dim, kernel_size=1)
+        self.kv_proj = nn.Conv2d(dim, dim * 2, kernel_size=1)
+        self.local_v = nn.Conv2d(dim, dim, kernel_size=3, padding=1, groups=dim)
         self.out_proj = nn.Conv2d(dim, dim, kernel_size=1)
 
     def forward(
         self,
         query: torch.Tensor,
         context: torch.Tensor | None = None,
-        *,
-        exclude_self_value: bool = False,
     ) -> torch.Tensor:
         if context is None:
             context = query
 
         q = self.q_proj(query)
-        k = self.k_proj(context)
-        v = self.v_proj(context)
+        k, v = self.kv_proj(context).chunk(2, dim=1)
 
         q_heads = _flatten_spatial_heads(_reshape_spatial_heads(q, self.heads))
         k_heads = _flatten_spatial_heads(_reshape_spatial_heads(k, self.heads))
         v_heads = _flatten_spatial_heads(_reshape_spatial_heads(v, self.heads))
 
-        self_value = v_heads if exclude_self_value else None
-        out = self.core(q_heads, k_heads, v_heads, self_value=self_value)
+        xsa_self_value = v_heads if self.use_xsa else None
+        out = self.core(
+            q_heads,
+            k_heads,
+            v_heads,
+            use_xsa=self.use_xsa,
+            xsa_self_value=xsa_self_value,
+        )
         out = _restore_spatial_heads(out, *query.shape[-2:])
+        out = out + self.local_v(v)
         return self.out_proj(out)
 
 
@@ -154,30 +162,27 @@ class AttnBlock(nn.Module):
         ffn_expansion: int,
         dropout: float = 0.0,
         use_context_norm: bool = False,
-        exclude_self_value: bool = False,
+        use_xsa: bool = False,
     ):
         super().__init__()
         dropout = _validate_dropout_prob("dropout", dropout)
         self.attn_norm = RMSNorm2d(dim)
         self.context_norm = RMSNorm2d(dim) if use_context_norm else None
-        self.exclude_self_value = exclude_self_value
-        self.attn = Attn(dim=dim, heads=heads)
+        self.attn = Attn(dim=dim, heads=heads, use_xsa=use_xsa)
         self.attn_dropout = nn.Dropout(p=dropout)
+        self.attn_scale = nn.Parameter(torch.ones(1, dim, 1, 1) * 1e-2)
         self.ffn_norm = RMSNorm2d(dim)
-        self.ffn = PointwiseFFN(dim=dim, expansion=ffn_expansion)
+        self.ffn = DWConvFFN(dim=dim, expansion=ffn_expansion)
         self.ffn_dropout = nn.Dropout(p=dropout)
+        self.ffn_scale = nn.Parameter(torch.ones(1, dim, 1, 1) * 1e-2)
 
     def forward(self, z: torch.Tensor, context: torch.Tensor | None = None) -> torch.Tensor:
         if context is not None and self.context_norm is not None:
             context = self.context_norm(context)
-        z = z + self.attn_dropout(
-            self.attn(
-                self.attn_norm(z),
-                context,
-                exclude_self_value=self.exclude_self_value,
-            )
-        )
-        z = z + self.ffn_dropout(self.ffn(self.ffn_norm(z)))
+        attn_out = self.attn(self.attn_norm(z), context)
+        z = z + self.attn_dropout(attn_out * self.attn_scale)
+        ffn_out = self.ffn(self.ffn_norm(z))
+        z = z + self.ffn_dropout(ffn_out * self.ffn_scale)
         return z
 
 
@@ -202,6 +207,7 @@ class LCRWrapperBlock(nn.Module):
                     ffn_expansion=ffn_expansion,
                     dropout=block_dropout,
                     use_context_norm=True,
+                    use_xsa=False,
                 )
                 for _ in range(cross_block_count)
             ]
@@ -213,7 +219,7 @@ class LCRWrapperBlock(nn.Module):
                     heads=heads,
                     ffn_expansion=ffn_expansion,
                     dropout=block_dropout,
-                    exclude_self_value=True,
+                    use_xsa=True,
                 )
                 for _ in range(self_block_count)
             ]
