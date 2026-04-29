@@ -11,6 +11,8 @@ from torch.nn import init
 import torch
 from .ca import ConAttn
 
+DefaultConAttn = ConAttn
+
 #resnet block
 class ResBlock(nn.Module):
     def __init__(self,in_channels,out_channels=256,alpha=0.1):
@@ -30,14 +32,15 @@ class ResBlock(nn.Module):
 
 #resnet模块
 class ResBlock_att(nn.Module):
-    def __init__(self,in_channels,out_channels=256,alpha=0.1):
+    def __init__(self,in_channels,out_channels=256,alpha=0.1,ca=DefaultConAttn,ca_kwargs=None):
         super(ResBlock_att, self).__init__()
+        ca_kwargs = {} if ca_kwargs is None else dict(ca_kwargs)
         m = OrderedDict()
         m['conv1']=nn.Conv2d(in_channels, out_channels,kernel_size=3,bias=False,stride=2,padding=1)
         m['relu1']=nn.ReLU(True)
         m['conv2']=nn.Conv2d(out_channels,out_channels, kernel_size=3,bias=False,stride=1,padding=1)
         m['relu2'] = nn.ReLU(True)
-        m['att'] = ConAttn(input_channels=out_channels, output_channels=out_channels, ksize=1, stride=1)
+        m['att'] = ca(input_channels=out_channels, output_channels=out_channels, ksize=1, stride=1, **ca_kwargs)
         self.net = nn.Sequential(m)
         #self.relu= nn.Sequential(nn.ReLU(True))
         self.alpha = alpha
@@ -84,8 +87,19 @@ def init_weights(net, init_type="kaiming-uniform", gain=0.02):
     net.apply(init_func)
 
 class ACA_CRNet(nn.Module):
-    def __init__(self,in_channels,out_channels,alpha=0.1,num_layers = 16 , feature_sizes = 256,gpu_ids=[]):
+    def __init__(
+        self,
+        in_channels,
+        out_channels,
+        alpha=0.1,
+        num_layers=16,
+        feature_sizes=256,
+        gpu_ids=[],
+        ca=DefaultConAttn,
+        ca_kwargs=None,
+    ):
         super(ACA_CRNet,self).__init__()
+        ca_kwargs = {} if ca_kwargs is None else dict(ca_kwargs)
         m= []
         m.append(nn.Conv2d(in_channels,out_channels=feature_sizes,kernel_size=3,bias=True,stride = 1 ,padding=1))
         m.append(nn.ReLU(True))
@@ -95,9 +109,9 @@ class ACA_CRNet(nn.Module):
             #    m.append(ConAttn(input_channels=feature_sizes, output_channels=feature_sizes, ksize=1, stride=1))
 
             if i == num_layers//2:
-                m.append(ResBlock_att(feature_sizes,feature_sizes,alpha))# 256/s==int
+                m.append(ResBlock_att(feature_sizes,feature_sizes,alpha,ca=ca,ca_kwargs=ca_kwargs))# 256/s==int
             elif i == num_layers*3//4:
-                m.append(ResBlock_att(feature_sizes,feature_sizes,alpha))# 256/s==int
+                m.append(ResBlock_att(feature_sizes,feature_sizes,alpha,ca=ca,ca_kwargs=ca_kwargs))# 256/s==int
             else:
                 m.append(ResBlock(feature_sizes, feature_sizes, alpha))
 
