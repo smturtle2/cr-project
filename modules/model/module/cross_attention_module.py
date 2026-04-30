@@ -38,7 +38,7 @@ class CrossAttentionModule(nn.Module):
         self,
         sar_channels,
         feature_channels,
-        num_heads=8,
+        num_heads=4,
         patch_size=2,
         self_num_layers=2,
         cross_num_layers=2,

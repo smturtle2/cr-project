@@ -7,7 +7,7 @@ from torch.nn.attention import SDPBackend, sdpa_kernel
 
 
 class MultiHeadAttention(nn.Module):
-    def __init__(self, dim, num_heads=8, use_xsa=True):
+    def __init__(self, dim, num_heads=4, use_xsa=True):
         super(MultiHeadAttention, self).__init__()
         self.dim = dim
         self.num_heads = num_heads
@@ -50,7 +50,7 @@ class MultiHeadAttention(nn.Module):
 
 
 class TransformerLayer(nn.Module):
-    def __init__(self, dim, num_heads=8, mlp_ratio=4, use_xsa=True):
+    def __init__(self, dim, num_heads=4, mlp_ratio=4, use_xsa=True):
         super(TransformerLayer, self).__init__()
         self.norm1 = nn.RMSNorm(dim)
         self.attn = MultiHeadAttention(dim, num_heads=num_heads, use_xsa=use_xsa)

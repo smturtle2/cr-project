@@ -12,13 +12,20 @@ class BaseModule(nn.Module):
         sar_channels,
         cloudy_channels,
         feature_channels,
-        num_heads=8,
+        num_heads=4,
         patch_size=2,
         self_num_layers=2,
         cross_num_layers=2,
     ):
         super(BaseModule, self).__init__()
-        self.mask = MaskModule(sar_channels, cloudy_channels, feature_channels)
+        self.mask = MaskModule(
+            sar_channels,
+            cloudy_channels,
+            feature_channels,
+            num_heads=num_heads,
+            patch_size=patch_size,
+            num_layers=self_num_layers,
+        )
         self.cross_attn = CrossAttentionModule(
             sar_channels,
             feature_channels,
@@ -29,6 +36,6 @@ class BaseModule(nn.Module):
         )
 
     def forward(self, sar, cloudy, feature):
-        mask = self.mask(sar, cloudy, feature)
+        mask = self.mask(sar, cloudy)
         out = self.cross_attn(sar, feature)
         return feature + out * mask
