@@ -127,7 +127,7 @@ class ACA_CRNet(nn.Module):
         if len(self.gpu_ids) > 0:
             assert(torch.cuda.is_available())
             self.net.to(self.gpu_ids[0])
-        init_weights(self.net,"kaiming-uniform")
+        #init_weights(self.net,"kaiming-uniform")
     
     def forward(self, sar, cloudy):
         x = torch.cat((sar, cloudy), dim=1)
