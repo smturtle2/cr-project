@@ -10,6 +10,7 @@ from collections import OrderedDict
 from torch.nn import init
 import torch
 from .ca import ConAttn
+from ..module.base_module import BaseModule
 
 DefaultConAttn = ConAttn
 
@@ -100,6 +101,7 @@ class ACA_CRNet(nn.Module):
     ):
         super(ACA_CRNet,self).__init__()
         ca_kwargs = {} if ca_kwargs is None else dict(ca_kwargs)
+        sar_channels = in_channels - out_channels
         m= []
         m.append(nn.Conv2d(in_channels,out_channels=feature_sizes,kernel_size=3,bias=True,stride = 1 ,padding=1))
         m.append(nn.ReLU(True))
@@ -110,19 +112,30 @@ class ACA_CRNet(nn.Module):
 
             if i == num_layers//2:
                 m.append(ResBlock_att(feature_sizes,feature_sizes,alpha,ca=ca,ca_kwargs=ca_kwargs))# 256/s==int
+                m.append(BaseModule(sar_channels, out_channels, feature_sizes))
             elif i == num_layers*3//4:
                 m.append(ResBlock_att(feature_sizes,feature_sizes,alpha,ca=ca,ca_kwargs=ca_kwargs))# 256/s==int
+                m.append(BaseModule(sar_channels, out_channels, feature_sizes))
             else:
                 m.append(ResBlock(feature_sizes, feature_sizes, alpha))
 
             #if i == 10:
             #    m.append(ConAttn(input_channels=feature_sizes, output_channels=feature_sizes, ksize=1, stride=1))
         m.append(nn.Conv2d(feature_sizes,out_channels,kernel_size=3, bias=True,stride=1,padding=1))
-        self.net = nn.Sequential(*m)
+        self.net = nn.ModuleList(m)
         self.gpu_ids=gpu_ids
-        self.net = init_net(self.net,"kaiming-uniform", self.gpu_ids)
+        if len(self.gpu_ids) > 0:
+            assert(torch.cuda.is_available())
+            self.net.to(self.gpu_ids[0])
+        init_weights(self.net,"kaiming-uniform")
     
-    def forward(self, x):
-        #print(x.shape)
-        return x+self.net(x)
+    def forward(self, sar, cloudy):
+        x = torch.cat((sar, cloudy), dim=1)
+        out = x
+        for layer in self.net:
+            if isinstance(layer, BaseModule):
+                out = layer(sar, cloudy, out)
+            else:
+                out = layer(out)
+        return cloudy+out
     

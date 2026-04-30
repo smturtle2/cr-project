@@ -8,6 +8,7 @@ from collections import OrderedDict
 
 import torch
 from torch import nn
+from torch.nn.attention import SDPBackend, sdpa_kernel
 from torch.nn import functional as F
 
 
@@ -128,8 +129,9 @@ class ConAttn(nn.Module):
         v_attn = v.to(attn_dtype)
         weighted_v_attn = (weight.to(attn_dtype) * v_attn).contiguous()
 
-        y = F.scaled_dot_product_attention(q, k, v_attn, dropout_p=0.0)
-        yw = F.scaled_dot_product_attention(q, k, weighted_v_attn, dropout_p=0.0)
+        with sdpa_kernel(SDPBackend.FLASH_ATTENTION):
+            y = F.scaled_dot_product_attention(q, k, v_attn, dropout_p=0.0)
+            yw = F.scaled_dot_product_attention(q, k, weighted_v_attn, dropout_p=0.0)
 
         y = y.to(v.dtype)
         yw = yw.to(v.dtype)
