@@ -98,6 +98,7 @@ class ACA_CRNet(nn.Module):
         gpu_ids=[],
         ca=DefaultConAttn,
         ca_kwargs=None,
+        is_baseline=False
     ):
         super(ACA_CRNet,self).__init__()
         ca_kwargs = {} if ca_kwargs is None else dict(ca_kwargs)
@@ -112,10 +113,12 @@ class ACA_CRNet(nn.Module):
 
             if i == num_layers//2:
                 m.append(ResBlock_att(feature_sizes,feature_sizes,alpha,ca=ca,ca_kwargs=ca_kwargs))# 256/s==int
-                m.append(BaseModule(sar_channels, out_channels, feature_sizes))
+                if not is_baseline:
+                    m.append(BaseModule(sar_channels, out_channels, feature_sizes))
             elif i == num_layers*3//4:
                 m.append(ResBlock_att(feature_sizes,feature_sizes,alpha,ca=ca,ca_kwargs=ca_kwargs))# 256/s==int
-                m.append(BaseModule(sar_channels, out_channels, feature_sizes))
+                if not is_baseline:
+                    m.append(BaseModule(sar_channels, out_channels, feature_sizes))
             else:
                 m.append(ResBlock(feature_sizes, feature_sizes, alpha))
 
@@ -127,7 +130,8 @@ class ACA_CRNet(nn.Module):
         if len(self.gpu_ids) > 0:
             assert(torch.cuda.is_available())
             self.net.to(self.gpu_ids[0])
-        #init_weights(self.net,"kaiming-uniform")
+        if is_baseline:
+            init_weights(self.net,"kaiming-uniform")
     
     def forward(self, sar, cloudy):
         x = torch.cat((sar, cloudy), dim=1)
