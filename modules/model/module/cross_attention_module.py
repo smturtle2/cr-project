@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
 
+import torch
 import torch.nn as nn
 
 from .attention import TransformerLayer
@@ -22,7 +23,8 @@ class SAREncoder(nn.Module):
 
     def _to_sequence(self, x):
         b, c, h, w = x.shape
-        return x.flatten(2).transpose(1, 2).contiguous(), h, w
+        x = torch.einsum("b c h w -> b h w c", x)
+        return x.reshape(b, h * w, c), h, w
 
     def forward(self, sar):
         out = self.embed(sar)
@@ -69,11 +71,13 @@ class CrossAttentionModule(nn.Module):
 
     def _to_sequence(self, x):
         b, c, h, w = x.shape
-        return x.flatten(2).transpose(1, 2).contiguous(), h, w
+        x = torch.einsum("b c h w -> b h w c", x)
+        return x.reshape(b, h * w, c), h, w
 
     def _to_feature_map(self, x, h, w):
         b, _, c = x.shape
-        return x.transpose(1, 2).reshape(b, c, h, w)
+        x = x.reshape(b, h, w, c)
+        return torch.einsum("b h w c -> b c h w", x)
 
     def forward(self, sar, feature):
         encoded_sar, h, w = self.sar_encoder(sar)

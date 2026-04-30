@@ -29,11 +29,13 @@ class MaskModule(nn.Module):
 
     def _to_sequence(self, x):
         b, c, h, w = x.shape
-        return x.flatten(2).transpose(1, 2).contiguous(), h, w
+        x = torch.einsum("b c h w -> b h w c", x)
+        return x.reshape(b, h * w, c), h, w
 
     def _to_feature_map(self, x, h, w):
         b, _, c = x.shape
-        return x.transpose(1, 2).reshape(b, c, h, w)
+        x = x.reshape(b, h, w, c)
+        return torch.einsum("b h w c -> b c h w", x)
 
     def forward(self, sar, cloudy):
         out = torch.cat((sar, cloudy), dim=1)
