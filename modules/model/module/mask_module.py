@@ -17,7 +17,7 @@ class MaskModule(nn.Module):
             stride=patch_size,
         )
         self.layers = nn.ModuleList([
-            TransformerLayer(feature_channels, num_heads=num_heads, use_xsa=True)
+            TransformerLayer(feature_channels, num_heads=num_heads)
             for _ in range(num_layers)
         ])
         self.expand = nn.Conv2d(feature_channels, feature_channels * patch_size * patch_size, kernel_size=1)

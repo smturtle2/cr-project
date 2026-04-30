@@ -5,9 +5,9 @@ import torch.nn as nn
 from .attention import TransformerLayer
 
 
-class XSAEncoder(nn.Module):
+class SAREncoder(nn.Module):
     def __init__(self, sar_channels, feature_channels, num_heads=8, self_num_layers=2, patch_size=2):
-        super(XSAEncoder, self).__init__()
+        super(SAREncoder, self).__init__()
         self.embed = nn.Conv2d(sar_channels, feature_channels, kernel_size=1)
         self.patch_embed = nn.Conv2d(
             feature_channels,
@@ -16,7 +16,7 @@ class XSAEncoder(nn.Module):
             stride=patch_size,
         )
         self.layers = nn.ModuleList([
-            TransformerLayer(feature_channels, num_heads=num_heads, use_xsa=True)
+            TransformerLayer(feature_channels, num_heads=num_heads)
             for _ in range(self_num_layers)
         ])
 
@@ -46,7 +46,7 @@ class CrossAttentionModule(nn.Module):
         super(CrossAttentionModule, self).__init__()
         self.patch_size = patch_size
         self.feature_channels = feature_channels
-        self.sar_encoder = XSAEncoder(
+        self.sar_encoder = SAREncoder(
             sar_channels,
             feature_channels,
             num_heads=num_heads,
@@ -60,7 +60,7 @@ class CrossAttentionModule(nn.Module):
             stride=patch_size,
         )
         self.cross_layers = nn.ModuleList([
-            TransformerLayer(feature_channels, num_heads=num_heads, use_xsa=False)
+            TransformerLayer(feature_channels, num_heads=num_heads)
             for _ in range(cross_num_layers)
         ])
         self.expand = nn.Conv2d(feature_channels, feature_channels * patch_size * patch_size, kernel_size=1)
