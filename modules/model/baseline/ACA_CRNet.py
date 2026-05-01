@@ -10,6 +10,7 @@ from collections import OrderedDict
 from torch.nn import init
 import torch
 from .ca import ConAttn
+from ..gate import build_gate_estimator
 from ..module.base_module import BaseModule
 
 DefaultConAttn = ConAttn
@@ -98,11 +99,24 @@ class ACA_CRNet(nn.Module):
         gpu_ids=[],
         ca=DefaultConAttn,
         ca_kwargs=None,
-        is_baseline=False
+        is_baseline=False,
+        gate_mode="mask",
+        gate_feat_dim=32,
+        gate_prior_weight=0.5,
     ):
         super(ACA_CRNet,self).__init__()
         ca_kwargs = {} if ca_kwargs is None else dict(ca_kwargs)
         sar_channels = in_channels - out_channels
+        self.gate_mode = gate_mode
+        self.last_gate = None
+        self.last_gates = []
+        self.gate_estimator = build_gate_estimator(
+            gate_mode,
+            sar_channels=sar_channels,
+            optical_channels=out_channels,
+            feat_dim=gate_feat_dim,
+            prior_weight=gate_prior_weight,
+        )
         m= []
         m.append(nn.Conv2d(in_channels,out_channels=feature_sizes,kernel_size=3,bias=True,stride = 1 ,padding=1))
         m.append(nn.ReLU(True))
@@ -136,10 +150,20 @@ class ACA_CRNet(nn.Module):
     def forward(self, sar, cloudy):
         x = torch.cat((sar, cloudy), dim=1)
         out = x
+        if self.gate_estimator is None:
+            gate = None
+            self.last_gate = None
+        else:
+            gate = self.gate_estimator(sar, cloudy)
+            self.last_gate = gate
+        self.last_gates = []
         for layer in self.net:
             if isinstance(layer, BaseModule):
-                out = layer(sar, cloudy, out)
+                out = layer(sar, cloudy, out, gate=gate)
+                self.last_gates.append(layer.last_gate)
             else:
                 out = layer(out)
+        if gate is None and self.last_gates:
+            self.last_gate = self.last_gates[-1]
         return cloudy + out
     

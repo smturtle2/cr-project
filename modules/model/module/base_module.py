@@ -34,8 +34,11 @@ class BaseModule(nn.Module):
             self_num_layers=self_num_layers,
             cross_num_layers=cross_num_layers,
         )
+        self.last_gate = None
 
-    def forward(self, sar, cloudy, feature):
-        mask = self.mask(sar, cloudy)
+    def forward(self, sar, cloudy, feature, gate=None):
+        if gate is None:
+            gate = self.mask(sar, cloudy)
+        self.last_gate = gate
         out = self.cross_attn(sar, feature)
-        return feature + out * mask
+        return feature + out * gate
