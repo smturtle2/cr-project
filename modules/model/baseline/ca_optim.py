@@ -17,20 +17,23 @@ class ConAttn(nn.Module):
         stride=1,
         rate=1,
         softmax_scale=1.0,
-        chunk_size=512,
+        chunk_size="auto",
     ):
         super().__init__()
         if ksize != 1:
             raise ValueError("ca_optim.ConAttn currently supports ksize=1 only.")
         if stride != 1:
             raise ValueError("ca_optim.ConAttn currently supports stride=1 only.")
-        if chunk_size <= 0:
+        if isinstance(chunk_size, str):
+            if chunk_size != "auto":
+                raise ValueError("chunk_size must be a positive integer or 'auto'.")
+        elif chunk_size <= 0:
             raise ValueError("chunk_size must be positive.")
 
         self.ksize = ksize
         self.stride = stride
         self.softmax_scale = softmax_scale
-        self.chunk_size = int(chunk_size)
+        self.chunk_size = chunk_size if chunk_size == "auto" else int(chunk_size)
 
         self.linear_weight = nn.Sequential(
             nn.Conv2d(
@@ -103,6 +106,7 @@ class ConAttn(nn.Module):
         query_channels, height, width = query_map.shape
         value_channels = value_map.shape[0]
         num_tokens = height * width
+        chunk_size = self._resolve_chunk_size(num_tokens, query_map.dtype, query_map.device)
 
         query_tokens = query_map.reshape(query_channels, num_tokens)
         key_tokens = query_tokens.transpose(0, 1)
@@ -114,8 +118,8 @@ class ConAttn(nn.Module):
         bias_tokens = bias_map.reshape(num_tokens)
         output = value_tokens.new_empty(value_channels, num_tokens)
 
-        for start in range(0, num_tokens, self.chunk_size):
-            end = min(start + self.chunk_size, num_tokens)
+        for start in range(0, num_tokens, chunk_size):
+            end = min(start + chunk_size, num_tokens)
             query_chunk = query_tokens[:, start:end]
             logits = key_tokens @ query_chunk
 
@@ -129,3 +133,28 @@ class ConAttn(nn.Module):
             output[:, start:end] = value_tokens @ attn
 
         return output.reshape(value_channels, height, width)
+
+    def _resolve_chunk_size(self, num_tokens, dtype, device):
+        if self.chunk_size != "auto":
+            return min(int(self.chunk_size), num_tokens)
+
+        if device.type != "cuda" or not torch.cuda.is_available():
+            return min(num_tokens, 4096)
+
+        try:
+            free_bytes, _ = torch.cuda.mem_get_info(device)
+        except TypeError:
+            with torch.cuda.device(device):
+                free_bytes, _ = torch.cuda.mem_get_info()
+        except RuntimeError:
+            return min(num_tokens, 4096)
+
+        element_size = torch.empty((), dtype=dtype, device=device).element_size()
+        # logits, sparse, sparse_mask, and attn dominate the chunk-local peak.
+        bytes_per_token = max(1, num_tokens * element_size * 4)
+        memory_budget = int(free_bytes * 0.25)
+        auto_chunk = max(1, memory_budget // bytes_per_token)
+        auto_chunk = min(num_tokens, auto_chunk)
+
+        # Keep GEMMs reasonably large while preserving the memory cap above.
+        return max(1, auto_chunk)
