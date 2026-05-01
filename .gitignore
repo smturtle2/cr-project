@@ -24,6 +24,14 @@ dist/
 pip-wheel-metadata/
 artifacts/
 tmp_main.py
+examples/
+history.png
+best.pt
+*.pt
+*.pth
+*.ckpt
+*.tar.gz
+.codex/
 
 # OS and editor files
 .DS_Store
