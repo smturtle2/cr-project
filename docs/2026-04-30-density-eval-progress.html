@@ -1,0 +1,498 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Density Evaluation Report</title>
+  <style>
+    :root {
+      --bg: #f4efe6;
+      --paper: #fffdfa;
+      --ink: #1f2937;
+      --muted: #5f6875;
+      --line: #ddd4c4;
+      --accent: #0f766e;
+      --accent-soft: #e3f4f1;
+      --note: #fff7df;
+      --note-ink: #8a5a00;
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      margin: 0;
+      font-family: "Pretendard", "Noto Sans KR", sans-serif;
+      color: var(--ink);
+      background:
+        radial-gradient(circle at top left, rgba(15, 118, 110, 0.08), transparent 28%),
+        linear-gradient(180deg, #f7f4ed 0%, #f1ebdf 100%);
+      line-height: 1.68;
+    }
+
+    .page {
+      max-width: 1040px;
+      margin: 0 auto;
+      padding: 36px 20px 80px;
+    }
+
+    .hero, .section {
+      background: var(--paper);
+      border: 1px solid var(--line);
+      border-radius: 22px;
+      box-shadow: 0 14px 34px rgba(48, 50, 54, 0.06);
+    }
+
+    .hero {
+      padding: 32px;
+      margin-bottom: 20px;
+    }
+
+    .section {
+      padding: 26px;
+      margin-top: 18px;
+    }
+
+    .eyebrow {
+      display: inline-block;
+      padding: 6px 12px;
+      border-radius: 999px;
+      background: var(--accent-soft);
+      color: var(--accent);
+      font-size: 13px;
+      font-weight: 700;
+      letter-spacing: 0.02em;
+    }
+
+    h1, h2, h3 {
+      margin: 0 0 12px;
+      line-height: 1.25;
+    }
+
+    h1 {
+      margin-top: 14px;
+      font-size: 38px;
+    }
+
+    h2 {
+      font-size: 28px;
+    }
+
+    h3 {
+      font-size: 20px;
+    }
+
+    p {
+      margin: 0 0 12px;
+    }
+
+    .lead {
+      font-size: 18px;
+      color: var(--muted);
+      max-width: 880px;
+    }
+
+    .meta {
+      margin-top: 18px;
+      font-size: 14px;
+      color: var(--muted);
+    }
+
+    .grid-2 {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 18px;
+    }
+
+    .card {
+      background: #fff;
+      border: 1px solid var(--line);
+      border-radius: 18px;
+      padding: 18px;
+    }
+
+    .badge {
+      display: inline-block;
+      margin-bottom: 10px;
+      padding: 5px 10px;
+      border-radius: 999px;
+      background: var(--accent-soft);
+      color: var(--accent);
+      font-size: 12px;
+      font-weight: 700;
+    }
+
+    .note {
+      border-left: 4px solid var(--note-ink);
+      background: var(--note);
+      color: #5f4608;
+      border-radius: 14px;
+      padding: 14px 16px;
+      margin-top: 14px;
+    }
+
+    .result {
+      border-left: 4px solid var(--accent);
+      background: #f7fcfb;
+      border-radius: 14px;
+      padding: 14px 16px;
+      margin-top: 14px;
+    }
+
+    ul, ol {
+      margin: 10px 0 0 20px;
+      padding: 0;
+    }
+
+    li {
+      margin-bottom: 8px;
+    }
+
+    code {
+      font-family: "SFMono-Regular", Consolas, monospace;
+      background: #f6f5f2;
+      border: 1px solid #ece7dc;
+      border-radius: 8px;
+      padding: 2px 6px;
+      font-size: 0.95em;
+    }
+
+    .metric-table {
+      width: 100%;
+      border-collapse: collapse;
+      margin-top: 10px;
+      font-size: 15px;
+    }
+
+    .metric-table th,
+    .metric-table td {
+      padding: 12px 14px;
+      border-bottom: 1px solid var(--line);
+      text-align: left;
+      vertical-align: top;
+    }
+
+    .metric-table th {
+      background: #faf7f0;
+      font-weight: 700;
+    }
+
+    .metric-table tr:last-child td {
+      border-bottom: 0;
+    }
+
+    .refs a {
+      color: var(--accent);
+      text-decoration: none;
+    }
+
+    @media (max-width: 860px) {
+      h1 {
+        font-size: 30px;
+      }
+
+      .grid-2 {
+        grid-template-columns: 1fr;
+      }
+
+      .hero, .section {
+        padding: 22px;
+      }
+    }
+  </style>
+</head>
+<body>
+  <div class="page">
+    <section class="hero">
+      <div class="eyebrow">Density / Gate Evaluation</div>
+      <h1>CAFM Density 비교 보고서</h1>
+      <p class="lead">
+        이번 비교의 핵심은 복원 성능 자체가 아니라,
+        <strong>어떤 density map이 SAR 주입 gate로 더 적절한가</strong>를 먼저 검증하는 것이다.
+        따라서 현재 density는 물리적 cloud density보다
+        <strong>cloud-aware SAR injection gate</strong> 또는
+        <strong>optical unreliability map</strong>으로 해석하는 것이 맞다.
+      </p>
+      <div class="meta">작성일: 2026-04-30</div>
+    </section>
+
+    <section class="section">
+      <h2>1. 비교 대상</h2>
+      <div class="grid-2">
+        <div class="card">
+          <div class="badge">Baseline</div>
+          <h3><code>cosine</code></h3>
+          <ul>
+            <li>SAR feature와 optical feature를 같은 차원으로 투영한다.</li>
+            <li>같은 위치에서 두 feature의 cosine similarity를 계산한다.</li>
+            <li>이 정보를 바탕으로 density map을 만든다.</li>
+          </ul>
+        </div>
+        <div class="card">
+          <div class="badge">Candidate</div>
+          <h3><code>cosine_prior</code></h3>
+          <ul>
+            <li><code>cosine</code> 결과에 optical prior를 추가한다.</li>
+            <li>prior는 optical 밴드만 보고 구름스러운 정도를 점수화한 보조 신호다.</li>
+            <li>목표는 맑은 영역 오탐 감소와 thin cloud / haze 보조다.</li>
+          </ul>
+        </div>
+      </div>
+    </section>
+
+    <section class="section refs">
+      <h2>2. Optical Prior는 무엇인가</h2>
+      <p>
+        <code>cosine_prior</code>의 prior는 학습된 detector가 아니다.
+        대신 <strong>Sentinel-2 optical band만 보고 구름과 유사한 반응을 규칙 기반으로 점수화한 heuristic</strong>이다.
+      </p>
+      <div class="grid-2">
+        <div class="card">
+          <h3>현재 prior가 보는 신호</h3>
+          <ul>
+            <li><code>blue</code>: 청색 밴드. 구름과 haze는 blue에서 밝게 보이는 경우가 많다.</li>
+            <li><code>aerosol</code>: 연무, 얇은 구름, 대기 산란에 민감한 coastal/aerosol 밴드다.</li>
+            <li><code>cirrus</code>: 상층의 얇은 권운에 민감한 밴드다.</li>
+            <li><code>red + green + blue</code>: 가시광 전체 밝기. 흰 구름처럼 전체적으로 밝은 반응을 본다.</li>
+            <li><code>NIR</code>: 식생과 지표 특성을 보는 근적외선 밴드다.</li>
+            <li><code>SWIR1</code>: 수분과 표면 물성 구분에 도움을 주는 단파적외선 밴드다.</li>
+            <li><code>NDMI = (nir - swir1) / (nir + swir1)</code></li>
+            <li><code>NDSI = (green - swir1) / (green + swir1)</code></li>
+          </ul>
+        </div>
+        <div class="card">
+          <h3>왜 이런 규칙을 쓰는가</h3>
+          <ul>
+            <li>구름은 대체로 밝다.</li>
+            <li>얇은 구름과 cirrus는 aerosol/cirrus 계열 밴드가 힌트를 준다.</li>
+            <li>눈, 밝은 지면, 일부 표면 반사와는 구분되어야 한다.</li>
+            <li>따라서 밝기와 스펙트럴 비율을 함께 보게 된다.</li>
+          </ul>
+        </div>
+      </div>
+      <div class="card" style="margin-top:18px;">
+        <h3>규칙별 상세 해석</h3>
+        <ul>
+          <li><strong><code>blue</code>가 높을 때</strong>: 구름과 haze는 blue에서 산란이 커서 상대적으로 밝게 보인다. 따라서 blue가 충분히 높으면 구름 가능성을 올린다.</li>
+          <li><strong><code>aerosol</code>이 높을 때</strong>: 대기 중 미세 입자와 얇은 구름은 aerosol 밴드에서 반응이 커질 수 있다. 이는 두꺼운 흰 구름뿐 아니라 얇은 cloud veil이나 haze를 보조하는 신호다.</li>
+          <li><strong><code>aerosol + cirrus</code>를 함께 볼 때</strong>: cirrus 단독보다 aerosol과 함께 보면 얇고 높은 구름층이 대기 산란과 함께 나타나는 패턴을 더 잘 잡을 수 있다. 즉 이 조합은 <strong>thin cloud / cirrus 존재 가능성</strong>을 올리는 역할을 한다.</li>
+          <li><strong><code>red + green + blue</code>가 모두 높을 때</strong>: 전체 가시광에서 고르게 밝다는 것은 전형적인 흰 구름 반응과 가깝다. 따라서 RGB 합은 <strong>두껍고 밝은 cloud body</strong>를 잡는 기본 신호다.</li>
+          <li><strong><code>NDMI</code>를 사용하는 이유</strong>: <code>NIR</code>와 <code>SWIR1</code>의 상대 관계를 보면 표면 수분/물성과 다른 구름 반응을 구분하는 데 도움이 된다. 논리적으로는 "밝기만으로는 구름처럼 보일 수 있는 물체"를 한 번 더 걸러주는 역할이다.</li>
+          <li><strong><code>NDSI</code>를 사용하는 이유</strong>: 눈이나 매우 밝은 지면도 구름처럼 보일 수 있기 때문에, <code>green</code>과 <code>SWIR1</code> 관계를 이용해 이런 혼동을 줄인다. 즉 <strong>cloud vs. snow / bright surface</strong> 구분을 보조한다.</li>
+        </ul>
+      </div>
+      <div class="note">
+        구현은 각 규칙을 <code>0~1</code> 범위로 rescale한 뒤
+        <code>min</code> 방식으로 순차 결합하고, 마지막에 pooling으로 약간 smoothing하는 구조다.
+        즉 한 조건만 높다고 바로 구름으로 보지 않고, 여러 cloud-like 조건을 동시에 만족해야 높은 prior를 갖게 된다.
+      </div>
+      <div class="card" style="margin-top:18px;">
+        <h3>이 prior가 실제로 의미하는 것</h3>
+        <p>
+          이 prior는 엄밀한 물리적 <strong>구름 두께</strong>를 직접 추정하는 것은 아니다.
+          대신 optical 밴드 기준으로
+          <strong>"이 위치가 구름 때문에 얼마나 cloud-like 하게 보이는가"</strong>를 점수화한다.
+        </p>
+        <ul>
+          <li>RGB와 blue가 강하게 높고 cirrus/aerosol도 받쳐주면, 보통 <strong>밝고 두꺼운 구름</strong>에 가까운 반응이 된다.</li>
+          <li>RGB 전체는 아주 높지 않지만 aerosol/cirrus가 상대적으로 살아 있으면, <strong>얇은 구름이나 haze</strong> 가능성을 보조한다.</li>
+          <li>NDMI, NDSI는 이 반응이 단순한 밝은 지면이나 눈이 아니라는 것을 확인하는 보정축이다.</li>
+        </ul>
+        <p>
+          따라서 이 prior는 "구름 두께 그 자체"보다는
+          <strong>구름 영향으로 optical을 덜 신뢰해야 할 정도</strong>를 나타내는 쪽에 더 가깝다.
+        </p>
+      </div>
+      <p style="margin-top:16px;">
+        이 prior의 직접적인 근거는 Sentinel-2 cloud-score heuristic 계열이다.
+      </p>
+      <ol>
+        <li>
+          Schmitt, M., Hughes, L. H., Qiu, C., and Zhu, X. X. (2019).
+          <em>Aggregating Cloud-Free Sentinel-2 Images with Google Earth Engine</em>.
+          ISPRS Annals.
+          <a href="https://doi.org/10.5194/isprs-annals-IV-2-W7-145-2019">https://doi.org/10.5194/isprs-annals-IV-2-W7-145-2019</a>
+        </li>
+        <li>
+          Hollstein, A., Segl, K., Guanter, L., Brell, M., and Enesco, M. (2016).
+          <em>Ready-to-Use Methods for the Detection of Clouds, Cirrus, Snow, Shadow, Water and Clear Sky Pixels in Sentinel-2 MSI Images</em>.
+          Remote Sensing, 8(8), 666.
+          <a href="https://doi.org/10.3390/rs8080666">https://doi.org/10.3390/rs8080666</a>
+        </li>
+      </ol>
+      <div class="result">
+        Schmitt 2019는 Sentinel-2 cloud score를 설명하면서
+        <strong>clouds are bright, moist, and not snow</strong>라는 원리를 사용한다.
+        현재 프로젝트의 prior는 이 계열과 매우 유사한 구조를 따른다.
+      </div>
+    </section>
+
+    <section class="section">
+      <h2>3. 어떻게 평가했는가</h2>
+      <p>
+        density ground truth는 없기 때문에 직접 정답 비교는 불가능하다.
+        따라서 이번 평가는 <strong>proxy-based evaluation</strong>으로 진행했다.
+      </p>
+      <div class="card">
+        <h3>Proxy 정의</h3>
+        <p>
+          각 밴드에서 구름 영향 정도를
+          <code>P_c(x) = |cloudy_c(x) - target_c(x)|</code>
+          로 본다.
+        </p>
+        <ul>
+          <li><code>cloudy</code>와 <code>target</code> 차이가 크면 optical corruption이 크다고 본다.</li>
+          <li>즉 proxy는 순수한 구름 마스크가 아니라, 구름/얇은 구름/그림자/탁함을 포함한 optical disturbance의 근사치다.</li>
+          <li>특히 Blue, Red, NIR, Cirrus, SWIR1을 중점 밴드로 사용한다.</li>
+        </ul>
+      </div>
+      <div class="note">
+        이 평가의 핵심 질문은
+        <strong>"이 density가 실제로 optical을 덜 믿어야 할 위치를 잘 올려주는가"</strong>이지,
+        <strong>"물리적으로 정확한 cloud density를 재는가"</strong>가 아니다.
+      </div>
+    </section>
+
+    <section class="section">
+      <h2>4. 어떤 지표를 봤는가</h2>
+      <table class="metric-table">
+        <thead>
+          <tr>
+            <th>지표</th>
+            <th>의미</th>
+            <th>해석</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td><code>corr_weighted</code></td>
+            <td>weighted proxy와 density의 전체 상관</td>
+            <td>높을수록 좋음. density가 proxy 구조를 전반적으로 잘 따라간다는 뜻</td>
+          </tr>
+          <tr>
+            <td><code>clear_mean_d</code></td>
+            <td>proxy가 낮은 맑은 구간에서의 평균 density</td>
+            <td>낮을수록 좋음. 맑은 곳에서 SAR를 과주입하지 않는지 확인</td>
+          </tr>
+          <tr>
+            <td><code>thin_mean_d</code></td>
+            <td>중간 정도 corruption 구간의 평균 density</td>
+            <td>thin cloud / haze 같은 애매한 구간에서 반응하는지 보는 참고 지표</td>
+          </tr>
+          <tr>
+            <td><code>thick_mean_d</code></td>
+            <td>proxy가 높은 강한 corruption 구간의 평균 density</td>
+            <td>높을수록 좋음. 구름 영향이 큰 위치에서 gate를 잘 올리는지 확인</td>
+          </tr>
+          <tr>
+            <td><code>top10_proxy</code></td>
+            <td>proxy 상위 10% 위치에서의 평균 density</td>
+            <td>가장 문제가 큰 위치를 얼마나 강하게 잡는지 보는 지표</td>
+          </tr>
+          <tr>
+            <td><code>top20_proxy</code></td>
+            <td>proxy 상위 20% 위치에서의 평균 density</td>
+            <td>high-response 영역이 조금 더 넓어졌을 때도 일관되게 반응하는지 확인</td>
+          </tr>
+        </tbody>
+      </table>
+      <div class="result">
+        좋은 gate는
+        <strong>맑은 곳에서는 낮고, corruption이 큰 곳에서는 높아야 한다.</strong>
+        그래서 이번 평가는 단일 지표 하나보다
+        <strong>상관 + clear suppression + thick/high-response capture</strong>를 함께 본다.
+      </div>
+    </section>
+
+    <section class="section">
+      <h2>5. 이 평가가 왜 어느 정도 신뢰할 만한가</h2>
+      <ul>
+        <li>density GT가 없기 때문에 완전한 정답 비교는 불가능하다. 따라서 proxy 기반 평가는 현실적인 대안이다.</li>
+        <li>이번 아키텍처에서 density의 역할은 절대 구름량 추정보다 <strong>SAR injection gate</strong>에 가깝다.</li>
+        <li>그렇기 때문에 proxy도 물리적 cloud density보다 <strong>optical corruption 근사치</strong>로 해석하는 것이 구조와 맞다.</li>
+        <li>단일 밴드가 아니라 여러 밴드와 weighted proxy를 함께 보고, clear/thick/top-k 지표를 같이 보므로 한 지표 편향을 줄일 수 있다.</li>
+        <li>즉 이 평가는 "절대적 정답" 검증은 아니지만, <strong>gate 후보를 screening하고 상대 비교하는 목적</strong>에는 충분히 타당하다.</li>
+      </ul>
+      <div class="note">
+        한계도 분명하다.
+        이 평가는 어디까지나 <strong>1차 screening</strong>이다.
+        최종 채택은 이후 장기 학습에서 실제 복원 성능까지 함께 확인해야 한다.
+      </div>
+    </section>
+
+    <section class="section">
+      <h2>6. 실험 설정</h2>
+      <ul>
+        <li>비교 대상: <code>cosine</code>, <code>cosine_prior</code></li>
+        <li>split: <code>validation</code></li>
+        <li>samples: <code>512</code></li>
+        <li>batch-size: <code>2</code></li>
+        <li>checkpoint:
+          <code>artifacts/density_runs/cosine_5ep/best.pt</code>,
+          <code>artifacts/density_runs/cosine_prior_5ep/best.pt</code>
+        </li>
+        <li>목적: 최종 결론이 아니라 5 epoch screening</li>
+      </ul>
+    </section>
+
+    <section class="section">
+      <h2>7. 정량 결과</h2>
+      <table class="metric-table">
+        <thead>
+          <tr>
+            <th>Metric</th>
+            <th><code>cosine</code></th>
+            <th><code>cosine_prior</code></th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td><code>corr_weighted</code></td>
+            <td>0.180</td>
+            <td><strong>0.320</strong></td>
+          </tr>
+          <tr>
+            <td><code>clear_mean_d</code></td>
+            <td><strong>0.429</strong></td>
+            <td>0.462</td>
+          </tr>
+          <tr>
+            <td><code>thick_mean_d</code></td>
+            <td>0.445</td>
+            <td><strong>0.473</strong></td>
+          </tr>
+          <tr>
+            <td><code>top10_proxy</code></td>
+            <td>0.481</td>
+            <td><strong>0.737</strong></td>
+          </tr>
+          <tr>
+            <td><code>top20_proxy</code></td>
+            <td>0.462</td>
+            <td><strong>0.652</strong></td>
+          </tr>
+        </tbody>
+      </table>
+      <div class="result">
+        <strong><code>cosine_prior</code>가 weighted correlation과 high-response capture에서 일관되게 우세하다.</strong>
+        반면 <code>cosine</code>은 맑은 영역 억제는 약간 유리하지만, 전체 구조를 따라가는 힘과 강한 corruption 구간 반응은 더 약하다.
+      </div>
+    </section>
+
+    <section class="section">
+      <h2>8. 결론</h2>
+      <ol>
+        <li>현재 비교 대상은 물리적 cloud density estimator보다 <strong>SAR injection gate</strong>로 보는 것이 맞다.</li>
+        <li><code>cosine_prior</code>는 optical prior를 통해 구름성 구조를 더 안정적으로 반영한다.</li>
+        <li>정량 결과 기준 현재 1차 screening의 최우선 후보는 <code>cosine_prior</code>다.</li>
+      </ol>
+      <div class="result">
+        따라서 다음 단계는
+        <strong><code>cosine_prior</code>를 장기 학습 후보로 채택하고,
+        실제 복원 성능 개선으로 이어지는지 검증하는 것</strong>이다.
+      </div>
+    </section>
+  </div>
+</body>
+</html>

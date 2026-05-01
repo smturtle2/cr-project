@@ -1,0 +1,832 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Transformer 기반 구름 제거 아키텍처 설계 보고서</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:'Pretendard',-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;max-width:1060px;margin:0 auto;padding:40px 24px 80px;line-height:1.72;color:#1a1a2e;background:#f7f8fb}
+.hd{background:linear-gradient(135deg,#1a237e,#283593,#3949ab);color:#fff;border-radius:14px;padding:34px 38px;margin-bottom:32px}
+.hd h1{font-size:1.55rem;font-weight:700;margin-bottom:4px}
+.hd p{font-size:.85rem;color:#b0bfdb;line-height:1.5;margin:2px 0}
+.hd a{color:#90caf9;text-decoration:none}
+.c{background:#fff;border-radius:12px;padding:26px 30px;margin-bottom:20px;box-shadow:0 1px 3px rgba(0,0,0,.06)}
+.c h2{font-size:1.15rem;font-weight:700;color:#1a237e;border-left:4px solid #3949ab;padding-left:12px;margin-bottom:14px}
+.c h3{font-size:.96rem;font-weight:600;color:#283593;margin:16px 0 6px}
+table{width:100%;border-collapse:collapse;margin:8px 0 12px;font-size:.87rem}
+th,td{border:1px solid #dde3ea;padding:6px 10px;text-align:left}
+th{background:#e8eaf6;font-weight:600;white-space:nowrap}
+tr:nth-child(even) td{background:#fafbfd}
+pre{background:#1e1e2e;color:#cdd6f4;padding:14px 16px;border-radius:8px;overflow-x:auto;font-size:.79rem;line-height:1.5;margin:8px 0 12px;font-family:'Fira Code',Consolas,monospace}
+code{font-family:'Fira Code',Consolas,monospace;font-size:.85em}
+:not(pre)>code{background:#e8eaf6;padding:1px 5px;border-radius:4px;color:#c7254e}
+.b{border-radius:7px;padding:11px 15px;margin:8px 0;font-size:.88rem}
+.bb{background:#e3f2fd;border-left:4px solid #1976d2}
+.bg{background:#e8f5e9;border-left:4px solid #43a047}
+.ba{background:#fff8e1;border-left:4px solid #ffa000}
+.br{background:#fce4ec;border-left:4px solid #e53935}
+.bp{background:#f3e5f5;border-left:4px solid #8e24aa}
+.by{background:#f5f5f5;border-left:4px solid #9e9e9e}
+.toc{padding:0}.toc li{list-style:none;margin:2px 0}.toc li a{text-decoration:none;color:#283593;font-weight:500;font-size:.9rem}.toc .s{padding-left:18px}
+.tag{display:inline-block;padding:1px 7px;border-radius:10px;font-size:.7rem;font-weight:600;margin:0 2px}
+.t1{background:#e3f2fd;color:#1565c0}.t2{background:#fff3e0;color:#e65100}.t3{background:#fce4ec;color:#c62828}
+.t4{background:#f3e5f5;color:#6a1b9a}.t5{background:#e0f7fa;color:#00695c}.t6{background:#e8f5e9;color:#2e7d32}
+p{margin:4px 0}ul,ol{padding-left:20px;margin:4px 0 8px}li{margin:2px 0}hr{border:none;border-top:1px solid #e0e4ea;margin:18px 0}
+a{color:#1565c0}
+.ft{text-align:center;color:#aaa;font-size:.78rem;margin-top:28px}
+.detail{background:#f0f4ff;border:1px solid #c5cae9;border-radius:9px;padding:18px 22px;margin:14px 0;font-size:.88rem;line-height:1.75}
+.detail h4{font-size:.95rem;color:#1a237e;margin:0 0 8px;font-weight:700}
+.detail ul{margin:4px 0 10px}
+.detail li{margin:3px 0}
+.arch-box{background:#1a1a2e;color:#e0e0e0;padding:18px 20px;border-radius:9px;font-family:'Fira Code',Consolas,monospace;font-size:.73rem;line-height:1.5;overflow-x:auto;white-space:pre;margin:12px 0;border:2px solid #3949ab}
+.arch-box .lbl{color:#f9e2af;font-weight:bold}.arch-box .hi{color:#89dceb}.arch-box .g{color:#a6e3a1}.arch-box .r{color:#f38ba8}
+.paper{border:1px solid #e0e4ea;border-radius:7px;padding:10px 14px;margin:8px 0;font-size:.87rem}
+.paper .ti{font-weight:600;color:#1a1a2e}.paper .ve{font-size:.8rem;color:#666;margin:1px 0 4px}
+.ad{background:#1e1e2e;color:#89dceb;padding:16px 18px;border-radius:9px;font-family:'Fira Code',Consolas,monospace;font-size:.76rem;line-height:1.45;overflow-x:auto;white-space:pre;margin:10px 0}
+.ad b{color:#f9e2af}.ad em{color:#f38ba8;font-style:normal;font-weight:bold}.ad i{color:#a6e3a1;font-style:normal}
+</style>
+</head>
+<body>
+
+<div class="hd">
+  <h1>"Diffusion 없이 Diffusion을 이긴다" — Transformer 기반 구름 제거 아키텍처 설계</h1>
+  <p><b>컨셉:</b> ACA-CRNet 베이스라인 위에 Transformer + SAR Cross-Modal Attention + Frequency Awareness를 결합하여<br>
+  &emsp;&emsp;&emsp;Diffusion 모델(DiffCR, EMRDM)과 동등한 성능을 <b>단일 forward pass</b>로 달성</p>
+  <p><b>베이스라인:</b> ACA-CRNet (29.78 dB) &emsp;|&emsp; <b>목표:</b> 31~32+ dB @ 추론속도 10~30배 빠름</p>
+  <p><b>조사 범위:</b> 2024~2026 Transformer, Attention, Frequency 기반 논문 15편</p>
+  <p><b>작성일:</b> 2026-03-26</p>
+</div>
+
+<!-- TOC -->
+<div class="c">
+  <h2>목차</h2>
+  <ul class="toc">
+    <li><a href="#s0">0. 벤치마크 현황 &amp; 전략</a></li>
+    <li><a href="#s1">1. 제안 아키텍처 개요</a></li>
+    <li><a href="#s2">2. 모듈 ① — SAR-Optical Cross-Modal Transformer</a></li>
+    <li><a href="#s3">3. 모듈 ② — Frequency-Aware Attention</a></li>
+    <li><a href="#s4">4. 모듈 ③ — Cloud-Adaptive Feature Modulation</a></li>
+    <li><a href="#s5">5. Backbone 선택 — 효율적 Attention 설계</a></li>
+    <li><a href="#s6">6. Diffusion에서 빌려오되 Diffusion이 아닌 기법</a></li>
+    <li><a href="#s7">7. Ablation 설계 &amp; 비교 전략</a></li>
+    <li><a href="#s8">8. 참고 논문 전체 목록</a></li>
+  </ul>
+</div>
+
+<!-- 0 -->
+<div class="c" id="s0">
+  <h2>0. 벤치마크 현황 &amp; 전략</h2>
+
+  <table>
+    <tr><th></th><th>모델</th><th>Type</th><th>PSNR &uarr;</th><th>SSIM &uarr;</th><th>SAM &darr;</th><th>추론</th></tr>
+    <tr style="background:#fce4ec"><td>1</td><td><b>EMRDM</b></td><td>Diffusion+Trans</td><td><b>32.14</b></td><td><b>0.924</b></td><td><b>5.27</b></td><td>~3s</td></tr>
+    <tr style="background:#fce4ec"><td>2</td><td><b>DiffCR</b></td><td>Diffusion</td><td>31.77</td><td>0.902</td><td>5.82</td><td>~1s</td></tr>
+    <tr style="background:#fff8e1"><td>3</td><td>ACA-CRNet</td><td>CNN+Attn</td><td>29.78</td><td>0.896</td><td>7.77</td><td>~0.05s</td></tr>
+    <tr><td>4</td><td>UnCRtainTS</td><td>Temporal</td><td>28.90</td><td>0.880</td><td>8.32</td><td>-</td></tr>
+    <tr><td>5</td><td>GLF-CR</td><td>CNN+Fusion</td><td>28.64</td><td>0.885</td><td>8.98</td><td>-</td></tr>
+    <tr><td>6</td><td>DSen2-CR</td><td>CNN</td><td>27.76</td><td>0.874</td><td>9.47</td><td>~0.02s</td></tr>
+    <tr style="background:#e8f5e9"><td><b>?</b></td><td><b>Ours (목표)</b></td><td><b>Transformer</b></td><td><b>32.xx</b></td><td><b>0.92x</b></td><td><b>5.xx</b></td><td><b>~0.1s</b></td></tr>
+  </table>
+
+  <div class="b br">
+    <b>Diffusion의 약점을 찌른다:</b> EMRDM은 multi-step sampling (~3초), DiffCR도 ~1초.
+    Transformer single forward pass(~0.1초)로 동등한 성능을 달성하면
+    <b>"비슷한 성능, 10~30배 빠름"</b>이라는 강력한 기여가 성립.
+  </div>
+</div>
+
+<!-- 1 -->
+<div class="c" id="s1">
+  <h2>1. 제안 아키텍처 개요</h2>
+
+  <div class="ad">
+    SAR (2ch) ─→ [SAR Encoder] ──────────┐
+                                          │
+                                          ▼
+                                   ┌──────────────┐
+    Optical (13ch) ─→ [Opt Encoder] ─→│ <em>Cross-Modal</em>   │──→ [Transformer Blocks] ──→ [Decoder] ──→ +Skip ──→ Output (13ch)
+                                   │ <em>Transformer</em>   │        ▲                      ▲
+                                   │ <em>Attention</em>     │        │                      │
+                                   └──────────────┘   <i>Frequency-Aware</i>        <i>Cloud-Adaptive</i>
+                                     <b>모듈 ①</b>          <b>Attention (모듈 ②)</b>     <b>Modulation (모듈 ③)</b>
+                                                        │
+                                              ┌─────────┴─────────┐
+                                              │ Spatial Branch     │
+                                              │ (Window/Linear Attn)│
+                                              │ Frequency Branch   │
+                                              │ (FFT Global Attn)  │
+                                              └───────────────────┘</div>
+
+  <div class="b bg">
+    <b>3가지 핵심 모듈:</b><br>
+    ① <b>SAR-Optical Cross-Modal Transformer</b> — SAR의 지표 구조를 Optical 복원에 직접 주입<br>
+    ② <b>Frequency-Aware Attention</b> — 구름의 주파수 특성을 활용한 공간+주파수 이중 어텐션<br>
+    ③ <b>Cloud-Adaptive Feature Modulation</b> — 구름 두께에 따라 SAR/Optical 의존도 동적 조절
+  </div>
+
+  <div class="b bb">
+    <b>ACA-CRNet 대비 변경점:</b><br>
+    &bull; Head Conv(single) → <b>Dual-Branch Encoder</b> (SAR/Optical 분리)<br>
+    &bull; ResBlock(Conv) → <b>Transformer Block</b> (Window/Linear Attention + FFN)<br>
+    &bull; AC-Attention(self-similarity) → <b>Cross-Modal Attention</b> (SAR↔Optical 상호작용)<br>
+    &bull; 유지: Global Residual Skip, CARL Loss, 학습 설정
+  </div>
+
+  <div class="detail">
+    <h4>전체 아키텍처 구체적 설명</h4>
+    <p>제안 모델은 ACA-CRNet의 단일 CNN 파이프라인을 <b>Dual-Branch Encoder + Transformer Backbone + Preconditioned Decoder</b>로 업그레이드한다. 전체 데이터 흐름은 다음과 같다:</p>
+    <ol>
+      <li><b>입력:</b> 구름 낀 Optical 이미지(13채널, Sentinel-2 전 밴드)와 동일 지역의 SAR 이미지(2채널, Sentinel-1 VV/VH 편파)가 동시에 입력된다.</li>
+      <li><b>Dual-Branch Encoding:</b> SAR과 Optical을 독립적인 인코더로 처리하여 각 모달리티의 고유한 특성을 보존한 feature map을 추출한다. ACA-CRNet의 단순 concat과 달리, 모달리티별 특화된 표현을 학습한다.</li>
+      <li><b>Cross-Modal Fusion (모듈 ①):</b> SAR feature를 Key/Value로, Optical feature를 Query로 사용하는 cross-attention을 통해 SAR의 지표 구조 정보를 Optical 복원에 주입한다.</li>
+      <li><b>Transformer Processing (모듈 ②):</b> 융합된 feature를 4-level U-Net 구조의 Transformer로 처리한다. 각 블록에서 Linear Attention(전역), Window Attention(로컬), FFT Attention(주파수)의 3중 처리를 수행하여, Diffusion의 iterative refinement를 단일 pass로 대체한다.</li>
+      <li><b>Cloud-Adaptive Modulation (모듈 ③):</b> 각 Transformer 블록의 출력을 구름 밀도에 따라 적응적으로 변조하여, 영역별 최적의 복원 전략을 적용한다.</li>
+      <li><b>Preconditioned Output (섹션 6):</b> EMRDM에서 차용한 preconditioning으로 구름 밀도에 따라 skip connection 비율과 출력 스케일을 조절한다.</li>
+      <li><b>Global Residual:</b> 최종 출력에 입력 Optical 이미지를 더하는 global skip connection을 유지하여, 네트워크는 잔차(clean - cloudy)만 학습한다.</li>
+    </ol>
+    <p><b>예상 모델 규모:</b> ~15M 파라미터, ~40G FLOPs (256x256), 추론 ~0.1초/이미지 (RTX 3090 기준)</p>
+  </div>
+</div>
+
+<!-- 2 -->
+<div class="c" id="s2">
+  <h2>2. 모듈 ① — SAR-Optical Cross-Modal Transformer</h2>
+  <p><span class="tag t6">SAR</span> <span class="tag t3">Cross-Attention</span> &emsp; ACA-CRNet의 단순 concat을 대체하는 핵심 기여.</p>
+
+  <div class="b bg">
+    <b>기존 문제:</b> ACA-CRNet은 SAR과 Optical을 concat 후 같은 Conv로 처리 → SAR 고유 정보(지표 구조, 구름 투과) 활용 부족.<br>
+    <b>제안:</b> SAR feature를 Key/Value, Optical feature를 Query로 사용하는 cross-attention → SAR의 지표 정보가 Optical 복원을 직접 가이드.
+  </div>
+
+  <h3>근거 논문</h3>
+
+  <div class="paper">
+    <div class="ti">SMDCNet — "Cloud Removal via Multimodal Similarity Attention" <span class="tag t6">SAR</span></div>
+    <div class="ve">ISPRS J., 2025 &emsp; <a href="https://www.sciencedirect.com/science/article/abs/pii/S0924271625001856">Link</a></div>
+    <b>Similarity Feature Attention (SFA):</b> 구름 영역은 SAR-Optical 유사도가 낮고, 맑은 영역은 높다는 물리적 사전지식 활용.
+    Cross-modal 유사도로 구름 위치를 암묵적 감지.
+  </div>
+
+  <div class="paper">
+    <div class="ti">W-Shaped Fusion — "Breaking through clouds: Interactive Attention Transformer" <span class="tag t3">Cross-Attn</span></div>
+    <div class="ve">Information Fusion, 2024 &emsp; <a href="https://www.sciencedirect.com/science/article/abs/pii/S1566253524004275">Link</a></div>
+    <b>Mutual Injection:</b> SAR feature가 Optical의 attention map 생성을 변조하고, 동시에 Optical이 SAR attention도 변조.
+    양방향 상호작용으로 단방향 대비 정보 교환 극대화.
+  </div>
+
+  <div class="paper">
+    <div class="ti">AFR-CR — "Adaptive Frequency Domain Reconstruction for SAR-Assisted Cloud Removal" <span class="tag t5">Freq</span><span class="tag t6">SAR</span></div>
+    <div class="ve">Remote Sensing, Jan 2026 &emsp; <a href="https://www.mdpi.com/2072-4292/18/2/201">Link</a></div>
+    <b>Transposed Cross-Attention:</b> 주파수 도메인에서 SAR↔Optical 교차 복원.
+    SAR의 저주파(구조) → Optical 복원에 주입, Optical의 고주파(텍스처) → SAR 보완.
+  </div>
+
+  <h3>설계 의사코드</h3>
+<pre># Cross-Modal Transformer Attention
+class CrossModalAttention(nn.Module):
+    def forward(self, opt_feat, sar_feat):
+        Q = self.q_proj(opt_feat)          # Optical → Query
+        K = self.k_proj(sar_feat)          # SAR → Key
+        V = self.v_proj(sar_feat)          # SAR → Value
+
+        # SAR 구조 정보로 Optical 복원 가이드
+        attn = softmax(Q @ K.T / sqrt(d))
+        out_opt = attn @ V + opt_feat      # SAR-guided Optical feature
+
+        # (선택) 역방향: Optical → SAR 상호작용 (mutual injection)
+        Q2 = self.q2_proj(sar_feat)
+        K2 = self.k2_proj(opt_feat)
+        V2 = self.v2_proj(opt_feat)
+        out_sar = softmax(Q2 @ K2.T / sqrt(d)) @ V2 + sar_feat
+
+        return out_opt, out_sar</pre>
+
+  <div class="detail">
+    <h4>구체적 설명: SAR-Optical Cross-Modal Transformer</h4>
+    <p><b>핵심 원리:</b> SAR(합성 개구 레이더)는 마이크로파를 사용하므로 구름을 투과하여 지표면의 구조적 정보(건물 윤곽, 도로, 지형 등)를 획득할 수 있다.
+    반면 Optical 이미지는 구름에 의해 지표 정보가 완전히 가려진다. Cross-Modal Transformer는 이 두 모달리티의 상보적 특성을 최대한 활용한다.</p>
+    <ul>
+      <li><b>단계 1 — 독립 인코딩:</b> SAR(2채널)과 Optical(13채널)을 각각의 전용 인코더로 처리하여 모달리티 고유의 feature map을 추출한다. SAR 인코더는 스펙클 노이즈에 강건한 feature를, Optical 인코더는 구름 아래 잔존하는 스펙트럼 정보를 추출한다.</li>
+      <li><b>단계 2 — Cross-Attention 융합:</b> Optical feature를 Query로, SAR feature를 Key/Value로 사용하는 cross-attention을 수행한다. 이를 통해 "Optical의 어떤 위치가 SAR의 어떤 구조 정보를 참조해야 하는가"를 어텐션 가중치로 학습한다. 구름이 두꺼운 영역은 SAR에 대한 어텐션 가중치가 높아지고, 맑은 영역은 자기 자신(Optical)에 대한 의존도가 유지된다.</li>
+      <li><b>단계 3 — (선택) 양방향 상호작용:</b> 역방향으로 SAR도 Optical의 스펙트럼 정보를 참조하여, SAR feature의 색상/텍스처 표현력을 보강한다. 이 양방향 주입(Mutual Injection)은 단방향 대비 평균 0.3~0.5 dB의 추가 개선을 보인다 (W-Shaped Fusion 참조).</li>
+      <li><b>효율성:</b> SAR 해상도를 1/4로 다운샘플하여 Key/Value를 생성하면 cross-attention 연산량을 75% 절감하면서도 구조 정보 전달에는 충분하다.</li>
+    </ul>
+  </div>
+
+  <div class="arch-box"><span class="lbl">[모듈 ① 상세 아키텍처: SAR-Optical Cross-Modal Transformer]</span>
+
+  <span class="hi">SAR Input (B, 2, H, W)</span>                        <span class="hi">Optical Input (B, 13, H, W)</span>
+         │                                                │
+         ▼                                                ▼
+  ┌──────────────┐                                ┌──────────────┐
+  │  <span class="g">SAR Encoder</span>  │                                │ <span class="g">Opt Encoder</span>  │
+  │ Conv3x3→LN   │                                │ Conv3x3→LN   │
+  │ →ResBlock x2  │                                │ →ResBlock x2  │
+  └──────┬───────┘                                └──────┬───────┘
+         │ (B, C, H/4, W/4)                              │ (B, C, H/4, W/4)
+         │                                                │
+         ├────── <span class="r">K = W_k(SAR_feat)</span> ──────────┐             │
+         ├────── <span class="r">V = W_v(SAR_feat)</span> ──────────┤             │
+         │                                  ▼             │
+         │                         ┌──────────────┐      │
+         │                         │ <span class="lbl">Cross-Attention</span>│◄─── <span class="r">Q = W_q(Opt_feat)</span>
+         │                         │               │
+         │                         │ Attn = softmax│
+         │                         │ (Q·K^T/√d)·V │
+         │                         └──────┬───────┘
+         │                                │
+         │                                ▼
+         │                         ┌──────────────┐
+         │                         │  <span class="g">+ Residual</span>   │◄─── Opt_feat (skip)
+         │                         │  + LayerNorm  │
+         │                         └──────┬───────┘
+         │                                │
+         │ (선택: 역방향)                   │
+         ▼                                ▼
+  ┌──────────────┐                 <span class="hi">Fused Feature</span>
+  │<span class="lbl">Reverse Cross</span> │                 (B, C, H/4, W/4)
+  │Q=SAR, K,V=Opt│                        │
+  └──────┬───────┘                        ▼
+         │                          다음 모듈로 전달
+         ▼
+  <span class="hi">Enhanced SAR feat</span></div>
+</div>
+
+<!-- 3 -->
+<div class="c" id="s3">
+  <h2>3. 모듈 ② — Frequency-Aware Attention</h2>
+  <p><span class="tag t5">Frequency</span> <span class="tag t1">Transformer</span> &emsp; 구름의 주파수 특성을 활용한 이중 도메인 어텐션.</p>
+
+  <div class="b bg">
+    <b>물리적 근거:</b> 두꺼운 구름 = 저주파 성분 지배, 얇은 구름 = 중~고주파 혼재, 지표 텍스처 = 고주파.
+    공간 도메인만으로는 구름/지표 분리가 어렵지만, <b>주파수 도메인에서는 구름과 지표의 신호가 자연스럽게 분리</b>된다.
+  </div>
+
+  <h3>근거 논문</h3>
+
+  <div class="paper">
+    <div class="ti">SFHformer — "When FFT Meets Transformer for Image Restoration" <span class="tag t5">Freq</span><span class="tag t1">Trans</span></div>
+    <div class="ve">ECCV 2024 &emsp; <a href="https://github.com/deng-ai-lab/SFHformer">Code</a></div>
+    <b>LGPM (Local-Global Perception Mixer):</b> Spatial branch(local Conv) + Frequency branch(FFT global) 병렬.
+    <b>31개 데이터셋, 10개 복원 태스크 SOTA.</b> FFT 기반으로 최대 2.12 dB 개선.
+  </div>
+
+  <div class="paper">
+    <div class="ti">SFCRFormer — "Spatial-Frequency Combined Transformer for Cloud Removal" <span class="tag t5">Freq</span></div>
+    <div class="ve">Remote Sensing, 2025 &emsp; <a href="https://www.mdpi.com/2072-4292/17/9/1499">Link</a></div>
+    <b>Frequency Self-Attention:</b> FFT → 주파수 도메인 attention → IFFT.
+    구름/지표의 주파수 차이를 활용한 정밀 구름 탐지.
+  </div>
+
+  <div class="paper">
+    <div class="ti">MFFNet — "Wavelet Transform-Based Multimodal Frequency Fusion" <span class="tag t5">Freq</span><span class="tag t6">SAR</span></div>
+    <div class="ve">GIScience, 2025 &emsp; <a href="https://www.tandfonline.com/doi/full/10.1080/15481603.2025.2534740">Link</a></div>
+    <b>DWT 기반 SAR-Optical 융합:</b> SAR 구조 = LL(저주파), Optical 텍스처 = HH(고주파)로 분리 후 선택적 융합.
+  </div>
+
+  <h3>설계 의사코드</h3>
+<pre># Frequency-Aware Dual-Branch Attention
+class FreqAwareAttention(nn.Module):
+    def forward(self, x):
+        # Spatial Branch — 로컬 텍스처
+        spatial_out = self.window_attention(x)         # Window/Linear Attention
+
+        # Frequency Branch — 글로벌 구조 + 구름 분리
+        x_freq = torch.fft.rfft2(x, norm='ortho')     # → 주파수 도메인
+        x_freq = self.freq_attention(x_freq)           # 주파수 도메인 attention
+        freq_out = torch.fft.irfft2(x_freq, norm='ortho')  # → 공간 복원
+
+        # Adaptive Fusion
+        gate = self.gate(torch.cat([spatial_out, freq_out], dim=1))
+        return gate * spatial_out + (1 - gate) * freq_out</pre>
+
+  <div class="detail">
+    <h4>구체적 설명: Frequency-Aware Attention</h4>
+    <p><b>핵심 원리:</b> 구름은 이미지의 주파수 스펙트럼에서 뚜렷한 특성을 보인다. 두꺼운 구름은 넓은 면적을 균일하게 덮으므로 <b>저주파 성분이 지배적</b>이고, 지표면의 건물/도로/식생 텍스처는 <b>고주파 성분</b>에 집중된다. 이 물리적 차이를 활용하면, 주파수 도메인에서 구름 신호와 지표 신호를 효과적으로 분리할 수 있다.</p>
+    <ul>
+      <li><b>Spatial Branch (로컬 텍스처 복원):</b> Window Attention 또는 Linear Attention을 사용하여 공간 도메인에서 로컬 텍스처 패턴을 복원한다. 구름 경계의 날카로운 전환, 작은 구조물의 디테일 등 고해상도 공간 정보를 담당한다. Window 크기는 8x8로 설정하여 로컬 패치 내 self-attention을 수행한다.</li>
+      <li><b>Frequency Branch (글로벌 구조 복원):</b> 2D FFT로 feature를 주파수 도메인으로 변환한 후, 주파수 공간에서 attention을 수행한다. FFT의 각 주파수 bin은 전체 이미지에 대한 글로벌 정보를 담고 있으므로, O(n log n) 복잡도로 전역 수용 영역(global receptive field)을 확보한다. 주파수 도메인에서 구름의 저주파 성분을 억제하고 지표의 고주파 성분을 보존/복원하는 필터링을 학습한다.</li>
+      <li><b>Adaptive Gate Fusion:</b> 두 브랜치의 출력을 시그모이드 게이트로 적응적으로 결합한다. 구름이 두꺼운 영역에서는 Frequency Branch(글로벌 구조 정보)에 더 높은 가중치를 부여하고, 맑은 영역이나 디테일이 중요한 부분에서는 Spatial Branch에 가중치를 부여한다.</li>
+      <li><b>성능 기대:</b> SFHformer에서 이 이중 브랜치 구조가 31개 데이터셋에서 SOTA를 달성했으며, FFT 브랜치 추가만으로 최대 2.12 dB 개선을 보임. 구름 제거 태스크에서는 구름의 주파수 특성이 명확하므로 더 큰 개선이 기대된다.</li>
+    </ul>
+  </div>
+
+  <div class="arch-box"><span class="lbl">[모듈 ② 상세 아키텍처: Frequency-Aware Dual-Branch Attention]</span>
+
+  <span class="hi">Input Feature (B, C, H, W)</span>
+         │
+         ├─────────────────────────┬──────────────────────────────┐
+         ▼                         ▼                              │
+  ┌──────────────┐         ┌──────────────┐                      │
+  │ <span class="g">Spatial Branch</span>│         │<span class="g">Frequency Branch</span>│                      │
+  │              │         │              │                      │
+  │ Reshape to   │         │  <span class="r">FFT2D</span>        │                      │
+  │ windows(8x8) │         │ (→freq domain)│                      │
+  │      │       │         │      │       │                      │
+  │      ▼       │         │      ▼       │                      │
+  │ ┌─────────┐  │         │ ┌─────────┐  │                      │
+  │ │<span class="lbl">Window</span>    │  │         │ │<span class="lbl">Freq</span>      │  │                      │
+  │ │<span class="lbl">Attention</span> │  │         │ │<span class="lbl">Attention</span> │  │                      │
+  │ │Q,K,V from│  │         │ │Complex   │  │                      │
+  │ │each window│  │         │ │valued attn│  │                      │
+  │ └────┬────┘  │         │ └────┬────┘  │                      │
+  │      │       │         │      │       │                      │
+  │      ▼       │         │      ▼       │                      │
+  │ Merge windows│         │  <span class="r">IFFT2D</span>       │                      │
+  │ + FFN + LN   │         │ (→spatial)    │                      │
+  └──────┬───────┘         │ + FFN + LN    │                      │
+         │                 └──────┬───────┘                      │
+         │ (B,C,H,W)              │ (B,C,H,W)                    │
+         │                         │                              │
+         ▼                         ▼                              │
+  ┌─────────────────────────────────────┐                        │
+  │         <span class="lbl">Adaptive Gate Fusion</span>          │                        │
+  │                                     │                        │
+  │  gate = Sigmoid(Conv([spa; freq]))  │                        │
+  │  output = gate * spa + (1-gate) * freq│                       │
+  └──────────────────┬──────────────────┘                        │
+                     │                                            │
+                     ▼                                            │
+              ┌──────────────┐                                   │
+              │  <span class="g">+ Residual</span>   │◄──────────────────────────────┘
+              │  + LayerNorm  │
+              └──────┬───────┘
+                     ▼
+              <span class="hi">Output Feature (B, C, H, W)</span></div>
+</div>
+
+<!-- 4 -->
+<div class="c" id="s4">
+  <h2>4. 모듈 ③ — Cloud-Adaptive Feature Modulation</h2>
+  <p><span class="tag t6">SAR</span> <span class="tag t2">Degradation-Aware</span> &emsp; 구름 두께별 적응적 처리.</p>
+
+  <div class="b bg">
+    <b>문제:</b> 두꺼운 구름(Optical 정보 0%) vs 얇은 구름(부분 투과) vs 맑은 영역을 동일하게 처리하면 비효율.<br>
+    <b>제안:</b> SAR-Optical 유사도에서 구름 밀도를 추정하고, 이를 조건으로 Transformer feature를 변조.
+  </div>
+
+  <h3>근거 논문</h3>
+
+  <div class="paper">
+    <div class="ti">GLGF-CR — "Gated Local-Global Fusion for Cloud Removal" <span class="tag t6">SAR</span></div>
+    <div class="ve">Pattern Recognition, 2025 &emsp; <a href="https://www.sciencedirect.com/science/article/pii/S003132032500980X">Link</a></div>
+    두꺼운 구름 → SAR 완전 재구성, 얇은 구름 → Optical+SAR 블렌딩. 학습 gate가 두께 자동 추정.
+  </div>
+
+  <div class="paper">
+    <div class="ti">DFPIR — "Degradation-Aware Feature Perturbation for All-in-One Restoration" <span class="tag t2">Deg-Aware</span></div>
+    <div class="ve">CVPR 2025 &emsp; <a href="https://openaccess.thecvf.com/content/CVPR2025/papers/Tian_Degradation-Aware_Feature_Perturbation_for_All-in-One_Image_Restoration_CVPR_2025_paper.pdf">PDF</a></div>
+    Degradation encoding이 Transformer feature의 채널을 변조. 열화 유형/강도에 따라 네트워크 행동이 적응적으로 변화.
+  </div>
+
+  <div class="paper">
+    <div class="ti">DACDM-CR — "Discriminative Attention and Cloud-Aware Dynamic Mamba" <span class="tag t4">Mamba</span><span class="tag t6">SAR</span></div>
+    <div class="ve">Digital Signal Processing, 2025 &emsp; <a href="https://www.sciencedirect.com/science/article/abs/pii/S1051200425005445">Link</a></div>
+    구름 영역 적응형 게이팅 + SAR discriminative attention. 최초 Mamba 기반 SAR-optical 구름 제거.
+  </div>
+
+  <h3>설계 의사코드</h3>
+<pre># Cloud-Adaptive Feature Modulation
+class CloudAdaptiveModulation(nn.Module):
+    def __init__(self, channels):
+        self.cloud_estimator = nn.Sequential(    # SAR-Optical 유사도 → 구름 밀도
+            Conv2d(channels*2, channels//4, 1), GELU(),
+            Conv2d(channels//4, 1, 1), Sigmoid())
+        self.scale = nn.Linear(1, channels)      # 채널별 스케일
+        self.shift = nn.Linear(1, channels)      # 채널별 시프트
+
+    def forward(self, feat, sar_feat, opt_feat):
+        # 구름 밀도 추정 (0=맑음, 1=두꺼운 구름)
+        sim = F.cosine_similarity(sar_feat, opt_feat, dim=1, keepdim=True)
+        cloud_density = self.cloud_estimator(torch.cat([sar_feat, opt_feat], dim=1))
+
+        # Feature Modulation (AdaIN 스타일)
+        scale = self.scale(cloud_density).unsqueeze(-1).unsqueeze(-1)
+        shift = self.shift(cloud_density).unsqueeze(-1).unsqueeze(-1)
+        return feat * (1 + scale) + shift    # 구름 밀도에 따라 feature 변조</pre>
+
+  <div class="b bb">
+    <b>직관:</b> 맑은 영역 → scale&asymp;0, shift&asymp;0 (feature 유지),
+    두꺼운 구름 → scale/shift가 SAR 정보 기반으로 feature를 크게 변조하여 재구성.
+  </div>
+
+  <div class="detail">
+    <h4>구체적 설명: Cloud-Adaptive Feature Modulation</h4>
+    <p><b>핵심 원리:</b> 하나의 위성 이미지 안에서도 구름의 두께와 분포는 매우 불균일하다. 맑은 영역(구름 없음), 얇은 구름(반투명, 지표 일부 가시), 두꺼운 구름(지표 완전 차단)이 공존하며, 각 영역은 서로 다른 복원 전략이 필요하다. 이 모듈은 <b>픽셀별로 구름 밀도를 추정</b>하고, 그에 따라 Transformer feature를 적응적으로 변조한다.</p>
+    <ul>
+      <li><b>구름 밀도 추정:</b> SAR feature와 Optical feature 간의 코사인 유사도를 기반으로 구름 밀도를 추정한다. 맑은 영역에서는 SAR과 Optical이 유사한 구조를 보이므로 유사도가 높고(=구름 밀도 낮음), 두꺼운 구름 영역에서는 Optical이 완전히 다른 패턴을 보이므로 유사도가 낮다(=구름 밀도 높음). 이 유사도를 경량 CNN(1x1 Conv 2층)에 통과시켜 0~1 범위의 구름 밀도 맵을 생성한다.</li>
+      <li><b>AdaIN 스타일 변조:</b> 추정된 구름 밀도를 조건으로 채널별 scale(γ)과 shift(β)를 생성한다. 이는 StyleGAN의 Adaptive Instance Normalization과 유사한 메커니즘이다. <code>output = feat * (1 + γ) + β</code>로, 구름 밀도에 따라 feature의 각 채널을 스케일링하고 시프트한다.</li>
+      <li><b>적응적 동작:</b>
+        <br>- <b>맑은 영역</b> (density ≈ 0): scale ≈ 0, shift ≈ 0 → feature가 거의 변하지 않음 (원본 Optical 정보 보존)
+        <br>- <b>얇은 구름</b> (density ≈ 0.3~0.6): 중간 정도의 변조 → Optical의 잔존 정보와 SAR 정보를 블렌딩
+        <br>- <b>두꺼운 구름</b> (density ≈ 1): 강한 변조 → SAR 기반으로 feature를 거의 완전히 재구성
+      </li>
+      <li><b>적용 위치:</b> 각 Transformer 블록의 출력에 적용하며, 블록마다 독립적인 modulation 파라미터를 학습한다. 이를 통해 초기 블록은 대략적인 구조 복원에, 후반 블록은 세밀한 텍스처 복원에 집중하는 계층적 적응이 가능하다.</li>
+    </ul>
+  </div>
+
+  <div class="arch-box"><span class="lbl">[모듈 ③ 상세 아키텍처: Cloud-Adaptive Feature Modulation]</span>
+
+  <span class="hi">SAR Feature</span>          <span class="hi">Optical Feature</span>          <span class="hi">Transformer Feature</span>
+  (B, C, H, W)          (B, C, H, W)             (B, C, H, W)
+       │                      │                         │
+       │                      │                         │
+       ▼                      ▼                         │
+  ┌────────────────────────────────┐                    │
+  │   <span class="lbl">Cloud Density Estimation</span>       │                    │
+  │                                │                    │
+  │  similarity = CosineSim(       │                    │
+  │    SAR_feat, Opt_feat, dim=C)  │                    │
+  │         │                      │                    │
+  │         ▼                      │                    │
+  │  ┌──────────────┐             │                    │
+  │  │ Conv1x1 (C→C/4)│             │                    │
+  │  │ GELU           │             │                    │
+  │  │ Conv1x1 (C/4→1)│             │                    │
+  │  │ Sigmoid        │             │                    │
+  │  └──────┬───────┘             │                    │
+  │         │                      │                    │
+  │         ▼                      │                    │
+  │  <span class="r">cloud_density (B,1,H,W)</span>        │                    │
+  │  0=맑음 ←──────→ 1=두꺼운 구름   │                    │
+  └────────┬───────────────────────┘                    │
+           │                                             │
+           ├─────────────────┐                           │
+           ▼                 ▼                           │
+    ┌────────────┐   ┌────────────┐                     │
+    │<span class="lbl">Scale Net</span>    │   │<span class="lbl">Shift Net</span>    │                     │
+    │Linear(1→C) │   │Linear(1→C) │                     │
+    └─────┬──────┘   └─────┬──────┘                     │
+          │ γ(B,C,1,1)     │ β(B,C,1,1)                │
+          │                 │                            │
+          ▼                 ▼                            ▼
+    ┌──────────────────────────────────────────────────────┐
+    │              <span class="lbl">AdaIN-style Modulation</span>                  │
+    │                                                      │
+    │   output = feat * (<span class="g">1 + γ</span>) + <span class="g">β</span>                       │
+    │                                                      │
+    │   맑은 영역:  γ≈0, β≈0  →  output ≈ feat (보존)       │
+    │   두꺼운 구름: γ≫0, β≫0  →  output 크게 변조 (재구성)  │
+    └──────────────────────────┬───────────────────────────┘
+                               │
+                               ▼
+                    <span class="hi">Modulated Feature (B, C, H, W)</span>
+                    → 다음 Transformer 블록 또는 Decoder로 전달</div>
+</div>
+
+<!-- 5 -->
+<div class="c" id="s5">
+  <h2>5. Backbone 선택 — 효율적 Attention 설계</h2>
+  <p>256&times;256 원격 탐사 이미지에서 Full Self-Attention은 O(65536&sup2;)으로 비현실적. 효율적 대안이 필요.</p>
+
+  <table>
+    <tr><th>방식</th><th>복잡도</th><th>전역</th><th>대표 논문</th><th>적합도</th></tr>
+    <tr>
+      <td><b>Window Attention</b></td>
+      <td>O(n&middot;w&sup2;)</td>
+      <td>&times; (로컬)</td>
+      <td>HAT (TPAMI 2025)</td>
+      <td>로컬 텍스처에 강함</td>
+    </tr>
+    <tr>
+      <td><b>Linear Attention</b></td>
+      <td>O(n&middot;d)</td>
+      <td>O (전역)</td>
+      <td>ACL (CVPR 2025)</td>
+      <td>전역 + 효율. 수학적으로 SSM과 동치</td>
+    </tr>
+    <tr>
+      <td><b>Deformable Attention</b></td>
+      <td>O(n&middot;k)</td>
+      <td>O (적응적)</td>
+      <td>DSwinIR (2025)</td>
+      <td>구름/맑은 영역 적응적 수용 영역</td>
+    </tr>
+    <tr>
+      <td><b>Attentive SSM (Mamba)</b></td>
+      <td>O(n)</td>
+      <td>O (전역)</td>
+      <td>MambaIRv2 (CVPR 2025)</td>
+      <td>최소 연산으로 전역. ViT급 비인과적 모델링</td>
+    </tr>
+    <tr>
+      <td><b>FFT Attention</b></td>
+      <td>O(n log n)</td>
+      <td>O (전역)</td>
+      <td>SFHformer (ECCV 2024)</td>
+      <td>구름 주파수 특성 활용에 최적</td>
+    </tr>
+  </table>
+
+  <h3>근거 논문</h3>
+
+  <div class="paper">
+    <div class="ti">HAT — "Hybrid Attention Transformer for Image Restoration" <span class="tag t1">Trans</span></div>
+    <div class="ve">TPAMI 2025 &emsp; <a href="https://github.com/XPixelGroup/HAT">Code</a></div>
+    Channel Attention + Window Self-Attention 하이브리드. Overlapping Cross-Attention으로 윈도우 경계 정보 교환. SR에서 non-diffusion SOTA.
+  </div>
+
+  <div class="paper">
+    <div class="ti">ACL — "Activating Capability of Linear Attention" <span class="tag t1">Trans</span></div>
+    <div class="ve">CVPR 2025 &emsp; <a href="https://openaccess.thecvf.com/content/CVPR2025/papers/Gu_ACL_Activating_Capability_of_Linear_Attention_for_Image_Restoration_CVPR_2025_paper.pdf">PDF</a></div>
+    Linear Attention과 Mamba SSM의 수학적 동치 관계 활용. O(n) 전역 수용 영역 + Local Enhancement(다중 스케일 dilated conv).
+  </div>
+
+  <div class="paper">
+    <div class="ti">DSwinIR — "Deformable Sliding Window Transformer" <span class="tag t1">Trans</span></div>
+    <div class="ve">arXiv 2025 &emsp; <a href="https://arxiv.org/abs/2504.04869">Link</a></div>
+    Content-aware deformable sampling → 데이터 기반 수용 영역 학습. PromptIR 대비 +0.66 dB, <b>15% FLOPs 절감, 22% 빠름</b>.
+  </div>
+
+  <div class="paper">
+    <div class="ti">MambaIRv2 — "Attentive State Space Restoration" <span class="tag t4">Mamba</span></div>
+    <div class="ve">CVPR 2025 &emsp; <a href="https://github.com/csguoh/MambaIR">Code</a></div>
+    비인과적(non-causal) 모델링으로 ViT급 성능. HAT 대비 +0.29 dB, 파라미터 9.3% 절감.
+  </div>
+
+  <div class="b bp">
+    <b>추천 조합:</b> <b>Linear Attention(전역)</b> + <b>Window Attention(로컬)</b> + <b>FFT Branch(주파수)</b><br>
+    → ACL의 linear attention으로 전역 문맥, HAT식 window attention으로 로컬 텍스처, SFHformer식 FFT로 구름 주파수 분리.
+    이 3중 구조가 Diffusion의 iterative refinement을 single pass로 대체하는 핵심.
+  </div>
+
+  <div class="detail">
+    <h4>구체적 설명: 효율적 Attention Backbone 설계</h4>
+    <p><b>핵심 문제:</b> 256x256 원격 탐사 이미지를 패치 크기 4로 토큰화하면 64x64 = 4,096개 토큰이 생성된다. Full Self-Attention의 O(n&sup2;) 복잡도는 이 규모에서도 병목이 되며, 특히 학습 시 배치 크기를 제한한다. 따라서 성능을 유지하면서 연산을 줄이는 효율적 attention 설계가 필수적이다.</p>
+    <ul>
+      <li><b>Linear Attention (전역 문맥, O(n&middot;d)):</b> 커널 함수 φ를 사용하여 softmax(QK^T)V를 φ(Q)(φ(K)^T V)로 재배열한다. 이렇게 하면 n&sup2; 대신 n&middot;d 복잡도로 전역 수용 영역을 확보한다. ACL 논문은 이 Linear Attention이 수학적으로 SSM(State Space Model)과 동치임을 증명했으며, 추가로 다중 스케일 dilated convolution으로 로컬 정보를 보강한다. 구름 제거에서는 멀리 떨어진 맑은 영역의 정보를 참조해야 하므로 전역 수용 영역이 핵심적이다.</li>
+      <li><b>Window Attention (로컬 텍스처, O(n&middot;w&sup2;)):</b> HAT 스타일의 8x8 윈도우 내 self-attention으로 로컬 텍스처 패턴을 정밀하게 모델링한다. Overlapping Cross-Attention(OCA)을 통해 윈도우 경계의 정보 단절 문제를 해결한다. 구름 경계 근처의 날카로운 전환이나 세밀한 지표 텍스처 복원에 효과적이다.</li>
+      <li><b>FFT Attention (주파수 도메인, O(n log n)):</b> 모듈 ②의 Frequency Branch로, FFT의 O(n log n) 복잡도로 전역 주파수 패턴을 처리한다. 구름의 저주파 특성을 분리하는 데 특화된 경로이다.</li>
+      <li><b>블록 구성:</b> 각 Transformer 블록은 [Linear Attn → Window Attn → FFT Attn → FFN] 순서로 구성하며, U-Net 구조의 4-level 인코더-디코더에 배치한다. 레벨별 블록 수는 [2, 4, 6, 4]로 설정하여 bottleneck에서 더 깊은 처리를 수행한다.</li>
+    </ul>
+  </div>
+
+  <div class="arch-box"><span class="lbl">[Backbone 상세 아키텍처: 4-Level U-Net Transformer]</span>
+
+  <span class="hi">Input (B, C_in, 256, 256)</span>
+         │
+         ▼
+  ┌──────────────┐
+  │ <span class="g">Patch Embed</span>   │  Conv 4x4, stride 4 → (B, C, 64, 64)
+  └──────┬───────┘
+         │
+  ═══════╪══════════════════════════════════════ <span class="lbl">Level 1: C=64, 64x64</span>
+         │
+         ▼
+  ┌──────────────────────────────────────┐
+  │ <span class="g">Transformer Block</span> x 2                 │
+  │ ┌────────┐ ┌────────┐ ┌────────┐   │
+  │ │<span class="hi">Linear</span>  │→│<span class="hi">Window</span>  │→│<span class="hi">FFT</span>     │→FFN│
+  │ │<span class="hi">Attn</span>    │ │<span class="hi">Attn 8x8</span>│ │<span class="hi">Attn</span>    │   │
+  │ └────────┘ └────────┘ └────────┘   │
+  └──────┬───────┘─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ skip₁
+         │
+         ▼ Downsample (Conv 2x2 stride 2)
+  ═══════╪══════════════════════════════════════ <span class="lbl">Level 2: C=128, 32x32</span>
+         │
+         ▼
+  ┌──────────────────────────────────────┐
+  │ <span class="g">Transformer Block</span> x 4                 │
+  │ (Linear + Window + FFT + FFN) x 4    │
+  └──────┬───────┘─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ skip₂
+         │
+         ▼ Downsample
+  ═══════╪══════════════════════════════════════ <span class="lbl">Level 3: C=256, 16x16</span>
+         │
+         ▼
+  ┌──────────────────────────────────────┐
+  │ <span class="g">Transformer Block</span> x 6 (<span class="r">Bottleneck</span>)     │
+  │ + <span class="r">Cloud-Adaptive Modulation</span> (모듈③)   │
+  └──────┬───────┘─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ skip₃
+         │
+         ▼ Downsample
+  ═══════╪══════════════════════════════════════ <span class="lbl">Level 4: C=512, 8x8</span>
+         │
+         ▼
+  ┌──────────────────────────────────────┐
+  │ <span class="g">Transformer Block</span> x 4 (Deepest)       │
+  │ Full attention OK (8x8 = 64 tokens)  │
+  └──────┬───────┘
+         │
+         ▼ Upsample (PixelShuffle)
+  ═══════╪══════════════════════════════════════ <span class="lbl">Decoder (symmetric)</span>
+         │
+         ├──◄── skip₃ (concat + 1x1 conv)
+         ▼
+  ┌──────────────┐
+  │ <span class="g">Dec Block</span> x 6  │ → Upsample → + skip₂ → Dec x 4 → Upsample → + skip₁ → Dec x 2
+  └──────────────┘
+         │
+         ▼
+  ┌──────────────┐
+  │ <span class="g">Reconstruct</span>   │  Conv 3x3 → (B, 13, 256, 256)
+  │ + Global Skip │  output = reconstruction + cloudy_input
+  └──────┬───────┘
+         ▼
+  <span class="hi">Clean Output (B, 13, 256, 256)</span></div>
+</div>
+
+<!-- 6 -->
+<div class="c" id="s6">
+  <h2>6. Diffusion에서 빌려오되 Diffusion이 아닌 기법</h2>
+  <p>Diffusion의 성능 비결을 분석하고, <b>iterative sampling 없이</b> 핵심 아이디어만 이식.</p>
+
+  <table>
+    <tr><th>Diffusion의 강점</th><th>Transformer로 이식하는 방법</th><th>출처</th></tr>
+    <tr>
+      <td><b>Preconditioning</b><br>— 노이즈 수준별 적응적 스케일링</td>
+      <td>구름 밀도(=열화 수준)에 따라 입출력 feature를 적응적으로 스케일링.
+      <code>x_in = x / c_in(cloud_density)</code><br>
+      <code>output = c_skip * x + c_out * net(x_in)</code></td>
+      <td>EMRDM (CVPR 2025)<br><a href="https://github.com/Ly403/EMRDM">Code</a></td>
+    </tr>
+    <tr>
+      <td><b>Residual Noise Prediction</b><br>— 잔차+노이즈 동시 학습</td>
+      <td>Cloudy→Clean 잔차를 noise-aware 조건으로 예측.
+      단일 forward, iterative 없음.<br>
+      <code>loss = |net(x_cloudy, cloud_cond) - (x_clean - x_cloudy)|</code></td>
+      <td>Resfusion (NeurIPS 2024)<br><a href="https://github.com/nkicsl/Resfusion">Code</a></td>
+    </tr>
+    <tr>
+      <td><b>Direct Bridge</b><br>— 열화↔복원 직접 경로</td>
+      <td>Gaussian 노이즈 경유 없이 cloudy→clean 직접 매핑.
+      Transformer가 본질적으로 하는 일과 동일. 별도 수정 불필요.</td>
+      <td>DB-CR (TGRS 2025)<br><a href="https://arxiv.org/abs/2504.03607">Link</a></td>
+    </tr>
+  </table>
+
+  <div class="b ba">
+    <b>핵심 원칙:</b> Diffusion에서 가져오는 것은 <b>conditioning 기법</b>과 <b>loss 설계</b>이지,
+    <b>iterative sampling은 가져오지 않는다.</b>
+    이것이 "Diffusion 기반이 아닌" 아키텍처의 경계선이다.
+  </div>
+
+  <h3>Preconditioning 이식 설계</h3>
+<pre># EMRDM의 Preconditioning → Transformer에 이식
+class PreconditionedForward(nn.Module):
+    def forward(self, x, cloud_density):
+        # cloud_density: Cloud-Adaptive Modulation에서 추정한 값
+        c_in   = 1 / sqrt(cloud_density**2 + sigma_data**2)
+        c_skip = sigma_data**2 / (cloud_density**2 + sigma_data**2)
+        c_out  = cloud_density * sigma_data / sqrt(cloud_density**2 + sigma_data**2)
+
+        x_scaled = c_in * x                     # 입력 정규화
+        net_out = self.transformer(x_scaled)     # Transformer forward
+        return c_skip * x + c_out * net_out      # 적응적 skip + 출력 스케일링</pre>
+
+  <div class="detail">
+    <h4>구체적 설명: Diffusion 기법의 비-반복적 이식</h4>
+    <p><b>핵심 원리:</b> Diffusion 모델(EMRDM, DiffCR)이 SOTA 성능을 달성하는 이유는 iterative sampling 자체가 아니라, 그 과정에서 활용되는 <b>conditioning 기법</b>과 <b>loss 설계</b>에 있다. 이 핵심 아이디어들을 Transformer의 single forward pass에 이식하면, 반복 추론 없이도 유사한 성능을 기대할 수 있다.</p>
+    <ul>
+      <li><b>Preconditioning (EMRDM 차용):</b> Diffusion 모델은 각 시간 스텝(노이즈 수준)에 맞게 입출력을 적응적으로 스케일링한다. 구름 제거에서는 "구름 밀도"가 Diffusion의 "노이즈 수준"에 대응한다. 모듈 ③에서 추정한 구름 밀도를 Diffusion의 σ(t)처럼 사용하여:
+        <br>- <code>c_in</code>: 입력 feature를 구름 밀도에 맞게 정규화 (큰 열화에 대해 수치 안정성 확보)
+        <br>- <code>c_skip</code>: 원본 입력을 얼마나 직접 전달할지 결정 (맑은 영역 → skip 비율 높음)
+        <br>- <code>c_out</code>: 네트워크 출력의 스케일 조절 (두꺼운 구름 → 큰 수정 필요)
+        <br>이 3개 스칼라는 구름 밀도의 해석적 함수로 계산되므로 학습 파라미터를 추가하지 않는다.</li>
+      <li><b>Residual Noise Prediction (Resfusion 차용):</b> 기존 구름 제거 모델은 clean 이미지 자체를 예측하지만, Resfusion의 잔차 예측 방식을 차용하여 <code>net(cloudy) = clean - cloudy</code> (잔차)를 예측한다. 잔차 학습은 네트워크가 "변해야 할 부분"에만 집중하게 하므로, 맑은 영역에서의 불필요한 수정을 줄이고 학습을 안정화한다.</li>
+      <li><b>Direct Bridge (DB-CR 참조):</b> DB-CR은 Gaussian noise를 경유하지 않고 cloudy→clean을 직접 매핑하는 bridge를 사용한다. 이는 본질적으로 Transformer가 하는 일과 동일하므로 별도 수정 없이, "Diffusion의 장점은 direct mapping으로도 달성 가능하다"는 논리적 근거로 활용한다.</li>
+    </ul>
+  </div>
+
+  <div class="arch-box"><span class="lbl">[Diffusion-Inspired Conditioning: 전체 Forward Pass 흐름]</span>
+
+  <span class="hi">Cloudy Optical (B, 13, H, W)</span>     <span class="hi">SAR (B, 2, H, W)</span>
+         │                                │
+         ▼                                ▼
+  ┌──────────────┐                ┌──────────────┐
+  │ <span class="g">Opt Encoder</span>   │                │ <span class="g">SAR Encoder</span>   │
+  └──────┬───────┘                └──────┬───────┘
+         │                                │
+         ├────────────────────────────────┤
+         │                                │
+         ▼                                ▼
+  ┌──────────────────────────────────────────┐
+  │  <span class="lbl">모듈 ① Cross-Modal Transformer</span>           │
+  │  (SAR↔Optical 상호작용)                    │
+  └──────────────────┬───────────────────────┘
+                     │
+                     ▼
+  ┌──────────────────────────────────────────┐
+  │  <span class="lbl">모듈 ③ Cloud Density Estimation</span>          │
+  │  cloud_density = estimate(SAR, Optical)  │──── <span class="r">density (B,1,H,W)</span>
+  └──────────────────┬───────────────────────┘          │
+                     │                                   │
+                     ▼                                   ▼
+  ┌──────────────────────────────────────────────────────────┐
+  │  <span class="lbl">Preconditioning (EMRDM-style)</span>                            │
+  │                                                          │
+  │  c_in   = 1 / sqrt(ρ² + σ_data²)                        │
+  │  c_skip = σ_data² / (ρ² + σ_data²)                      │
+  │  c_out  = ρ · σ_data / sqrt(ρ² + σ_data²)               │
+  │                          (ρ = cloud_density)             │
+  │                                                          │
+  │  x_scaled = <span class="g">c_in</span> * feature    ← 입력 정규화              │
+  └──────────────────┬───────────────────────────────────────┘
+                     │
+                     ▼
+  ┌──────────────────────────────────────────┐
+  │  <span class="lbl">Transformer Backbone (모듈 ②)</span>             │
+  │  4-Level U-Net with                      │
+  │  Linear + Window + FFT Attention         │
+  │  + Cloud-Adaptive Modulation (모듈 ③)    │
+  └──────────────────┬───────────────────────┘
+                     │ net_out
+                     ▼
+  ┌──────────────────────────────────────────────────────────┐
+  │  <span class="lbl">Preconditioned Output</span>                                    │
+  │                                                          │
+  │  <span class="g">output = c_skip * cloudy_input + c_out * net_out</span>          │
+  │                                                          │
+  │  맑은 영역: c_skip ≈ 1  → 거의 원본 유지                   │
+  │  구름 영역: c_out ≫ 0   → 네트워크 출력으로 재구성           │
+  └──────────────────┬───────────────────────────────────────┘
+                     │
+                     ▼
+              <span class="hi">Clean Output (B, 13, H, W)</span></div>
+</div>
+
+<!-- 7 -->
+<div class="c" id="s7">
+  <h2>7. Ablation 설계 &amp; 비교 전략</h2>
+
+  <h3>Ablation Study 설계</h3>
+  <table>
+    <tr><th>실험</th><th>구성</th><th>검증 대상</th></tr>
+    <tr><td>Baseline</td><td>ACA-CRNet (원본)</td><td>출발점</td></tr>
+    <tr><td>+Transformer Backbone</td><td>ResBlock → Transformer Block</td><td>Backbone 교체 효과</td></tr>
+    <tr><td>+Cross-Modal Attn (①)</td><td>+ SAR-Optical cross-attention</td><td>SAR 융합 방식 개선 효과</td></tr>
+    <tr><td>+Freq-Aware Attn (②)</td><td>+ FFT branch</td><td>주파수 도메인 기여</td></tr>
+    <tr><td>+Cloud-Adaptive (③)</td><td>+ 구름 밀도 기반 modulation</td><td>적응적 처리 기여</td></tr>
+    <tr><td>+Preconditioning</td><td>+ Diffusion-inspired conditioning</td><td>Conditioning 기법 기여</td></tr>
+    <tr><td><b>Full Model (Ours)</b></td><td>①+②+③+Precond</td><td>전체 시스템</td></tr>
+  </table>
+
+  <h3>비교 논문 테이블 구성</h3>
+<pre>Table: Comparison on SEN12MS-CR
+
+                                     Performance          Efficiency
+Method          | Type            | PSNR | SSIM | SAM   | Params | FLOPs | Time
+----------------|-----------------|------|------|-------|--------|-------|------
+DSen2-CR        | CNN             | 27.76| 0.874| 9.47  |  3.2M  |  xx G | 0.02s
+GLF-CR          | CNN+Fusion      | 28.64| 0.885| 8.98  |  xx M  |  xx G | 0.03s
+ACA-CRNet       | CNN+Attn        | 29.78| 0.896| 7.77  |  xx M  |  xx G | 0.05s
+SCT-CR          | Conv+Trans      |  -   |  -   |  -    |  xx M  |  xx G |  -
+────────────────────────────────────────────────────────────────────────────────
+DiffCR          | Diffusion       | 31.77| 0.902| 5.82  |  xx M  |  xx G | ~1s
+EMRDM           | Diff+Trans      | 32.14| 0.924| 5.27  |  xx M  |  xx G | ~3s
+────────────────────────────────────────────────────────────────────────────────
+Ours            | Transformer     | 32.xx| 0.92x| 5.xx  |  xx M  |  xx G | ~0.1s
+                                    ↑ EMRDM급 성능         ↑ 10~30배 빠른 추론</pre>
+
+  <div class="b bg">
+    <b>논문 스토리라인:</b><br>
+    "Non-diffusion 모델의 한계(ACA-CRNet 29.78 dB)를 Transformer 기반 아키텍처로 극복.<br>
+    SAR Cross-Modal Attention + Frequency-Aware Attention + Cloud-Adaptive Modulation의 시너지로<br>
+    Diffusion SOTA(EMRDM 32.14 dB)에 <b>동등한 성능을 single forward pass</b>로 달성하면서<br>
+    <b>추론 속도 10~30배 우위</b>를 확보."
+  </div>
+</div>
+
+<!-- 8 -->
+<div class="c" id="s8">
+  <h2>8. 참고 논문 전체 목록</h2>
+
+  <h3>핵심 참조 — 모듈 설계 근거</h3>
+  <table>
+    <tr><th>논문</th><th>Venue</th><th>활용 부분</th></tr>
+    <tr><td><a href="https://www.sciencedirect.com/science/article/abs/pii/S0924271625001856">SMDCNet</a></td><td>ISPRS J. 2025</td><td>모듈① Cross-modal similarity attention</td></tr>
+    <tr><td><a href="https://www.sciencedirect.com/science/article/abs/pii/S1566253524004275">W-Shaped Fusion</a></td><td>Info. Fusion 2024</td><td>모듈① Mutual injection cross-attention</td></tr>
+    <tr><td><a href="https://www.mdpi.com/2072-4292/18/2/201">AFR-CR</a></td><td>Remote Sensing 2026</td><td>모듈① Transposed cross-attention + 모듈② freq decoupling</td></tr>
+    <tr><td><a href="https://github.com/deng-ai-lab/SFHformer">SFHformer</a></td><td>ECCV 2024</td><td>모듈② FFT + Spatial dual-branch</td></tr>
+    <tr><td><a href="https://www.mdpi.com/2072-4292/17/9/1499">SFCRFormer</a></td><td>Remote Sensing 2025</td><td>모듈② Frequency self-attention for cloud</td></tr>
+    <tr><td><a href="https://www.tandfonline.com/doi/full/10.1080/15481603.2025.2534740">MFFNet</a></td><td>GIScience 2025</td><td>모듈② Wavelet SAR-optical fusion</td></tr>
+    <tr><td><a href="https://www.sciencedirect.com/science/article/pii/S003132032500980X">GLGF-CR</a></td><td>Pattern Recognition 2025</td><td>모듈③ Cloud thickness gating</td></tr>
+    <tr><td><a href="https://openaccess.thecvf.com/content/CVPR2025/papers/Tian_Degradation-Aware_Feature_Perturbation_for_All-in-One_Image_Restoration_CVPR_2025_paper.pdf">DFPIR</a></td><td>CVPR 2025</td><td>모듈③ Degradation-aware modulation</td></tr>
+    <tr><td><a href="https://www.sciencedirect.com/science/article/abs/pii/S1051200425005445">DACDM-CR</a></td><td>DSP 2025</td><td>모듈③ Cloud-aware dynamic processing</td></tr>
+  </table>
+
+  <h3>Backbone &amp; Attention 설계 근거</h3>
+  <table>
+    <tr><th>논문</th><th>Venue</th><th>활용 부분</th></tr>
+    <tr><td><a href="https://github.com/XPixelGroup/HAT">HAT</a></td><td>TPAMI 2025</td><td>Hybrid channel + window attention</td></tr>
+    <tr><td><a href="https://openaccess.thecvf.com/content/CVPR2025/papers/Gu_ACL_Activating_Capability_of_Linear_Attention_for_Image_Restoration_CVPR_2025_paper.pdf">ACL</a></td><td>CVPR 2025</td><td>Linear attention (O(n) 전역)</td></tr>
+    <tr><td><a href="https://arxiv.org/abs/2504.04869">DSwinIR</a></td><td>arXiv 2025</td><td>Deformable sliding window</td></tr>
+    <tr><td><a href="https://github.com/csguoh/MambaIR">MambaIRv2</a></td><td>CVPR 2025</td><td>Attentive SSM (linear alternative)</td></tr>
+    <tr><td><a href="https://arxiv.org/abs/2412.20066">MaIR</a></td><td>CVPR 2025</td><td>Locality-preserving Mamba scanning</td></tr>
+    <tr><td><a href="https://www.sciencedirect.com/science/article/pii/S1569843224002632">SCT-CR</a></td><td>JAG 2024</td><td>Synergistic Conv-Transformer for cloud</td></tr>
+  </table>
+
+  <h3>Diffusion 아이디어 차용</h3>
+  <table>
+    <tr><th>논문</th><th>Venue</th><th>차용 기법 (iterative sampling 제외)</th></tr>
+    <tr><td><a href="https://github.com/Ly403/EMRDM">EMRDM</a></td><td>CVPR 2025</td><td>Preconditioning (적응적 스케일링)</td></tr>
+    <tr><td><a href="https://github.com/nkicsl/Resfusion">Resfusion</a></td><td>NeurIPS 2024</td><td>Residual noise prediction formulation</td></tr>
+    <tr><td><a href="https://arxiv.org/abs/2504.03607">DB-CR</a></td><td>TGRS 2025</td><td>Dual-branch attention fusion</td></tr>
+    <tr><td><a href="https://github.com/XavierJiezou/DiffCR">DiffCR</a></td><td>TGRS 2024</td><td>Decoupled encoder (modality 분리)</td></tr>
+  </table>
+</div>
+
+<p class="ft">본 보고서는 2024~2026년 발표 논문 19편의 웹 조사를 기반으로 작성되었다.</p>
+</body>
+</html>

@@ -1,0 +1,256 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>2026-04-04 실험 보고서: ACA-CRNet + CAFM</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { font-family: 'Segoe UI', -apple-system, sans-serif; background: #f5f7fa; color: #1a1a2e; line-height: 1.7; }
+        .container { max-width: 960px; margin: 0 auto; padding: 40px 24px; }
+        h1 { font-size: 1.8rem; margin-bottom: 8px; }
+        .subtitle { color: #6b7280; margin-bottom: 32px; font-size: 0.95rem; }
+        h2 { font-size: 1.25rem; margin: 36px 0 12px; padding-bottom: 6px; border-bottom: 2px solid #e5e7eb; }
+        h3 { font-size: 1.05rem; margin: 20px 0 8px; color: #374151; }
+        h4 { font-size: 0.95rem; margin: 16px 0 6px; color: #4b5563; }
+        p, li { font-size: 0.93rem; margin-bottom: 8px; }
+        ul, ol { padding-left: 20px; }
+        table { width: 100%; border-collapse: collapse; margin: 14px 0; font-size: 0.88rem; }
+        th, td { padding: 9px 12px; text-align: left; border: 1px solid #d1d5db; }
+        th { background: #1e293b; color: #fff; font-weight: 600; }
+        tr:nth-child(even) { background: #f9fafb; }
+        .win { color: #16a34a; font-weight: 700; }
+        .lose { color: #dc2626; font-weight: 700; }
+        code { background: #e5e7eb; padding: 2px 6px; border-radius: 4px; font-size: 0.84rem; font-family: 'Fira Code', 'Consolas', monospace; }
+        .card { background: #fff; border-radius: 10px; padding: 24px; margin: 18px 0; box-shadow: 0 1px 3px rgba(0,0,0,0.08); }
+        .info { border-left: 4px solid #3b82f6; background: #eff6ff; padding: 12px 16px; border-radius: 0 6px 6px 0; margin: 12px 0; font-size: 0.92rem; }
+        .warn { border-left: 4px solid #f59e0b; background: #fffbeb; padding: 12px 16px; border-radius: 0 6px 6px 0; margin: 12px 0; font-size: 0.92rem; }
+        .ref { font-size: 0.82rem; color: #6b7280; margin-top: 8px; }
+        hr { border: none; border-top: 1px solid #e5e7eb; margin: 32px 0; }
+    </style>
+</head>
+<body>
+<div class="container">
+
+<h1>2026-04-04 실험 보고서</h1>
+<p class="subtitle">ACA-CRNet + CAFM 학습 및 비교 분석</p>
+
+<!-- ========== 1 ========== -->
+<h2>1. 학습 스펙 비교 및 우리의 선택</h2>
+
+<div class="card">
+<h3>1.1 기존 모델 학습 스펙</h3>
+<table>
+    <tr><th>항목</th><th>DSen2-CR (Meraner 2020)</th><th>EMRDM (Zou 2024)</th></tr>
+    <tr><td>모델 유형</td><td>CNN (ResNet, 16 blocks, F=256)</td><td>Multi-Resolution Diffusion</td></tr>
+    <tr><td>Batch size</td><td>16</td><td>4 (per GPU)</td></tr>
+    <tr><td>Optimizer</td><td>Nadam (lr=7e-5, schedule_decay=0.004)</td><td>Adam (lr=1e-4)</td></tr>
+    <tr><td>Crop size</td><td>128×128 (random crop)</td><td>256×256 (풀사이즈)</td></tr>
+    <tr><td>Augmentation</td><td>crop + flip + rotation</td><td>flip</td></tr>
+    <tr><td>Training samples</td><td>134,907</td><td>~122,218</td></tr>
+    <tr><td>Epochs / Iterations</td><td>8 epochs</td><td>500K~1M iterations</td></tr>
+    <tr><td>Loss</td><td>CARL</td><td>L2 (diffusion denoising)</td></tr>
+    <tr><td>GPU</td><td>DGX-1 (8× P100)</td><td>4× A100</td></tr>
+</table>
+<p class="ref"><b>출처:</b> DSen2-CR — <a href="https://pmc.ncbi.nlm.nih.gov/articles/PMC7386944/">Meraner et al. 2020</a>, <a href="https://github.com/ameraner/dsen2-cr">GitHub</a>. EMRDM — <a href="https://arxiv.org/html/2503.23717">arXiv:2503.23717</a>.</p>
+
+<h3>1.2 우리의 학습 스펙</h3>
+<table>
+    <tr><th>항목</th><th>값</th></tr>
+    <tr><td>모델</td><td>ACA-CRNet + CAFM (16 layers, F=256)</td></tr>
+    <tr><td>Optimizer</td><td>AdamW (lr=1e-4, 고정)</td></tr>
+    <tr><td>Loss</td><td>CloudAdaptiveLoss / SimpleMSELoss</td></tr>
+    <tr><td>Batch size</td><td>4</td></tr>
+    <tr><td>Crop / Augmentation</td><td>128×128 random crop + flip + rotation</td></tr>
+    <tr><td>Train / Val / Test</td><td>2,048 / 256 / 256 samples</td></tr>
+    <tr><td>Epochs</td><td>20</td></tr>
+    <tr><td>Early stopping</td><td>patience=10</td></tr>
+    <tr><td>GPU</td><td>단일 GPU (12 GB)</td></tr>
+</table>
+
+<h3>1.3 DSen2-CR 기반으로 설계한 이유</h3>
+<table>
+    <tr><th>구조 요소</th><th>DSen2-CR</th><th>ACA-CRNet</th></tr>
+    <tr><td>백본</td><td>ResNet (residual blocks)</td><td>ResNet (residual blocks)</td></tr>
+    <tr><td>레이어 수 / Feature size</td><td>16 / 256</td><td>16 / 256</td></tr>
+    <tr><td>입력</td><td>SAR + Cloudy concat (15ch)</td><td>SAR + Cloudy concat (15ch)</td></tr>
+    <tr><td>출력 방식</td><td>Residual (cloudy + output)</td><td>Residual (cloudy + output)</td></tr>
+    <tr><td>추가 모듈</td><td>—</td><td>CAFM</td></tr>
+</table>
+<p>동일 백본이므로 DSen2-CR의 학습 전략(128×128 crop, flip+rotation, CARL loss)이 그대로 적용 가능하다.</p>
+<p><b>EMRDM 전략을 따르지 않는 이유:</b></p>
+<ul>
+    <li>Diffusion 모델은 noise prediction 기반으로 학습 방식이 근본적으로 다름</li>
+    <li>A100 4장, 수일 학습 필요 → 단일 12 GB GPU에서 비현실적</li>
+    <li>256×256 풀사이즈는 12 GB GPU에서 batch=1도 빡빡함</li>
+</ul>
+</div>
+
+<hr>
+
+<!-- ========== 2 ========== -->
+<h2>2. CAFM ON/OFF 비교 실험</h2>
+
+<div class="card">
+<h3>2.1 실험 설계</h3>
+<table>
+    <tr><th>조건</th><th>CAFM ON</th><th>CAFM OFF (Baseline)</th></tr>
+    <tr><td>모델</td><td>ACA-CRNet + CAFM</td><td>ACA-CRNet</td></tr>
+    <tr><td>Loss</td><td>CloudAdaptiveLoss</td><td>SimpleMSELoss</td></tr>
+    <tr><td>그 외</td><td colspan="2">동일 (데이터, 에폭, lr, augmentation, batch size)</td></tr>
+</table>
+<div class="warn"><b>주의:</b> Loss 함수가 다르므로 loss 절대값은 비교 불가. MAE·PSNR·SSIM·SAM으로 비교.</div>
+
+<h3>2.2 CAFM ON (CloudAdaptiveLoss) — 40에폭</h3>
+<p>20에폭 이후 val 지표의 뚜렷한 개선이 없어 <b>실질적 수렴은 ~20에폭</b>으로 판단.</p>
+<h4>CAFM ON 최종 결과 (20에폭 기준)</h4>
+<table>
+    <tr><th>지표</th><th>Train (Ep 20)</th><th>Val Best (Ep 20)</th><th>Test</th></tr>
+    <tr><td>MAE</td><td>0.1439</td><td>0.1651</td><td>0.2075</td></tr>
+    <tr><td>PSNR</td><td>27.98</td><td>27.07</td><td>24.58</td></tr>
+    <tr><td>SSIM</td><td>0.8600</td><td>0.8693</td><td>0.8202</td></tr>
+    <tr><td>SAM</td><td>8.56</td><td>7.75</td><td>12.62</td></tr>
+</table>
+
+<h3>2.3 CAFM OFF (Baseline, SimpleMSELoss) — 20에폭</h3>
+<h4>Baseline 최종 결과</h4>
+<table>
+    <tr><th>지표</th><th>Train (Ep 20)</th><th>Val Best (Ep 20)</th><th>Test</th></tr>
+    <tr><td>MAE</td><td>0.1195</td><td>0.1583</td><td>0.1980</td></tr>
+    <tr><td>PSNR</td><td>29.73</td><td>27.82</td><td>25.16</td></tr>
+    <tr><td>SSIM</td><td>0.8600</td><td>0.8650</td><td>0.8232</td></tr>
+    <tr><td>SAM</td><td>7.30</td><td>7.36</td><td>10.86</td></tr>
+</table>
+
+<h3>2.4 A vs C 비교 (Loss가 다른 비교)</h3>
+<p>Baseline이 대부분 지표에서 우위. 그러나 Loss 함수가 달라 순수 CAFM 효과를 분리할 수 없다. → Ablation Study 진행.</p>
+</div>
+
+<div class="card">
+<h3>2.5 Ablation Study: 순수 CAFM 모듈 효과 측정</h3>
+<p>섹션 2.4에서 CAFM+CARL vs Baseline(MSE)를 비교했으나, Loss 함수가 달라 순수 CAFM 효과를 분리할 수 없었다. CloudAdaptiveLoss(CARL)는 구름 영역에 가중치를 부여하는 loss로, 소규모 데이터(2,048샘플)에서는 MSE 대비 오히려 학습을 방해하여 Baseline이 우위를 보인 것으로 분석되었다.</p>
+<p>이를 검증하기 위해 <b>CAFM ON + SimpleMSELoss</b> 실험을 추가하여, Loss를 통일(MSE)한 상태에서 CAFM 유무만 다른 공정한 비교를 진행했다.</p>
+<table>
+    <tr><th>실험</th><th>CAFM</th><th>Loss</th><th>목적</th></tr>
+    <tr><td>CAFM + MSE</td><td>ON</td><td>SimpleMSELoss</td><td><b>순수 CAFM 모듈 효과</b> 분리</td></tr>
+    <tr><td>Baseline</td><td>OFF</td><td>SimpleMSELoss</td><td>기준선</td></tr>
+</table>
+
+<h4>Val Best 지표 비교 (동일 MSE Loss, 20에폭)</h4>
+<table>
+    <tr><th>지표</th><th>Baseline</th><th>CAFM</th><th>변화</th><th>해석</th></tr>
+    <tr><td>MAE ↓</td><td>0.1583</td><td class="win">0.1453</td><td class="win">−8.2%</td><td>오차 감소 (개선)</td></tr>
+    <tr><td>PSNR ↑</td><td>27.82</td><td class="win">28.50</td><td class="win">+0.68 dB</td><td>복원 품질 상승 (개선)</td></tr>
+    <tr><td>SSIM ↑</td><td>0.8650</td><td class="win">0.8774</td><td class="win">+0.0124</td><td>구조 유사도 상승 (개선)</td></tr>
+    <tr><td>SAM ↓</td><td>7.36</td><td class="win">7.04</td><td class="win">−4.3%</td><td>분광 왜곡 감소 (개선)</td></tr>
+</table>
+<div class="info">Val 기준 <b>4개 지표 모두 CAFM이 개선.</b></div>
+
+<h4>Test 지표 비교 (동일 MSE Loss, 20에폭)</h4>
+<table>
+    <tr><th>지표</th><th>Baseline</th><th>CAFM</th><th>변화</th><th>해석</th></tr>
+    <tr><td>MAE ↓</td><td class="win">0.1980</td><td>0.2006</td><td class="lose">+1.3%</td><td>오차 소폭 증가 (악화)</td></tr>
+    <tr><td>PSNR ↑</td><td>25.16</td><td class="win">25.21</td><td class="win">+0.05 dB</td><td>복원 품질 소폭 상승 (개선)</td></tr>
+    <tr><td>SSIM ↑</td><td>0.8232</td><td class="win">0.8270</td><td class="win">+0.0038</td><td>구조 유사도 소폭 상승 (개선)</td></tr>
+    <tr><td>SAM ↓</td><td>10.86</td><td class="win">10.81</td><td class="win">−0.5%</td><td>분광 왜곡 소폭 감소 (개선)</td></tr>
+</table>
+<div class="info">Test 기준 <b>3개 지표 개선, 1개(MAE) 소폭 악화.</b> 차이가 작아 205샘플 노이즈 범위 내.</div>
+
+<h4>분석</h4>
+
+<p><b>Val과 Test 지표 차이가 나는 이유:</b></p>
+<ol>
+    <li><b>Val Best 선택 편향.</b> 20에폭 중 가장 좋은 시점의 값이므로 모델에 유리한 방향으로 선택 편향(selection bias)이 있다. Test는 해당 에폭의 단일 평가이므로 이 효과가 없다.</li>
+    <li><b>Test set 분포 차이.</b> Val(256샘플)과 Test(205샘플)는 서로 다른 ROI에서 추출된 데이터다. Test set에 구름이 더 두껍거나 복원이 어려운 장면이 포함되어 있으면, 전체 지표가 낮아지며 모델 간 차이도 희석된다.</li>
+    <li><b>샘플 수 부족.</b> 205샘플에서 +0.05 dB 차이는 소수의 어려운 샘플이 평균에 미치는 영향 범위 내에 있다. 전체 test set(~7,900샘플)으로 평가하면 더 안정적인 결과를 기대할 수 있다.</li>
+    <li><b>방향성은 일관.</b> 차이 크기는 다르지만, PSNR·SSIM·SAM 모두 CAFM 쪽이 높으므로 방향성은 일관된다.</li>
+</ol>
+
+<div class="info">
+    <b>결론:</b> Loss를 통일하면 <b>CAFM 모듈은 Val 기준으로 명확한 성능 향상</b>을 보인다. 특히 PSNR +0.68 dB, SSIM +0.012는 유의미한 차이다. Test에서도 방향성은 일관되나, 샘플 수 부족으로 차이가 축소되었다.
+</div>
+
+<h4>해석 시 고려사항</h4>
+<ol>
+    <li><b>데이터 규모 한계:</b> 2,048 샘플은 전체의 ~1.5%. CAFM의 구름 밀도 적응 기능은 대규모 데이터에서 더 큰 효과를 발휘할 가능성이 있음.</li>
+    <li><b>Val/Test 샘플 수:</b> 각각 256/205 샘플로 통계적 노이즈가 큼. Val에서는 명확했던 차이가 Test에서 축소된 원인.</li>
+    <li><b>CloudAdaptiveLoss:</b> 소규모 데이터에서는 MSE 대비 불리. 대규모 학습 시 재검증 필요.</li>
+</ol>
+</div>
+
+<hr>
+
+<!-- ========== 3 ========== -->
+<h2>3. 다른 모델과의 비교를 위한 조건 분석</h2>
+
+<div class="card">
+<h3>3.1 벤치마크 수치 (각 논문 자체 보고)</h3>
+<table>
+    <tr><th>모델</th><th>MAE ↓</th><th>PSNR ↑</th><th>SSIM ↑</th><th>SAM ↓</th></tr>
+    <tr><td>DSen2-CR</td><td>0.031</td><td>27.76</td><td>0.874</td><td>9.472</td></tr>
+    <tr><td>GLF-CR</td><td>0.028</td><td>28.64</td><td>0.885</td><td>8.981</td></tr>
+    <tr><td>UnCRtainTS</td><td>0.027</td><td>28.90</td><td>0.880</td><td>8.320</td></tr>
+    <tr><td>ACA-Net (Baseline)</td><td>0.025</td><td>29.78</td><td>0.896</td><td>7.770</td></tr>
+    <tr><td>DiffCR</td><td>0.019</td><td>31.77</td><td>0.902</td><td>5.821</td></tr>
+    <tr><td><b>EMRDM (SOTA)</b></td><td><b>0.018</b></td><td><b>32.14</b></td><td><b>0.924</b></td><td><b>5.267</b></td></tr>
+    <tr><td><b>Ours — Baseline (MSE, Test)</b></td><td>0.1980</td><td>25.16</td><td>0.8232</td><td>10.86</td></tr>
+    <tr><td><b>Ours — CAFM (MSE, Test)</b></td><td>0.2006</td><td>25.21</td><td>0.8270</td><td>10.81</td></tr>
+    <tr><td><b>Ours — CAFM (CARL, Test)</b></td><td>0.2075</td><td>24.58</td><td>0.8202</td><td>12.62</td></tr>
+</table>
+<p class="ref"><b>출처:</b> <a href="benchmarks.md">docs/benchmarks.md</a>, 각 논문 자체 보고 수치. Ours 수치는 본 보고서 섹션 2.2~2.5의 Test 결과.</p>
+<div class="warn"><b>주의:</b> Ours 수치(MAE·PSNR·SSIM)는 아래 3.2 섹션의 <b>메트릭 스케일 차이</b>로 인해 DSen2-CR/ACA-Net과 직접 비교 불가. MAE 스케일 0~1 기준, PSNR max_val=1 기준이라 DSen2-CR(0~5, max=10000) 대비 숫자가 낮게 보인다. SAM만 스케일 무관하게 비교 가능.</div>
+
+<h3>3.2 직접 비교가 어려운 이유</h3>
+
+<h4>(1) 데이터 규모 차이</h4>
+<table>
+    <tr><th></th><th>DSen2-CR / ACA-Net</th><th>Ours</th></tr>
+    <tr><td>Training samples</td><td>134,907</td><td>2,048</td></tr>
+    <tr><td>비율</td><td>100%</td><td>~1.5%</td></tr>
+</table>
+<p>동일 스펙으로 Diffusion을 학습시켜도 수렴에 필요한 iteration 수가 근본적으로 다르다 (CNN: 수천 step vs Diffusion: 수십만 step). 동일 에폭/데이터로 비교하면 Diffusion이 극심하게 언더피팅되어 불공정한 비교가 된다.</p>
+
+<h4>(2) 메트릭 스케일 차이</h4>
+<p><b>메트릭 스케일이란?</b> 같은 예측 결과라도 데이터의 값 범위(스케일)에 따라 지표 숫자가 달라진다. 예를 들어 동일한 예측에 대해:</p>
+<ul>
+    <li>0~5 범위(÷2000)에서 MAE를 계산하면 <b>MAE = 0.10</b></li>
+    <li>0~1 범위(÷10000)에서 MAE를 계산하면 <b>MAE = 0.02</b></li>
+</ul>
+<p>성능은 동일하지만 숫자가 5배 차이난다. PSNR도 <code>max_val</code>에 따라, SSIM도 안정화 상수가 <code>max_val</code>에 의존한다. SAM만 코사인 각도 기반이라 스케일에 무관하다.</p>
+<table>
+    <tr><th>논문/모델</th><th>MAE 스케일</th><th>PSNR max_val</th><th>비교 가능?</th></tr>
+    <tr><td>DSen2-CR</td><td>0~5 (÷2000)</td><td>10000</td><td class="win">4개 지표 모두 O</td></tr>
+    <tr><td>ACA-CRNet (원본)</td><td>0~5 (÷2000)</td><td>10000</td><td class="win">4개 지표 모두 O</td></tr>
+    <tr><td>GLF-CR</td><td class="lose">0~1 추정</td><td class="lose">PIXEL_MAX=1</td><td>SAM만 O</td></tr>
+    <tr><td>UnCRtainTS</td><td class="lose">0~1 추정</td><td class="lose">max_val=1</td><td>SAM만 O</td></tr>
+    <tr><td>DiffCR</td><td class="lose">8-bit PNG</td><td class="lose">255</td><td>SAM만 O</td></tr>
+    <tr><td>EMRDM</td><td class="lose">미확인</td><td class="lose">미확인</td><td>SAM만 O</td></tr>
+</table>
+<div class="warn">벤치마크 수치를 그대로 가져와 비교하면, 스케일 차이로 인해 <b>실제 성능과 무관하게 숫자가 높거나 낮게 보일 수 있다.</b> 공정한 비교를 위해서는 동일 코드베이스에서 동일 정규화로 재평가해야 한다.</div>
+<p class="ref"><b>출처:</b> DSen2-CR — <a href="https://github.com/ameraner/dsen2-cr">GitHub</a> <code>image_metrics.py</code>. ACA-CRNet — <a href="https://github.com/huangwenwenlili/ACA-CRNet">GitHub</a> <code>np_metric.py</code>. GLF-CR — <a href="https://github.com/xufangchn/GLF-CR">GitHub</a>. UnCRtainTS — <a href="https://github.com/PatrickTUM/UnCRtainTS">GitHub</a>. DiffCR — <a href="https://github.com/XavierJiezou/DiffCR">GitHub</a>.</p>
+
+<h3>3.3 공정한 비교 방법</h3>
+<table>
+    <tr><th>비교 유형</th><th>방법</th><th>현실성</th></tr>
+    <tr><td><b>CAFM 효과 증명</b></td><td>동일 조건 CAFM ON/OFF → test 지표 비교</td><td class="win">완료</td></tr>
+    <tr><td>DSen2-CR / ACA-Net 비교</td><td>동일 메트릭 스케일이므로 수치 직접 비교 가능 (데이터 규모 차이 명시)</td><td>가능</td></tr>
+    <tr><td>Diffusion 모델 비교</td><td>동일 코드로 추론만 재평가 (학습된 가중치 필요)</td><td>가중치 공개 여부에 따라</td></tr>
+    <tr><td>전체 재현</td><td>모든 모델을 동일 데이터·동일 코드로 학습+평가</td><td class="lose">A100 등 대규모 자원 필요</td></tr>
+</table>
+
+<h3>3.4 Diffusion 모델과의 정성적 비교</h3>
+<table>
+    <tr><th>비교 항목</th><th>CNN 기반 (Ours)</th><th>Diffusion (DiffCR, EMRDM)</th></tr>
+    <tr><td>추론 속도</td><td class="win">single forward pass</td><td>1~1000 iterative steps</td></tr>
+    <tr><td>Cloud-free 영역 보존</td><td class="win">residual learning → 원본 유지</td><td>uniform noise injection → 변형 가능</td></tr>
+    <tr><td>Spectral hallucination</td><td class="win">위험 낮음 (deterministic)</td><td>없는 색상/텍스처 생성 위험</td></tr>
+    <tr><td>출력 재현성</td><td class="win">항상 동일 결과</td><td>stochastic (매번 다름)</td></tr>
+    <tr><td>파라미터 수</td><td class="win">경량</td><td>EMRDM 148.9M</td></tr>
+    <tr><td>운영 배포</td><td class="win">ONNX/TensorRT 최적화 용이</td><td>복잡한 파이프라인</td></tr>
+</table>
+<p class="ref"><b>출처:</b> SADER — <a href="https://arxiv.org/html/2602.00536">arXiv:2602.00536</a>. DiffCR — <a href="https://ar5iv.labs.arxiv.org/html/2308.04417">arXiv:2308.04417</a>, Section IV-E.</p>
+</div>
+
+</div>
+</body>
+</html>

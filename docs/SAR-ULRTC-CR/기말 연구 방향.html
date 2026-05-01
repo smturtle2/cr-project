@@ -1,0 +1,401 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>기말 연구 방향</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:'Pretendard',-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;max-width:1060px;margin:0 auto;padding:40px 24px 80px;line-height:1.72;color:#1a1a2e;background:#f7f8fb}
+.hd{background:linear-gradient(135deg,#1e293b,#0f172a,#334155);color:#fff;border-radius:14px;padding:34px 38px;margin-bottom:32px}
+.hd h1{font-size:1.55rem;font-weight:700;margin-bottom:4px}
+.hd p{font-size:.85rem;color:#b0bfdb;line-height:1.5;margin:2px 0}
+.hd a{color:#90caf9;text-decoration:none}
+
+/* Toggle Details Style */
+details.c {
+  background: #fff;
+  border-radius: 12px;
+  padding: 20px 30px;
+  margin-bottom: 20px;
+  box-shadow: 0 1px 3px rgba(0,0,0,.06);
+  transition: all 0.3s ease;
+}
+details.c > summary {
+  font-size: 1.15rem;
+  font-weight: 700;
+  color: #0f172a;
+  cursor: pointer;
+  list-style: none;
+  border-left: 4px solid #3b82f6;
+  padding-left: 12px;
+  outline: none;
+  position: relative;
+  user-select: none;
+}
+details.c > summary::-webkit-details-marker { display: none; }
+details.c > summary::after {
+  content: '+';
+  position: absolute;
+  right: 0;
+  top: 50%;
+  transform: translateY(-50%);
+  font-size: 1.6rem;
+  color: #3b82f6;
+  font-weight: 300;
+}
+details.c[open] > summary::after {
+  content: '−';
+}
+details.c[open] > summary {
+  margin-bottom: 20px;
+  border-bottom: 1px solid #f1f5f9;
+  padding-bottom: 16px;
+}
+
+/* Calendar Style */
+.cal-grid { display: grid; grid-template-columns: repeat(7, 1fr); gap: 6px; margin-top: 16px; }
+.cal-hd { text-align: center; font-weight: 700; background: #e2e8f0; padding: 8px; border-radius: 6px; font-size: 0.9rem; color: #475569; }
+.cal-day { background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 8px; padding: 8px; min-height: 85px; display: flex; flex-direction: column; transition: all 0.2s; gap: 4px;}
+.cal-day:hover { transform: translateY(-1px); box-shadow: 0 2px 4px rgba(0,0,0,0.05); }
+.cal-day.empty { background: transparent; border: none; box-shadow: none; pointer-events: none;}
+.cal-day.today { background: #eff6ff; border-color: #3b82f6; box-shadow: 0 0 0 2px #3b82f6; }
+.cal-day.d-day { background: #fef2f2; border-color: #ef4444; box-shadow: 0 0 0 2px #ef4444; }
+
+/* Row background colors for phase differentiation */
+.cal-day.r1 { background-color: #f5f3ff; border-color: #ede9fe; } /* 22일행 - 보라색 계열 (연구완료) */
+.cal-day.empty.r1 { background-color: rgba(245,243,255,0.6); }
+
+.cal-day.r2 { background-color: #fff7ed; border-color: #ffedd5; } /* 29일행 - 주황색 계열 (자료완성) */
+.cal-day.empty.r2 { background-color: rgba(255,247,237,0.6); }
+
+.cal-day.r3 { background-color: #fdf2f8; border-color: #fce7f3; } /* 5일행 - 분홍/빨강 계열 (최종발표) */
+.cal-day.empty.r3 { background-color: rgba(253,242,248,0.6); }
+
+.cal-date-row { display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 2px; }
+.cal-date { font-weight: 700; font-size: 0.95rem; color: #64748b; }
+.cal-day.today .cal-date { color: #2563eb; }
+.cal-day.d-day .cal-date { color: #dc2626; }
+.cal-meeting-badge { font-size: 0.65rem; color: #c026d3; background: rgba(255,255,255,0.8); border: 1px solid #f0abfc; padding: 2px 5px; border-radius: 4px; font-weight: 700; white-space: nowrap; }
+
+.cal-task { font-size: 0.8rem; font-weight: 600; line-height: 1.3; background: #dbeafe; color: #1e40af; padding: 4px 6px; border-radius: 4px; }
+.cal-task.mamba { background: #f3e8ff; color: #6b21a8; }
+.cal-task.tta { background: #ffedd5; color: #9a3412; }
+.cal-task.final { background: #fee2e2; color: #b91c1c; }
+
+/* Internal contents */
+.c h3{font-size:.96rem;font-weight:600;color:#1e293b;margin:16px 0 6px}
+table{width:100%;border-collapse:collapse;margin:8px 0 12px;font-size:.87rem}
+th,td{border:1px solid #dde3ea;padding:12px 16px;text-align:left;vertical-align:top;}
+th{background:#f1f5f9;font-weight:600;white-space:nowrap}
+tr:nth-child(even) td{background:#f8fafc}
+pre{background:#1e1e2e;color:#cdd6f4;padding:14px 16px;border-radius:8px;overflow-x:auto;font-size:.85rem;line-height:1.5;margin:8px 0 12px;font-family:'Fira Code',Consolas,monospace}
+code{font-family:'Fira Code',Consolas,monospace;font-size:.85em}
+:not(pre)>code{background:#f1f5f9;padding:2px 6px;border-radius:4px;color:#ef4444}
+.b{border-radius:7px;padding:16px 20px;margin:16px 0;font-size:.95rem}
+.bb{background:#eff6ff;border-left:4px solid #3b82f6}
+.bg{background:#f0fdf4;border-left:4px solid #22c55e}
+.ba{background:#fffbeb;border-left:4px solid #f59e0b}
+.br{background:#fef2f2;border-left:4px solid #ef4444}
+.bp{background:#faf5ff;border-left:4px solid #a855f7}
+.tag{display:inline-block;padding:2px 8px;border-radius:12px;font-size:.75rem;font-weight:700;margin:0 3px}
+.t1{background:#dbeafe;color:#1e40af}.t2{background:#ffedd5;color:#c2410c}.t3{background:#fce7f3;color:#be185d}
+.t4{background:#f3e8ff;color:#7e22ce}.t5{background:#e0f2fe;color:#0369a1}.t6{background:#dcfce7;color:#15803d}
+p{margin:6px 0}ul,ol{padding-left:24px;margin:6px 0 12px}li{margin:6px 0}hr{border:none;border-top:1px solid #e2e8f0;margin:24px 0}
+a{color:#2563eb;font-weight:500;}
+.ft{text-align:center;color:#94a3b8;font-size:.8rem;margin-top:40px}
+.paper{border:1px solid #e2e8f0;border-radius:8px;padding:12px 16px;margin:10px 0;font-size:.9rem;background:#f8fafc;}
+.paper .ti{font-weight:700;color:#0f172a;font-size:1.05rem;margin-bottom:4px;}.paper .ve{font-size:.85rem;color:#64748b;margin:2px 0 6px}
+
+/* PPT Style List */
+.ppt-list { list-style: none; padding-left: 0; margin-top: 8px; }
+.ppt-list li { margin-bottom: 10px; padding-left: 22px; text-indent: -22px; line-height: 1.6; }
+.ppt-list li::before { content: "▸"; color: #3b82f6; font-weight: bold; margin-right: 6px; font-size: 1.1em; }
+.ppt-list strong { color: #1e293b; }
+</style>
+</head>
+<body>
+
+<div class="hd">
+  <h1>기말 연구 방향</h1>
+  <p><b>핵심 전략:</b> 잔여 4주 데드라인 방어! 구현 리스크를 최소화하면서 <b>심사위원의 허를 찌르는 3대 디테일 노벨티</b>로 최우수 성과 달성.</p>
+  <p><b>작성일:</b> 2026-04-28</p>
+</div>
+
+<!-- 0 -->
+<details class="c" id="s0">
+  <summary>0. 프로젝트 핵심 노벨티 요약표</summary>
+  <table>
+    <thead>
+      <tr>
+        <th width="15%">단계</th>
+        <th width="30%">핵심 노벨티</th>
+        <th width="40%">주요 기술 요소</th>
+        <th width="15%">기대 효과</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><b>1. 품질 고도화</b></td>
+        <td><b>① 물리/잔차 기반 밀도 밸브</b></td>
+        <td>물리 법칙을 적용해 호수 등에서 발생하는 오탐지 100% 차단</td>
+        <td style="color:#22c55e;font-weight:bold;">[오탐지율 0%]</td>
+      </tr>
+      <tr>
+        <td style="background:#fffbeb;"><b>2. 실용성 혁신</b></td>
+        <td style="background:#fffbeb;"><b>② Test-Time Adaptation</b></td>
+        <td style="background:#fffbeb;">신규 위성 및 계절 환경에서도 실시간 자가 영점 보정</td>
+        <td style="background:#fffbeb;color:#ef4444;font-weight:bold;">[정적 한계 돌파]</td>
+      </tr>
+      <tr>
+        <td><b>3. 연산 혁신</b></td>
+        <td><b>③ 순정 Mamba 전역 융합</b></td>
+        <td>O(N) 복잡도로 패치 분할 없이 거대 위성사진 전역 문맥 흡수</td>
+        <td style="color:#a855f7;font-weight:bold;">[연산 효율 극대화]</td>
+      </tr>
+    </tbody>
+  </table>
+</details>
+
+<!-- 1 -->
+<details class="c" id="s1">
+  <summary>1. [기반 혁신] 밀도 제어와 구조 수혈의 3-Step 시너지</summary>
+  
+  <div class="b br">
+    <h3 style="color:#b91c1c; margin-top:0;">🚨 기존 아이디어의 한계점 돌파</h3>
+    <ul class="ppt-list">
+      <li><b>초기 묻지마 병합(Concat)의 한계:</b> 맑은 구역까지 SAR의 자글자글한 스펙클 노이즈로 덮어버리는 통제 불능 사태 발생.</li>
+      <li><b>해결책:</b> 정보 추출(Idea 2)과 개입 허가(Idea 1)의 <b>역할을 완벽히 분리.</b></li>
+    </ul>
+  </div>
+  
+  <div class="b bg">
+    <h3 style="color:#15803d; margin-top:0;">✨ 완벽한 통제력! 3-Step 구조</h3>
+    <ul class="ppt-list">
+      <li><b>Step 1. 인풋 완전 분리:</b> 광학과 SAR를 따로 인코딩하여 초기 감염 원천 차단.</li>
+      <li><b>Step 2. 구조 수혈 (Cross-Attention):</b> SAR 이미지에서 건물의 뼈대, 지형의 윤곽 등 유효 정보만 정밀 타겟팅 추출.</li>
+      <li><b>Step 3. 사전 통제 (밀도 맵 밸브):</b> 추출한 뼈대를 광학 이미지에 바르기 직전, <b>'밀도 맵'을 통과시킴.</b> 밀도가 0인 맑은 구역은 밸브가 잠겨 SAR 노이즈 개입을 0%로 차단!</li>
+    </ul>
+  </div>
+  
+  <div class="b bb">
+    <h3 style="color:#1d4ed8; margin-top:0; margin-bottom:8px;">🎯 발표 디펜스 (팀플 무기)</h3>
+    <p style="font-weight:600; font-size:1.05em; text-align:center;">
+      "SOTA 논문들은 은연중에 구름을 유추해 맑은 하늘을 훼손할 위험이 큽니다.<br>
+      하지만 저희는 명시적 밸브를 통해 맑은 구역의 원본 화질을 수학적으로 100% 방어했습니다!"
+    </p>
+  </div>
+</details>
+
+<!-- 1-1 -->
+<details class="c" id="s1-1">
+  <summary>1-1. [품질 쐐기] 구름 밀도 맵(Density Map) 고도화 SOTA 전략</summary>
+  
+  <div class="b br">
+    <h3 style="color:#b91c1c; margin-top:0;">🚨 기존 밀도 추정 방식(코사인 유사도)의 한계</h3>
+    <ul class="ppt-list">
+      <li><b>모달리티 갭 (잔잔한 호수 오류):</b> 맑은 강물이나 호수에서는 SAR 신호가 증발해버립니다. 이로 인해 코사인 유사도가 0으로 수직 하락하며, <b>맑은 호수를 짙은 구름으로 오인하는 대형 사고(오탐지)</b>가 발생합니다.</li>
+      <li><b>스펙클 노이즈 간섭:</b> SAR 특유의 노이즈 때문에 맑은 구역에서도 유사도가 무작위로 깎여 밀도 맵이 얼룩덜룩해집니다.</li>
+    </ul>
+  </div>
+
+  <p style="margin-top:16px;">이러한 센서의 근본적 한계를 돌파하기 위해, 25~26년도 최상위 원격탐사 트렌드 2가지를 융합하여 밀도 오차를 0으로 수렴시킵니다.</p>
+
+  <div class="paper">
+    <div class="ti">전략 1: 대기 물리 법칙 사전 지식 (Physics-Guided Priors) <span class="tag t6">ArXiv 2026</span></div>
+    <div class="ve"><a href="https://arxiv.org/abs/2603.07074" target="_blank">Physics-Guided VLM Priors for All-Cloud Removal</a></div>
+    <ul class="ppt-list">
+      <li><b>핵심 아이디어:</b> 대기 산란 방정식(Atmospheric Scattering) 등 물리적 제약을 딥러닝 모델의 사전 지식(Prior)으로 강제 주입.</li>
+      <li><b>기대 효과 (해결 기여도 1위):</b> 가장 치명적인 <b>'호수 오류'를 완벽히 차단</b>합니다. 수학적 유사도가 0이 나오더라도 물리 방정식이 "이건 구름의 광학적 산란 패턴이 아니다"라며 기각해 버리므로 오작동을 원천 통제합니다.</li>
+    </ul>
+  </div>
+
+  <div class="paper">
+    <div class="ti">전략 2: 이중 흐름 잔차 네트워크 (Two-Flow Residual Fusion) <span class="tag t1">ArXiv 2025</span></div>
+    <div class="ve"><a href="https://arxiv.org/abs/2501.07901" target="_blank">Cloud Removal With PolSAR-Optical Data Fusion Using A Two-Flow Residual Network</a></div>
+    <ul class="ppt-list">
+      <li><b>핵심 아이디어:</b> 단순 코사인 유사도 공식에만 의존하지 않고, 딥러닝 인코더가 직접 비선형적인 잔차(Residual)를 한 번 더 계산(Refine)하여 융합.</li>
+      <li><b>기대 효과 (해결 기여도 2위):</b> 코사인 공식이 놓치는 복잡한 지형의 미세한 차이를 딥러닝 네트워크가 보정해 주어, 밀도 맵 전체의 디테일과 안정성을 SOTA급으로 끌어올립니다.</li>
+    </ul>
+  </div>
+</details>
+
+<!-- 2 -->
+<details class="c" id="s2">
+  <summary>2. [실용성 S+급 노벨티] Test-Time Adaptation (추론 단계 실시간 진화)</summary>
+  <p><span class="tag t1">TTA</span> <span class="tag t2">Zero-Shot Refinement</span></p>
+
+  <div class="b br">
+    <h3 style="color:#b91c1c; margin-top:0;">💡 TTA(Test-Time Adaptation)란 무엇인가?</h3>
+    <ul class="ppt-list">
+      <li>기존 모델들은 훈련이 끝나면 고정(Static)됩니다. 낯선 지역/계절의 사진을 넣으면 성능이 훅 떨어집니다 (Domain Shift 한계).</li>
+      <li><b>TTA (추론 단계 자가 보정):</b> 새로운 이미지가 입력될 때, <b>해당 이미지 자체의 '맑은 구역'을 단서로 삼아 실시간으로 모델 스스로 가중치를 영점 조준(보정)</b>하는 최정상급 AI 트렌드입니다.</li>
+    </ul>
+  </div>
+
+  <h3>관련 논문 레퍼런스 및 SOTA 디펜스 전략</h3>
+  <div class="paper">
+    <div class="ti">Test-Time Degradation Adaptation for Open-Set Image Restoration <span class="tag t1">CVPR / ArXiv</span></div>
+    <div class="ve">CVPR / ArXiv 2024 &emsp; <a href="https://arxiv.org/abs/2312.02197" target="_blank">최신 TTA 관련 논문 링크</a></div>
+    
+    <div style="margin-top:10px; padding-top:10px; border-top:1px dashed #cbd5e1;">
+      <p style="font-weight:bold; color:#1e40af;">🔥 남들은 상상도 못한 초격차 킬러 무기인 이유</p>
+      <ul class="ppt-list">
+        <li><b>압도적 가성비와 자가 치료:</b> 무거운 GPU로 수십 시간 재학습할 필요가 없습니다. 테스트 사진의 밀도 0인 구역을 '임시 정답지'로 간주하고, 오차가 0이 되도록 즉석에서 딱 1번 얕게 조정하여 새로운 환경의 노이즈를 완벽 억제합니다.</li>
+        <li><b>기존 SOTA 완벽 저격:</b> 앞서 분석한 2026년 최신 논문(DACDM-CR)조차도 한 번 학습되면 끝인 '정적 모델'에 불과합니다. <b>TTA를 원격 탐사 SAR-광학 융합에 접목한 저희 팀의 접근은 그들의 태생적 한계를 완전히 돌파하는 파괴적인 노벨티</b>입니다.</li>
+      </ul>
+    </div>
+  </div>
+</details>
+
+<!-- 3 -->
+<details class="c" id="s3">
+  <summary>3. [아키텍처 혁신] Mamba 기반 전역 문맥 파악 (O(N) 복잡도)</summary>
+  <p><span class="tag t6">Mamba-SSM</span> <span class="tag t4">O(N) Complexity</span></p>
+
+  <div class="b bp">
+    <h3 style="color:#7e22ce; margin-top:0;">💡 Mamba란 무엇인가? (Attention과의 본질적 차이)</h3>
+    <ul class="ppt-list">
+      <li><b>Attention의 뼈아픈 한계:</b> 이론상 전역 시야지만, 픽셀 간 1:1 매칭으로 인해 <b>연산량이 기하급수적($O(N^2)$)으로 폭발</b>합니다. 위성 사진에서는 메모리가 터지므로 어쩔 수 없이 이미지를 작게 쪼개어(Window) 보게 되어 단일 층에서의 완벽한 전역 시야를 상실하게 됩니다.</li>
+      <li><b>Mamba의 돌파구:</b> 이미지를 4방향으로 스캐닝(SS2D)하며 맥락을 적분하듯 누적합니다. <b>선형 복잡도 $O(N)$만으로 거대한 위성 사진을 쪼개지 않고 통째로 훑어 진짜 전역 문맥을 파악</b>하는 최신 모델입니다.</li>
+    </ul>
+  </div>
+
+  <h3>관련 논문 레퍼런스 및 SOTA 디펜스 전략</h3>
+  <div class="paper">
+    <div class="ti">DACDM-CR: Discriminative Attention and Cloud-Aware Dynamic Mamba <span class="tag t6">DSP 2026</span></div>
+    <div class="ve">Digital Signal Processing, 2026 &emsp; <a href="https://pdf.sciencedirectassets.com/272384/1-s2.0-S1051200425X00129/1-s2.0-S1051200425005445/main.pdf?X-Amz-Security-Token=IQoJb3JpZ2luX2VjEAwaCXVzLWVhc3QtMSJHMEUCIQChNowk6Jpr3KUXA%2BPiGPEkGpCVQ2X6jWW6hosx5Uv6owIgKa7SlJofDwKgRpyH8jsV3WchpRoimd7QloTXEMVTlIsqvAUI1f%2F%2F%2F%2F%2F%2F%2F%2F%2F%2FARAFGgwwNTkwMDM1NDY4NjUiDJ9kJ2EVLEgDat8a4yqQBaQJbawf8vRAVSGXIvibtQZlqx02i%2Fob%2FfJlarkUOCmSX0IDaIgsM0iY8a3RpY0%2BYXzSmjel7lbOXDr1%2BJSyopadlwGS1%2BsmPANmNVk2UYkQYO66GbMKQ1cQnGV8C%2BYjfaGUi1Ouz7uHngkHddL9CpP6t0%2BKxNVxm4rJaNwYnLFGGdKza4vcqCtQpp6Ec6oLT%2Fh37pLC5Z%2BVAn4gDZB95ODDgb8Trl1Fl0C6nsy9GcERcICbwBfgz2LmYEx%2FoNRd6RuBGruBrS%2BZZQtNe5xx6yornF8Xn3gAjtnRjenVQTdgqQERplikDmXfqlyYAUXGmXKIqIE8Ba0bieghdwqYX9%2BjoTW62zb%2FsXKyyybMKD9%2Byu%2FOhdd2xGTeF4zQKcRGYlkDpqww5sqzm1x10p09XVbBE0mK%2FgI4vycr02%2B13gyCvk9baa4aV7WNuxagQ7LeAx674tKsBgGy6ZfKmlNgZ12u4mlAtbS5IIGMRuoOreZmUNZhuo6sIdt4cXDQX5Fr9IN6LilJLqTQcyRKpJd60GnV%2BXvFupM%2FhPoYx7fw%2BvB0tt3WQcISwky15ITmoHK4IS7bMkU3Xp9NPOYBEg03njDNpLkxUsScQ7lHczuk9RRbB6dlwNtx7%2FZdqVCYzKHJsEQFTwP2mO3QRSIfINKWXAvRylGpeiTMC%2BOj07N67Lqyoz9m1wBag%2FHlbGO4CjYIzZ0skjKZYUoXJVNlOiIwu0STppKh1oNWZnPk9X0Csq8Jp9gWa9NP8GDebMdbjohVnBSq%2FskjS9dPFk44BJI4nXxlUZT1D0cSSV6H36vSyECFkOgA%2FkyLB2vVMVMIzuq7VNRkQlx6sHLAN%2FgMwinQVeTIaznftJK9FvRkYV6SEmFcMOPXwM8GOrEBcho1o6H%2B4ldGcToQpTNsxWq%2B6FC5C%2Fo2Y9uNKq9Yyc0R5TffxVOkHRbrAmFUwsPlxEtDue5D26WYGpqGHtopxS2BAqGRoAG7UBdCzKSnnn7ikc5IZwAVIcLnwAXTgszpNLQBcutABaNNrpUy0yH4CrYPZEIigsFNUhZ6X022j8K%2BqKrl9tVyqJEtCqJc4r7gbR1wIl8snvsMTrjSbWB8w432f1n4KZp%2BPpV1xqa%2BhdXv&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Date=20260428T045506Z&X-Amz-SignedHeaders=host&X-Amz-Expires=300&X-Amz-Credential=ASIAQ3PHCVTYQGUFLYUT%2F20260428%2Fus-east-1%2Fs3%2Faws4_request&X-Amz-Signature=bfc5b9858e384b40a9d38a9fc3919204a3e118a9fd352bfc1cc74890414f5cf2&hash=df8896f04899409087da54a0826f1f43772590d1b689ecc32f591d544a79e897&host=68042c943591013ac2b2430a89b270f6af2c76d8dfd086a07176afe7c76c2c61&pii=S1051200425005445&tid=spdf-ee91e883-cf3f-4b0d-b818-923b121e7222&sid=e270cb9562324648e579d9c0274ce4c7c10fgxrqa&type=client&tsoh=d3d3LnNjaWVuY2VkaXJlY3QuY29t&rh=d3d3LnNjaWVuY2VkaXJlY3QuY29t&ua=05115d035453545d54&rr=9f337907297a8136&cc=kr" target="_blank">논문 링크</a></div>
+    
+    <div style="margin-top:10px; padding-top:10px; border-top:1px dashed #cbd5e1;">
+      <p style="font-weight:bold; color:#15803d;">✨ SOTA의 무리수를 극복한 우리 팀의 하이브리드 황금 밸런스</p>
+      <ul class="ppt-list">
+        <li><b>SOTA(DACDM-CR)의 무리수 (Over-engineering):</b> 맘바 안에 구름 두께 파악 모듈을 억지로 결합시켜, 맘바가 전역 융합과 구름 판별을 동시에 수행하게 만들었습니다. 이는 블랙박스 오류(하얀 지붕을 구름으로 오인)의 위험을 높입니다.</li>
+        <li><b>1. 융합의 Cross-Attention:</b> 두 개의 이질적 데이터(광학+SAR)가 만나는 지점에서 유사도 기반의 강력한 결합(Fusion)만을 깔끔하게 수행합니다.</li>
+        <li><b>2. 다듬기의 순정 Mamba:</b> 앞 단계(밀도 맵 밸브)에서 구름에 대한 통제가 이미 끝났으므로, 우리의 Mamba는 본연의 임무인 <b>"수혈받은 뼈대와 광학 정보의 전역 융합 및 국소 노이즈 흡수 스폰지 역할"</b>에만 100% 집중하여 연산 효율과 신뢰성을 극대화합니다.</li>
+      </ul>
+    </div>
+  </div>
+</details>
+
+<!-- 4 -->
+<details class="c" id="s4">
+  <summary>4. 기말 연구 일정</summary>
+  <p>잔여 기한에 맞춘 파이프라인 통합 및 발표 준비 6주 스프린트 일정입니다. (오로지 화, 금, 일 미팅 중심의 선택과 집중 일정)</p>
+  <div class="cal-grid">
+    <div class="cal-hd" style="color:#ef4444;">Sun</div>
+    <div class="cal-hd">Mon</div>
+    <div class="cal-hd">Tue</div>
+    <div class="cal-hd">Wed</div>
+    <div class="cal-hd">Thu</div>
+    <div class="cal-hd">Fri</div>
+    <div class="cal-hd" style="color:#3b82f6;">Sat</div>
+
+    <!-- W1 -->
+    <div class="cal-day empty"></div>
+    <div class="cal-day empty"></div>
+    <div class="cal-day today">
+      <div class="cal-date-row"><div class="cal-date">4/28</div><div class="cal-meeting-badge">팀 미팅</div></div>
+      <div class="cal-task">아이디어 1,2 통합 시작</div>
+    </div>
+    <div class="cal-day empty"></div>
+    <div class="cal-day empty"></div>
+    <div class="cal-day">
+      <div class="cal-date-row"><div class="cal-date">5/1</div><div class="cal-meeting-badge">팀 미팅</div></div>
+      <div class="cal-task">구현 및 검증</div>
+    </div>
+    <div class="cal-day empty"></div>
+
+    <!-- W2 -->
+    <div class="cal-day">
+      <div class="cal-date-row"><div class="cal-date">5/3</div><div class="cal-meeting-badge">팀 미팅</div></div>
+      <div class="cal-task">구현 및 검증</div>
+    </div>
+    <div class="cal-day empty"></div>
+    <div class="cal-day">
+      <div class="cal-date-row"><div class="cal-date">5/5</div><div class="cal-meeting-badge">팀 미팅</div></div>
+      <div class="cal-task">구현 및 검증</div>
+    </div>
+    <div class="cal-day empty"></div>
+    <div class="cal-day empty"></div>
+    <div class="cal-day">
+      <div class="cal-date-row"><div class="cal-date">5/8</div><div class="cal-meeting-badge">팀 미팅</div></div>
+      <div class="cal-task">구현 및 검증</div>
+    </div>
+    <div class="cal-day empty"></div>
+
+    <!-- W3 -->
+    <div class="cal-day">
+      <div class="cal-date-row"><div class="cal-date">5/10</div><div class="cal-meeting-badge">팀 미팅</div></div>
+      <div class="cal-task">학습 및 테스트</div>
+    </div>
+    <div class="cal-day empty"></div>
+    <div class="cal-day">
+      <div class="cal-date-row"><div class="cal-date">5/12</div><div class="cal-meeting-badge">팀 미팅</div></div>
+      <div class="cal-task">학습 및 테스트</div>
+    </div>
+    <div class="cal-day empty"></div>
+    <div class="cal-day empty"></div>
+    <div class="cal-day">
+      <div class="cal-date-row"><div class="cal-date">5/15</div><div class="cal-meeting-badge">팀 미팅</div></div>
+      <div class="cal-task">학습 및 테스트</div>
+    </div>
+    <div class="cal-day empty"></div>
+
+    <!-- W4 (Phase 1: Research Finish - Purple Row) -->
+    <div class="cal-day r1">
+      <div class="cal-date-row"><div class="cal-date">5/17</div><div class="cal-meeting-badge">팀 미팅</div></div>
+      <div class="cal-task">학습 및 테스트</div>
+    </div>
+    <div class="cal-day empty r1"></div>
+    <div class="cal-day r1">
+      <div class="cal-date-row"><div class="cal-date">5/19</div><div class="cal-meeting-badge">팀 미팅</div></div>
+      <div class="cal-task">학습 및 테스트</div>
+    </div>
+    <div class="cal-day empty r1"></div>
+    <div class="cal-day empty r1"></div>
+    <div class="cal-day r1">
+      <div class="cal-date-row"><div class="cal-date">5/22</div><div class="cal-meeting-badge">팀 미팅</div></div>
+      <div class="cal-task mamba" style="background:#8b5cf6; color:white;">🏁 연구 실험 전체 완료</div>
+    </div>
+    <div class="cal-day empty r1"></div>
+
+    <!-- W5 (Phase 2: Presentation Draft - Orange Row) -->
+    <div class="cal-day r2">
+      <div class="cal-date-row"><div class="cal-date">5/24</div><div class="cal-meeting-badge">팀 미팅</div></div>
+      <div class="cal-task final">📊 발표 자료 작성 (초안)</div>
+    </div>
+    <div class="cal-day empty r2"></div>
+    <div class="cal-day r2">
+      <div class="cal-date-row"><div class="cal-date">5/26</div><div class="cal-meeting-badge">팀 미팅</div></div>
+      <div class="cal-task final">📊 발표 자료 수정/보완</div>
+    </div>
+    <div class="cal-day empty r2"></div>
+    <div class="cal-day empty r2"></div>
+    <div class="cal-day r2">
+      <div class="cal-date-row"><div class="cal-date">5/29</div><div class="cal-meeting-badge">팀 미팅</div></div>
+      <div class="cal-task final" style="background:#b91c1c; color:white;">🎯 최종 발표 자료 완성</div>
+    </div>
+    <div class="cal-day empty r2"></div>
+
+    <!-- W6 (Phase 3: D-Day - Red/Pink Row) -->
+    <div class="cal-day r3">
+      <div class="cal-date-row"><div class="cal-date">5/31</div><div class="cal-meeting-badge">팀 미팅</div></div>
+      <div class="cal-task final">대본 준비 및 피드백</div>
+    </div>
+    <div class="cal-day empty r3"></div>
+    <div class="cal-day r3">
+      <div class="cal-date-row"><div class="cal-date">6/2</div><div class="cal-meeting-badge">팀 미팅</div></div>
+      <div class="cal-task final">발표 리허설</div>
+    </div>
+    <div class="cal-day empty r3"></div>
+    <div class="cal-day empty r3"></div>
+    <div class="cal-day d-day r3">
+      <div class="cal-date-row"><div class="cal-date">6/5</div><div class="cal-meeting-badge">팀 미팅</div></div>
+      <div class="cal-task final" style="background:#ef4444; color:white; border:none;">🏆 기말 최종 발표</div>
+    </div>
+    <div class="cal-day empty r3"></div>
+  </div>
+</details>
+
+</body>
+</html>
