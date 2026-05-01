@@ -25,7 +25,8 @@ from collections import OrderedDict
 from torch.nn import init
 
 from .ca import ConAttn
-from .cafm import CloudDensityEstimator, CAFM  # [수정] CAFM 모듈 임포트
+from .cafm import CAFM
+from .density import build_density_estimator
 
 
 # ============================================================================
@@ -124,11 +125,17 @@ class ACA_CRNet(nn.Module):
                  alpha: float = 0.1, num_layers: int = 16,
                  feature_sizes: int = 256,
                  use_cafm: bool = True,       # [수정] CAFM on/off
-                 cafm_feat_dim: int = 32):    # [수정] 밀도 추정 차원
+                 cafm_feat_dim: int = 32,     # [수정] 밀도 추정 차원
+                 density_mode: str = "cosine",
+                 use_sdi: bool = False,       # [수정] SDI on/off
+                 sdi_mid: int = 32,           # [수정] SDI translator 중간 채널
+                 sdi_num_res: int = 4):       # [수정] SDI translator Resblock 수
         super(ACA_CRNet, self).__init__()
 
         self.use_cafm = use_cafm
+        self.use_sdi = use_sdi
         self.opt_channels = opt_channels
+        self.density_mode = density_mode
         in_channels = sar_channels + opt_channels  # [수정] 15ch 입력
 
         # ── Head: 15ch → 256ch ──
@@ -168,8 +175,8 @@ class ACA_CRNet(nn.Module):
 
         # ── [수정] CAFM 모듈 ──
         if use_cafm:
-            # Part A: SAR-Optical 코사인 유사도 기반 밀도 추정
-            self.density_estimator = CloudDensityEstimator(
+            self.density_estimator = build_density_estimator(
+                density_mode,
                 sar_channels=sar_channels,
                 optical_channels=opt_channels,
                 feat_dim=cafm_feat_dim,
@@ -178,20 +185,41 @@ class ACA_CRNet(nn.Module):
             self.cafm1 = CAFM(feature_sizes)  # body1(ResBlock_att #1) 직후
             self.cafm2 = CAFM(feature_sizes)  # body2(ResBlock_att #2) 직후
 
+        # [수정] SDI 모듈
+        if use_sdi:
+            from .sdi import SARTranslator, SDIInjector
+            self.sar_translator = SARTranslator(
+                in_channels=sar_channels + opt_channels,  # 15
+                mid_channels=sdi_mid,
+                out_channels=opt_channels,
+                num_res=sdi_num_res,
+            )
+            self.sdi_injector = SDIInjector()
+
         # [수정] 커스텀 Loss/시각화에서 참조할 속성
-        self.last_density = None   # 마지막 forward의 밀도맵
-        self.last_cloudy = None    # 마지막 forward의 cloudy 입력
+        self.last_density = None    # 마지막 forward의 밀도맵
+        self.last_cloudy = None     # 마지막 forward의 cloudy 입력
+        self.last_pseudo_opt = None # 마지막 forward의 SDI pseudo-optical
 
         # 가중치 초기화 (원본 방식 유지)
         init_weights(self, "kaiming-uniform")
 
-        # [수정] zero_module 재적용: init_weights가 CAFM의 zero-init을 덮어쓰므로
-        # 마지막 Linear 레이어를 다시 0으로 초기화하여 학습 초기 항등 함수 보장
+        # [수정] zero-init 재적용: init_weights가 CAFM의 zero-init을 덮어쓰므로
+        # 마지막 conv 레이어를 다시 0으로 초기화하여 학습 초기 항등 함수 보장
         if use_cafm:
-            from .cafm import zero_module
             for cafm_module in [self.cafm1, self.cafm2]:
-                zero_module(cafm_module.modulator.scale_net[-1])
-                zero_module(cafm_module.modulator.shift_net[-1])
+                nn.init.zeros_(cafm_module.modulator.conv_gamma.weight)
+                nn.init.zeros_(cafm_module.modulator.conv_gamma.bias)
+                nn.init.zeros_(cafm_module.modulator.conv_beta.weight)
+                nn.init.zeros_(cafm_module.modulator.conv_beta.bias)
+
+        # [수정] SDI λ zero-init 재적용 (init_weights가 덮어쓰지 않지만 안전장치)
+        if use_sdi:
+            with torch.no_grad():
+                self.sdi_injector.lam.zero_()
+            # SARTranslator 출력 conv3 zero-init 재적용 (init_weights가 Kaiming으로 덮어씀)
+            nn.init.zeros_(self.sar_translator.conv3.weight)
+            nn.init.zeros_(self.sar_translator.conv3.bias)
 
     def forward(self, sar: torch.Tensor, cloudy: torch.Tensor) -> torch.Tensor:
         """cr-train 호환 forward.
@@ -242,6 +270,18 @@ class ACA_CRNet(nn.Module):
         # ── [수정] Optical-only 글로벌 잔차 ──
         # 원본: return x + self.net(x) (전체 입력 잔차)
         # 수정: cloudy(13ch)만 잔차 연결. SAR ≠ Optical이므로 SAR은 잔차에 포함 불가
-        pred = cloudy + out
+        base_pred = cloudy + out
+
+        # ── [수정] SDI: SAR-guided detail injection ──
+        if self.use_sdi:
+            pseudo_opt = self.sar_translator(cloudy, sar)  # (B, 13, H, W)
+            self.last_pseudo_opt = pseudo_opt
+            pred = self.sdi_injector(
+                base_pred, pseudo_opt,
+                density=self.last_density,  # CAFM off면 None → 전역 주입
+            )
+        else:
+            self.last_pseudo_opt = None
+            pred = base_pred
 
         return pred

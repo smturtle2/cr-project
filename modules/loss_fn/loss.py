@@ -41,3 +41,14 @@ class SimpleMSELoss(nn.Module):
 
     def forward(self, pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
         return torch.mean((pred - target) ** 2)
+
+
+class SimpleL1Loss(nn.Module):
+    """단순 L1 Loss — MSE 대안.
+
+    구름 제거 분야에서 MSE보다 선호되는 표준 loss.
+    MSE 대비 blur가 적고 엣지 보존이 나음 (DSen2-CR, CERMF-Net 등 채택).
+    """
+
+    def forward(self, pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+        return torch.mean(torch.abs(pred - target))

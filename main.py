@@ -621,7 +621,7 @@ def main(
         max_train_samples=train_max_samples,
         max_val_samples=val_max_samples,
         max_test_samples=test_max_samples,
-        output_dir=output_dir,
+        output_dir=output_dir / "checkpoints",
         batch_size=batch_size,
         epochs=max_epochs,
         seed=seed,
