@@ -23,7 +23,7 @@ _args: argparse.Namespace | None = None
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="ACA-CRNet gate comparison training")
-    parser.add_argument("--gate-mode", choices=("mask", "cosine", "cosine_prior"), default="mask")
+    parser.add_argument("--gate-mode", choices=("mask", "cosine", "cosine_prior", "dafi_diff"), default="mask")
     parser.add_argument("--gate-feat-dim", type=int, default=32)
     parser.add_argument("--gate-prior-weight", type=float, default=0.5)
     parser.add_argument("--ca-mode", choices=("base", "optim", "flash"), default="base")

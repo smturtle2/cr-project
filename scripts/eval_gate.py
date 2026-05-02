@@ -28,7 +28,12 @@ class IdentityCA(nn.Module):
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="SAR injection gate offline evaluation")
-    parser.add_argument("--gate-modes", nargs="+", choices=("mask", "cosine", "cosine_prior"), default=("mask", "cosine", "cosine_prior"))
+    parser.add_argument(
+        "--gate-modes",
+        nargs="+",
+        choices=("mask", "cosine", "cosine_prior", "dafi_diff"),
+        default=("mask", "cosine", "cosine_prior", "dafi_diff"),
+    )
     parser.add_argument("--split", choices=("train", "validation", "test"), default="validation")
     parser.add_argument("--max-samples", type=int, default=64)
     parser.add_argument("--batch-size", type=int, default=4)
@@ -118,7 +123,7 @@ def save_summary_plot(results: dict[str, dict[str, float]], output_path: Path) -
     ]
 
     fig, axes = plt.subplots(2, 2, figsize=(10, 7))
-    colors = ["#2563eb", "#f97316", "#16a34a"]
+    colors = ["#2563eb", "#f97316", "#16a34a", "#9333ea"]
     for ax, (key, title, lower_is_better) in zip(axes.flat, metric_specs):
         values = [results[mode][key] for mode in modes]
         ax.bar(modes, values, color=colors[: len(modes)])

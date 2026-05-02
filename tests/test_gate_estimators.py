@@ -7,7 +7,7 @@ from torch import nn
 
 from modules.metrics.gate_eval import prepare_gate_for_eval, summarize_gate
 from modules.model.baseline.ACA_CRNet import ACA_CRNet
-from modules.model.gate import CosineGateEstimator, CosinePriorGateEstimator
+from modules.model.gate import CosineGateEstimator, CosinePriorGateEstimator, DafiDiffGateEstimator
 
 
 class IdentityCA(nn.Module):
@@ -28,6 +28,7 @@ class GateEstimatorTest(unittest.TestCase):
         estimators = [
             CosineGateEstimator(feat_dim=8),
             CosinePriorGateEstimator(feat_dim=8),
+            DafiDiffGateEstimator(feat_dim=8),
         ]
         for estimator in estimators:
             with self.subTest(estimator=type(estimator).__name__):
@@ -37,7 +38,7 @@ class GateEstimatorTest(unittest.TestCase):
                 self.assertLessEqual(float(gate.max()), 1.0)
 
     def test_aca_crnet_wires_all_gate_modes(self) -> None:
-        expected_channels = {"mask": 16, "cosine": 1, "cosine_prior": 1}
+        expected_channels = {"mask": 16, "cosine": 1, "cosine_prior": 1, "dafi_diff": 1}
         for mode, channels in expected_channels.items():
             with self.subTest(mode=mode):
                 model = ACA_CRNet(

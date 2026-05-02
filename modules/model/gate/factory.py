@@ -3,6 +3,7 @@ from __future__ import annotations
 from .base import BaseGateEstimator
 from .cosine import CosineGateEstimator
 from .cosine_prior import CosinePriorGateEstimator
+from .dafi_diff import DafiDiffGateEstimator
 from .prior import OpticalRulePrior
 
 
@@ -28,6 +29,12 @@ def build_gate_estimator(
             optical_channels=optical_channels,
             feat_dim=feat_dim,
             prior_weight=prior_weight,
+        )
+    if mode == "dafi_diff":
+        return DafiDiffGateEstimator(
+            sar_channels=sar_channels,
+            optical_channels=optical_channels,
+            feat_dim=feat_dim,
         )
     if mode == "prior":
         return OpticalRulePrior()
