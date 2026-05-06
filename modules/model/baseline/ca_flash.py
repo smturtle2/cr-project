@@ -8,8 +8,8 @@ from collections import OrderedDict
 
 import torch
 from torch import nn
-from torch.nn.attention import SDPBackend, sdpa_kernel
 from torch.nn import functional as F
+from torch.nn.attention import SDPBackend, sdpa_kernel
 
 
 class ConAttn(nn.Module):
@@ -22,7 +22,7 @@ class ConAttn(nn.Module):
         rate=1,
         softmax_scale=1.0,
         num_heads=4,
-        flash_dtype=torch.float16,
+        flash_dtype=torch.bfloat16,
         lambda_init=1e-3,
     ):
         super().__init__()
@@ -31,7 +31,9 @@ class ConAttn(nn.Module):
         if stride != 1:
             raise ValueError("ca_flash.ConAttn currently supports stride=1 only.")
         if input_channels != output_channels:
-            raise ValueError("ca_flash.ConAttn requires input_channels == output_channels for residual output.")
+            raise ValueError(
+                "ca_flash.ConAttn requires input_channels == output_channels for residual output."
+            )
         if input_channels % rate != 0:
             raise ValueError("input_channels must be divisible by rate.")
         if num_heads <= 0:
@@ -65,7 +67,13 @@ class ConAttn(nn.Module):
                 padding=ksize // 2,
             ),
             nn.LeakyReLU(0.2, True),
-            nn.Conv2d(hidden_channels, out_channels=1, kernel_size=ksize, stride=1, padding=ksize // 2),
+            nn.Conv2d(
+                hidden_channels,
+                out_channels=1,
+                kernel_size=ksize,
+                stride=1,
+                padding=ksize // 2,
+            ),
         )
         self.bias = nn.Sequential(
             nn.Conv2d(
@@ -76,12 +84,36 @@ class ConAttn(nn.Module):
                 padding=ksize // 2,
             ),
             nn.LeakyReLU(0.2, True),
-            nn.Conv2d(hidden_channels, out_channels=1, kernel_size=ksize, stride=1, padding=ksize // 2),
+            nn.Conv2d(
+                hidden_channels,
+                out_channels=1,
+                kernel_size=ksize,
+                stride=1,
+                padding=ksize // 2,
+            ),
         )
-        self.query = nn.Conv2d(in_channels=input_channels, out_channels=query_channels, kernel_size=1, stride=1, padding=0)
-        self.value = nn.Conv2d(in_channels=input_channels, out_channels=input_channels, kernel_size=1, stride=1, padding=0)
+        self.query = nn.Conv2d(
+            in_channels=input_channels,
+            out_channels=query_channels,
+            kernel_size=1,
+            stride=1,
+            padding=0,
+        )
+        self.value = nn.Conv2d(
+            in_channels=input_channels,
+            out_channels=input_channels,
+            kernel_size=1,
+            stride=1,
+            padding=0,
+        )
         self.linear = nn.Sequential(
-            nn.Conv2d(in_channels=output_channels, out_channels=output_channels, kernel_size=3, stride=1, padding=1),
+            nn.Conv2d(
+                in_channels=output_channels,
+                out_channels=output_channels,
+                kernel_size=3,
+                stride=1,
+                padding=1,
+            ),
             nn.LeakyReLU(0.2, True),
         )
 
@@ -114,9 +146,21 @@ class ConAttn(nn.Module):
         k_tokens = F.normalize(q_tokens.float(), dim=-1, eps=1e-4).to(q_tokens.dtype)
         v_tokens = v_features.flatten(2).transpose(1, 2).contiguous()
 
-        q = q_tokens.view(batch, num_tokens, self.num_heads, query_head_dim).transpose(1, 2).contiguous()
-        k = k_tokens.view(batch, num_tokens, self.num_heads, query_head_dim).transpose(1, 2).contiguous()
-        v = v_tokens.view(batch, num_tokens, self.num_heads, value_head_dim).transpose(1, 2).contiguous()
+        q = (
+            q_tokens.view(batch, num_tokens, self.num_heads, query_head_dim)
+            .transpose(1, 2)
+            .contiguous()
+        )
+        k = (
+            k_tokens.view(batch, num_tokens, self.num_heads, query_head_dim)
+            .transpose(1, 2)
+            .contiguous()
+        )
+        v = (
+            v_tokens.view(batch, num_tokens, self.num_heads, value_head_dim)
+            .transpose(1, 2)
+            .contiguous()
+        )
 
         weight = self.linear_weight(q_features).flatten(2).transpose(1, 2).contiguous()
         bias = self.bias(q_features).flatten(2).transpose(1, 2).contiguous()
