@@ -19,7 +19,7 @@ class Upsample(nn.Module):
         return self.shuffle(self.expand(feature))
 
 
-class CommonAttn(nn.Module):
+class CommonGate(nn.Module):
     def __init__(self, dim: int, heads: int = 4):
         super().__init__()
         if dim % heads != 0:
@@ -29,6 +29,8 @@ class CommonAttn(nn.Module):
         self.head_dim = dim // heads
         self.q_proj = nn.Linear(dim, dim)
         self.k_proj = nn.Linear(dim, dim)
+        self.v_proj = nn.Linear(dim, dim)
+        self.gate_proj = nn.Conv2d(dim, dim, kernel_size=1)
 
     @staticmethod
     def _to_tokens(feature: torch.Tensor) -> torch.Tensor:
@@ -62,16 +64,16 @@ class CommonAttn(nn.Module):
 
     def forward(
         self,
-        query_feat: torch.Tensor,
-        key_feat: torch.Tensor,
-        value_feat: torch.Tensor,
+        target_feat: torch.Tensor,
+        other_feat: torch.Tensor,
     ) -> torch.Tensor:
-        height, width = query_feat.shape[-2:]
-        query = self._reshape_heads(self.q_proj(self._to_tokens(query_feat)))
-        key = self._reshape_heads(self.k_proj(self._to_tokens(key_feat)))
-        value = self._reshape_heads(self._to_tokens(value_feat))
-        common_tokens = _sdpa(query, key, value)
-        return self._to_feature(self._restore_heads(common_tokens), height, width)
+        height, width = target_feat.shape[-2:]
+        query = self._reshape_heads(self.q_proj(self._to_tokens(target_feat)))
+        key = self._reshape_heads(self.k_proj(self._to_tokens(other_feat)))
+        value = self._reshape_heads(self.v_proj(self._to_tokens(other_feat)))
+        context_tokens = _sdpa(query, key, value)
+        context = self._to_feature(self._restore_heads(context_tokens), height, width)
+        return self.gate_proj(context)
 
 
 class Encoder(nn.Module):
@@ -142,28 +144,32 @@ class FDT(nn.Module):
         self.sar_encoder = Encoder(sar_channels, dim, num_layers, num_heads)
         self.cld_encoder = Encoder(cloudy_channels, dim, num_layers, num_heads)
 
-        self.sar_common_attn = CommonAttn(dim, heads=num_heads)
-        self.cld_common_attn = CommonAttn(dim, heads=num_heads)
+        self.sar_common_gate = CommonGate(dim, heads=num_heads)
+        self.cld_common_gate = CommonGate(dim, heads=num_heads)
         self.com_fuse = nn.Conv2d(self.up_dim * 2, self.up_dim * 2, kernel_size=1)
 
-        self.sar_com_up = Upsample(dim)
-        self.cld_com_up = Upsample(dim)
-        self.sar_comp_up = Upsample(dim)
-        self.cld_comp_up = Upsample(dim)
+        self.sar_feat_up = Upsample(dim)
+        self.cld_feat_up = Upsample(dim)
+        self.sar_gate_up = Upsample(dim)
+        self.cld_gate_up = Upsample(dim)
 
     def forward(self, sar: torch.Tensor, cloudy: torch.Tensor):
-        sar_feat = self.sar_encoder(sar)
-        cld_feat = self.cld_encoder(cloudy)
+        sar_feat_l = self.sar_encoder(sar)
+        cld_feat_l = self.cld_encoder(cloudy)
 
-        sar_com = self.sar_common_attn(sar_feat, cld_feat, sar_feat)
-        cld_com = self.cld_common_attn(cld_feat, sar_feat, cld_feat)
+        sar_gate_l = self.sar_common_gate(sar_feat_l, cld_feat_l)
+        cld_gate_l = self.cld_common_gate(cld_feat_l, sar_feat_l)
+
+        sar_feat = self.sar_feat_up(sar_feat_l)
+        cld_feat = self.cld_feat_up(cld_feat_l)
+        sar_gate = torch.sigmoid(self.sar_gate_up(sar_gate_l))
+        cld_gate = torch.sigmoid(self.cld_gate_up(cld_gate_l))
+
+        sar_com = sar_gate * sar_feat
+        cld_com = cld_gate * cld_feat
         sar_comp = sar_feat - sar_com
         cld_comp = cld_feat - cld_com
 
-        sar_com = self.sar_com_up(sar_com)
-        cld_com = self.cld_com_up(cld_com)
-        sar_comp = self.sar_comp_up(sar_comp)
-        cld_comp = self.cld_comp_up(cld_comp)
         com_fused = self.com_fuse(torch.cat((sar_com, cld_com), dim=1))
         output = torch.cat((com_fused, sar_comp, cld_comp), dim=1)
         return (
