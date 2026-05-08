@@ -31,6 +31,8 @@ class CommonGate(nn.Module):
         self.k_proj = nn.Linear(dim, dim)
         self.v_proj = nn.Linear(dim, dim)
         self.gate_proj = nn.Conv2d(dim, dim, kernel_size=1)
+        nn.init.zeros_(self.gate_proj.weight)
+        nn.init.zeros_(self.gate_proj.bias)
 
     @staticmethod
     def _to_tokens(feature: torch.Tensor) -> torch.Tensor:
