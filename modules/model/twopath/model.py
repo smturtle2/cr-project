@@ -57,7 +57,7 @@ class TwoPathACA_CRNet(nn.Module):
             gpu_ids=gpu_ids,
             ca=FlashConAttn,
             ca_kwargs=ca_kwargs,
-            is_baseline=True,
+            is_baseline=False,
         )
 
     def forward(self, sar: torch.Tensor, cloudy: torch.Tensor) -> torch.Tensor:
