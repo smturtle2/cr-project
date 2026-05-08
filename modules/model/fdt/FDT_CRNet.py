@@ -93,6 +93,7 @@ class FDT_CRNet_Side(nn.Module):
             side_mode=side_mode,
             num_heads=num_heads,
         )
+        self.input = init_net(self.input, init_type=init_type, gpu_ids=gpu_ids)
         self.crnet = init_net(crnet, init_type=init_type, gpu_ids=gpu_ids)
 
     def forward(self, sar: torch.Tensor, cloudy: torch.Tensor):
