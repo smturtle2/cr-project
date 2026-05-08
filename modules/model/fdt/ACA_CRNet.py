@@ -12,6 +12,7 @@ import torch.nn as nn
 from torch.nn import init
 
 from ..module.base_module import BaseModule
+from ..module.cross_attention_module import CrossModalBlock
 from ..baseline.ca_flash import ConAttn
 
 DefaultConAttn = ConAttn
@@ -82,6 +83,48 @@ class ResBlock_att(nn.Module):
         return out
 
 
+class ResBlock_att_side(nn.Module):
+    def __init__(
+        self,
+        in_channels,
+        out_channels=256,
+        alpha=0.1,
+        ca=DefaultConAttn,
+        ca_kwargs=None,
+        side_mode="residual",
+        num_heads=4,
+    ):
+        super(ResBlock_att_side, self).__init__()
+        if side_mode not in {"residual", "cross"}:
+            raise ValueError("side_mode must be either 'residual' or 'cross'")
+        self.block = ResBlock_att(
+            in_channels,
+            out_channels,
+            alpha,
+            ca=ca,
+            ca_kwargs=ca_kwargs,
+        )
+        self.side_mode = side_mode
+        if side_mode == "residual":
+            self.side = nn.Conv2d(
+                out_channels,
+                out_channels,
+                kernel_size=3,
+                bias=False,
+                stride=1,
+                padding=1,
+            )
+        else:
+            self.side = CrossModalBlock(out_channels, num_heads=num_heads)
+        self.alpha = alpha
+
+    def forward(self, x, side_feature):
+        out = self.block(x)
+        if self.side_mode == "residual":
+            return out + self.alpha * self.side(side_feature)
+        return self.side(out, side_feature)
+
+
 def init_net(net, init_type="kaiming-uniform", gpu_ids=[]):
     if len(gpu_ids) > 0:
         assert torch.cuda.is_available()
@@ -132,9 +175,23 @@ class ACA_CRNet(nn.Module):
         gpu_ids=[],
         ca=DefaultConAttn,
         ca_kwargs=None,
+        mode="direct",
+        side_mode="residual",
+        num_heads=4,
     ):
         super(ACA_CRNet, self).__init__()
+        if mode not in {"direct", "side"}:
+            raise ValueError("mode must be either 'direct' or 'side'")
+        if side_mode not in {"residual", "cross"}:
+            raise ValueError("side_mode must be either 'residual' or 'cross'")
         ca_kwargs = {} if ca_kwargs is None else dict(ca_kwargs)
+        self.mode = mode
+        _ResBlock_att = ResBlock_att_side if mode == "side" else ResBlock_att
+        side_kwargs = (
+            {"side_mode": side_mode, "num_heads": num_heads}
+            if mode == "side"
+            else {}
+        )
         m = []
         for i in range(num_layers):
             # if i == 6:
@@ -142,14 +199,24 @@ class ACA_CRNet(nn.Module):
 
             if i == num_layers // 2:
                 m.append(
-                    ResBlock_att(
-                        feature_sizes, feature_sizes, alpha, ca=ca, ca_kwargs=ca_kwargs
+                    _ResBlock_att(
+                        feature_sizes,
+                        feature_sizes,
+                        alpha,
+                        ca=ca,
+                        ca_kwargs=ca_kwargs,
+                        **side_kwargs,
                     )
                 )  # 256/s==int
             elif i == num_layers * 3 // 4:
                 m.append(
-                    ResBlock_att(
-                        feature_sizes, feature_sizes, alpha, ca=ca, ca_kwargs=ca_kwargs
+                    _ResBlock_att(
+                        feature_sizes,
+                        feature_sizes,
+                        alpha,
+                        ca=ca,
+                        ca_kwargs=ca_kwargs,
+                        **side_kwargs,
                     )
                 )  # 256/s==int
             else:
@@ -173,11 +240,13 @@ class ACA_CRNet(nn.Module):
             assert torch.cuda.is_available()
             self.net.to(self.gpu_ids[0])
 
-    def forward(self, feature):
+    def forward(self, feature, side_feature=None):
+        if self.mode == "side" and side_feature is None:
+            raise ValueError("side mode requires side_feature")
         out = feature
         for layer in self.net:
-            if isinstance(layer, BaseModule):
-                out = layer(out)
+            if isinstance(layer, ResBlock_att_side):
+                out = layer(out, side_feature)
             else:
                 out = layer(out)
         return out
