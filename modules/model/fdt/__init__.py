@@ -1,4 +1,4 @@
-from .FDT_CRNet import FDT_CRNet_Direct
+from .FDT_CRNet import FDT_CRNet_Direct, FDT_CRNet_Side
 from .fdt import FDT
 
-__all__ = ["FDT", "FDT_CRNet_Direct"]
+__all__ = ["FDT", "FDT_CRNet_Direct", "FDT_CRNet_Side"]
