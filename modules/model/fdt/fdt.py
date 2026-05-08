@@ -31,8 +31,6 @@ class CommonGate(nn.Module):
         self.k_proj = nn.Linear(dim, dim)
         self.v_proj = nn.Linear(dim, dim)
         self.gate_proj = nn.Conv2d(dim, dim, kernel_size=1)
-        nn.init.zeros_(self.gate_proj.weight)
-        nn.init.zeros_(self.gate_proj.bias)
 
     @staticmethod
     def _to_tokens(feature: torch.Tensor) -> torch.Tensor:
@@ -154,6 +152,10 @@ class FDT(nn.Module):
         self.cld_feat_up = Upsample(dim)
         self.sar_gate_up = Upsample(dim)
         self.cld_gate_up = Upsample(dim)
+        nn.init.zeros_(self.sar_gate_up.expand.weight)
+        nn.init.zeros_(self.sar_gate_up.expand.bias)
+        nn.init.zeros_(self.cld_gate_up.expand.weight)
+        nn.init.zeros_(self.cld_gate_up.expand.bias)
 
     def forward(self, sar: torch.Tensor, cloudy: torch.Tensor):
         sar_feat_l = self.sar_encoder(sar)
