@@ -10,7 +10,6 @@ from collections import OrderedDict
 from torch.nn import init
 import torch
 from .ca import ConAttn
-from ..gate import build_gate_estimator
 from ..module.base_module import BaseModule
 
 DefaultConAttn = ConAttn
@@ -103,22 +102,21 @@ class ACA_CRNet(nn.Module):
         gate_mode="mask",
         gate_feat_dim=32,
         gate_prior_weight=0.5,
+        gate_scale=1.0,
+        optical_only_main=False,
     ):
         super(ACA_CRNet,self).__init__()
         ca_kwargs = {} if ca_kwargs is None else dict(ca_kwargs)
         sar_channels = in_channels - out_channels
         self.gate_mode = gate_mode
+        self.gate_scale = float(gate_scale)
+        self.optical_only_main = optical_only_main
         self.last_gate = None
         self.last_gates = []
-        self.gate_estimator = build_gate_estimator(
-            gate_mode,
-            sar_channels=sar_channels,
-            optical_channels=out_channels,
-            feat_dim=gate_feat_dim,
-            prior_weight=gate_prior_weight,
-        )
+        _BaseModuleCls = BaseModuleReplace if optical_only_main else BaseModule
+        main_in = out_channels if optical_only_main else in_channels
         m= []
-        m.append(nn.Conv2d(in_channels,out_channels=feature_sizes,kernel_size=3,bias=True,stride = 1 ,padding=1))
+        m.append(nn.Conv2d(main_in,out_channels=feature_sizes,kernel_size=3,bias=True,stride = 1 ,padding=1))
         m.append(nn.ReLU(True))
         for i in range(num_layers):
 
@@ -128,11 +126,27 @@ class ACA_CRNet(nn.Module):
             if i == num_layers//2:
                 m.append(ResBlock_att(feature_sizes,feature_sizes,alpha,ca=ca,ca_kwargs=ca_kwargs))# 256/s==int
                 if not is_baseline:
-                    m.append(BaseModule(sar_channels, out_channels, feature_sizes))
+                    m.append(_BaseModuleCls(
+                        sar_channels,
+                        out_channels,
+                        feature_sizes,
+                        gate_mode=gate_mode,
+                        gate_feat_dim=gate_feat_dim,
+                        gate_prior_weight=gate_prior_weight,
+                        gate_scale=gate_scale,
+                    ))
             elif i == num_layers*3//4:
                 m.append(ResBlock_att(feature_sizes,feature_sizes,alpha,ca=ca,ca_kwargs=ca_kwargs))# 256/s==int
                 if not is_baseline:
-                    m.append(BaseModule(sar_channels, out_channels, feature_sizes))
+                    m.append(_BaseModuleCls(
+                        sar_channels,
+                        out_channels,
+                        feature_sizes,
+                        gate_mode=gate_mode,
+                        gate_feat_dim=gate_feat_dim,
+                        gate_prior_weight=gate_prior_weight,
+                        gate_scale=gate_scale,
+                    ))
             else:
                 m.append(ResBlock(feature_sizes, feature_sizes, alpha))
 
@@ -148,22 +162,15 @@ class ACA_CRNet(nn.Module):
             init_weights(self.net,"kaiming-uniform")
     
     def forward(self, sar, cloudy):
-        x = torch.cat((sar, cloudy), dim=1)
+        x = cloudy if self.optical_only_main else torch.cat((sar, cloudy), dim=1)
         out = x
-        if self.gate_estimator is None:
-            gate = None
-            self.last_gate = None
-        else:
-            gate = self.gate_estimator(sar, cloudy)
-            self.last_gate = gate
         self.last_gates = []
         for layer in self.net:
             if isinstance(layer, BaseModule):
-                out = layer(sar, cloudy, out, gate=gate)
+                out = layer(sar, cloudy, out)
                 self.last_gates.append(layer.last_gate)
             else:
                 out = layer(out)
-        if gate is None and self.last_gates:
-            self.last_gate = self.last_gates[-1]
+        self.last_gate = self.last_gates[-1] if self.last_gates else None
         return cloudy + out
     

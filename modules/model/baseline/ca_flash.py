@@ -22,7 +22,7 @@ class ConAttn(nn.Module):
         rate=1,
         softmax_scale=1.0,
         num_heads=4,
-        flash_dtype=torch.float16,
+        flash_dtype=torch.bfloat16,
         lambda_init=1e-3,
     ):
         super().__init__()

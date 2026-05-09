@@ -3,6 +3,7 @@ from __future__ import annotations
 from .base import BaseGateEstimator
 from .cosine import CosineGateEstimator
 from .cosine_prior import CosinePriorGateEstimator
+from .prior_refine_v4 import PriorRefineGateEstimatorV4
 from .prior import OpticalRulePrior
 
 
@@ -31,4 +32,10 @@ def build_gate_estimator(
         )
     if mode == "prior":
         return OpticalRulePrior()
+    if mode == "prior_refine_v4":
+        return PriorRefineGateEstimatorV4(
+            sar_channels=sar_channels,
+            optical_channels=optical_channels,
+            feat_dim=feat_dim,
+        )
     raise ValueError(f"unsupported gate mode: {mode}")
