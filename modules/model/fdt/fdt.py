@@ -2,22 +2,90 @@ from __future__ import annotations
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 from ..module.attention import TransformerLayer, _sdpa
 
 
-class Upsample(nn.Module):
+class JointUp2(nn.Module):
     def __init__(
         self,
-        dim: int,
+        feat_in_ch: int,
+        gate_in_ch: int,
+        out_ch: int,
+        hidden_ch: int | None = None,
     ):
         super().__init__()
-        self.expand = nn.Conv2d(dim, dim, kernel_size=1)
-        nn.init.zeros_(self.expand.bias)
-        self.shuffle = nn.PixelShuffle(2)
 
-    def forward(self, feature: torch.Tensor) -> torch.Tensor:
-        return self.shuffle(self.expand(feature))
+        hidden_ch = hidden_ch or out_ch * 2
+
+        self.feat_proj = nn.Conv2d(feat_in_ch, out_ch, kernel_size=1)
+        self.gate_proj = nn.Conv2d(gate_in_ch, out_ch, kernel_size=1)
+
+        self.trunk = nn.Sequential(
+            nn.Conv2d(
+                out_ch * 2,
+                hidden_ch,
+                kernel_size=3,
+                padding=1,
+                padding_mode="replicate",
+            ),
+            nn.GELU(),
+            nn.Conv2d(
+                hidden_ch,
+                hidden_ch,
+                kernel_size=3,
+                padding=1,
+                padding_mode="replicate",
+            ),
+            nn.GELU(),
+        )
+
+        self.feat_head = nn.Conv2d(
+            hidden_ch,
+            out_ch,
+            kernel_size=3,
+            padding=1,
+            padding_mode="replicate",
+        )
+        self.gate_head = nn.Conv2d(
+            hidden_ch,
+            out_ch,
+            kernel_size=3,
+            padding=1,
+            padding_mode="replicate",
+        )
+
+        nn.init.zeros_(self.feat_head.weight)
+        nn.init.zeros_(self.feat_head.bias)
+        nn.init.zeros_(self.gate_head.weight)
+        nn.init.zeros_(self.gate_head.bias)
+
+    def zero_mean_2x(self, x: torch.Tensor) -> torch.Tensor:
+        low = F.avg_pool2d(x, kernel_size=2, stride=2)
+        low = F.interpolate(low, scale_factor=2, mode="nearest")
+        return x - low
+
+    def forward(
+        self,
+        feat_l: torch.Tensor,
+        gate_l: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        feat_l = self.feat_proj(feat_l)
+        gate_l = self.gate_proj(gate_l)
+
+        feat_base = F.interpolate(feat_l, scale_factor=2, mode="nearest")
+        gate_base = F.interpolate(gate_l, scale_factor=2, mode="nearest")
+
+        h = self.trunk(torch.cat((feat_base, gate_base), dim=1))
+
+        feat_detail = torch.tanh(self.zero_mean_2x(self.feat_head(h)))
+        gate_detail = torch.tanh(self.zero_mean_2x(self.gate_head(h)))
+
+        feat_h = feat_base + feat_detail
+        gate_h = torch.sigmoid(gate_base + gate_detail)
+
+        return feat_h, gate_h
 
 
 class CommonGate(nn.Module):
@@ -94,7 +162,20 @@ class Encoder(nn.Module):
         heads: int,
     ):
         super().__init__()
-        self.proj = nn.Conv2d(in_channels, dim, kernel_size=3, stride=2, padding=1)
+        self.proj = nn.Sequential(
+            nn.Conv2d(
+                in_channels,
+                dim,
+                kernel_size=3,
+                stride=1,
+                padding=1,
+                padding_mode="replicate",
+            ),
+            nn.GELU(),
+            nn.Conv2d(
+                dim, dim, kernel_size=3, stride=2, padding=1, padding_mode="replicate"
+            ),
+        )
         self.blocks = nn.ModuleList(
             [TransformerLayer(dim, num_heads=heads) for _ in range(num_layers)]
         )
@@ -158,10 +239,8 @@ class FDT(nn.Module):
         self.cld_common_gate = CommonGate(dim, heads=num_heads)
         self.com_fuse = nn.Conv2d(self.up_dim * 2, self.up_dim // 3 * 2, kernel_size=1)
 
-        self.sar_feat_up = Upsample(dim)
-        self.cld_feat_up = Upsample(dim)
-        self.sar_gate_up = Upsample(dim)
-        self.cld_gate_up = Upsample(dim)
+        self.sar_up = JointUp2(dim, dim, self.up_dim)
+        self.cld_up = JointUp2(dim, dim, self.up_dim)
 
     def forward(self, sar: torch.Tensor, cloudy: torch.Tensor):
         sar_feat_l = self.sar_encoder(sar)
@@ -170,15 +249,13 @@ class FDT(nn.Module):
         sar_gate_l = self.sar_common_gate(sar_feat_l, cld_feat_l)
         cld_gate_l = self.cld_common_gate(cld_feat_l, sar_feat_l)
 
-        sar_feat = self.sar_feat_up(sar_feat_l)
-        cld_feat = self.cld_feat_up(cld_feat_l)
-        sar_gate = torch.sigmoid(self.sar_gate_up(sar_gate_l))
-        cld_gate = torch.sigmoid(self.cld_gate_up(cld_gate_l))
+        sar_feat, sar_gate = self.sar_up(sar_feat_l, sar_gate_l)
+        cld_feat, cld_gate = self.cld_up(cld_feat_l, cld_gate_l)
 
         sar_com = sar_gate * sar_feat
         cld_com = cld_gate * cld_feat
-        sar_comp = sar_feat - sar_com
-        cld_comp = cld_feat - cld_com
+        sar_comp = (1.0 - sar_gate) * sar_feat
+        cld_comp = (1.0 - cld_gate) * cld_feat
 
         com_fused = self.com_fuse(torch.cat((sar_com, cld_com), dim=1))
         output = torch.cat((com_fused, sar_comp, cld_comp), dim=1)
