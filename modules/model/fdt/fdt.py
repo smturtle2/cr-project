@@ -43,21 +43,29 @@ class CommonGate(nn.Module):
         height: int,
         width: int,
     ) -> torch.Tensor:
-        return tokens.transpose(1, 2).reshape(
-            tokens.shape[0],
-            tokens.shape[2],
-            height,
-            width,
-        ).contiguous()
+        return (
+            tokens.transpose(1, 2)
+            .reshape(
+                tokens.shape[0],
+                tokens.shape[2],
+                height,
+                width,
+            )
+            .contiguous()
+        )
 
     def _reshape_heads(self, tokens: torch.Tensor) -> torch.Tensor:
         batch, num_tokens, _ = tokens.shape
-        return tokens.view(
-            batch,
-            num_tokens,
-            self.heads,
-            self.head_dim,
-        ).transpose(1, 2).contiguous()
+        return (
+            tokens.view(
+                batch,
+                num_tokens,
+                self.heads,
+                self.head_dim,
+            )
+            .transpose(1, 2)
+            .contiguous()
+        )
 
     def _restore_heads(self, tokens: torch.Tensor) -> torch.Tensor:
         batch, _, num_tokens, _ = tokens.shape
@@ -127,6 +135,7 @@ class FDT(nn.Module):
         num_heads=4,
     ):
         super().__init__()
+        dim = 256 // 2 * 3
         if dim % num_heads != 0:
             raise ValueError("dim must be divisible by num_heads")
         if dim % 4 != 0:
@@ -147,7 +156,7 @@ class FDT(nn.Module):
 
         self.sar_common_gate = CommonGate(dim, heads=num_heads)
         self.cld_common_gate = CommonGate(dim, heads=num_heads)
-        self.com_fuse = nn.Conv2d(self.up_dim * 2, self.up_dim * 2, kernel_size=1)
+        self.com_fuse = nn.Conv2d(self.up_dim * 2, self.up_dim // 3 * 2, kernel_size=1)
 
         self.sar_feat_up = Upsample(dim)
         self.cld_feat_up = Upsample(dim)
