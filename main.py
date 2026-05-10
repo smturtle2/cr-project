@@ -734,13 +734,15 @@ def _build_example_title(
     return f"{split_label} example {example_index} | {season}/scene_{scene}/patch_{patch}"
 
 
-def _build_example_panels(
+def build_example_panels(
     *,
     cloudy: torch.Tensor,
     prediction: torch.Tensor,
     target: torch.Tensor,
     sar: torch.Tensor,
+    model_output: Any | None = None,
 ) -> tuple[tuple[str, np.ndarray, str | None], ...]:
+    del model_output
     cloudy_rgb, prediction_rgb, target_rgb = normalize_rgb_triplet(cloudy, prediction, target)
     sar_map = normalize_map(sar.mean(dim=0))
     error_map = normalize_map((prediction - target).abs().mean(dim=0))
@@ -753,6 +755,40 @@ def _build_example_panels(
     )
 
 
+def build_example_output(trainer: Trainer, batch: Batch) -> Any:
+    return trainer.predict(batch)
+
+
+def build_example_prediction(model_output: Any) -> torch.Tensor:
+    if not isinstance(model_output, torch.Tensor):
+        raise TypeError("build_example_prediction() must return a torch.Tensor")
+    return model_output
+
+
+def _detach_example_output(value: Any) -> Any:
+    if isinstance(value, torch.Tensor):
+        return value.detach().cpu()
+    if isinstance(value, tuple):
+        return tuple(_detach_example_output(item) for item in value)
+    if isinstance(value, list):
+        return [_detach_example_output(item) for item in value]
+    if isinstance(value, Mapping):
+        return {key: _detach_example_output(item) for key, item in value.items()}
+    return value
+
+
+def _select_example_item(value: Any, index: int) -> Any:
+    if isinstance(value, torch.Tensor):
+        return value[index]
+    if isinstance(value, tuple):
+        return tuple(_select_example_item(item, index) for item in value)
+    if isinstance(value, list):
+        return [_select_example_item(item, index) for item in value]
+    if isinstance(value, Mapping):
+        return {key: _select_example_item(item, index) for key, item in value.items()}
+    return value
+
+
 def _save_example_figure(
     *,
     output_dir: Path,
@@ -763,18 +799,29 @@ def _save_example_figure(
 ) -> Path:
     import matplotlib.pyplot as plt
 
-    fig, axes = plt.subplots(1, 5, figsize=(18, 4))
+    if not panels:
+        raise ValueError("panels must not be empty")
+    num_columns = 4 if len(panels) > 4 and len(panels) % 4 == 0 else len(panels)
+    num_rows = math.ceil(len(panels) / num_columns)
+    fig, axes = plt.subplots(
+        num_rows,
+        num_columns,
+        figsize=(3.6 * num_columns, 4 * num_rows),
+    )
     fig.suptitle(title, fontsize=11)
-    for ax, (panel_title, image, cmap) in zip(axes, panels):
+    flat_axes = np.atleast_1d(axes).flat
+    for ax, (panel_title, image, cmap) in zip(flat_axes, panels):
         if cmap is None:
             ax.imshow(image)
         else:
             ax.imshow(image, cmap=cmap)
         ax.set_title(panel_title)
         ax.axis("off")
+    for ax in flat_axes:
+        ax.axis("off")
 
     fig.tight_layout()
-    fig.subplots_adjust(top=0.80)
+    fig.subplots_adjust(top=0.92 if num_rows > 1 else 0.80)
 
     path = output_dir / f"{split_label}_example_{example_index:02d}.png"
     fig.savefig(path, dpi=180, bbox_inches="tight")
@@ -813,18 +860,21 @@ def _render_restoration_examples(
                 cloudy = batch["cloudy"]
                 target = batch["target"]
                 metadata = batch.get("meta", {})
-                prediction = trainer.predict(batch)
+                model_output = build_example_output(trainer, batch)
+                prediction = build_example_prediction(model_output)
                 if not isinstance(prediction, torch.Tensor):
-                    raise TypeError("trainer.predict(batch) must return a torch.Tensor")
+                    raise TypeError("build_example_prediction() must return a torch.Tensor")
                 prediction = prediction.detach().cpu()
+                model_output = _detach_example_output(model_output)
 
                 for index in range(prediction.shape[0]):
                     example_index = len(saved_paths) + 1
-                    panels = _build_example_panels(
+                    panels = build_example_panels(
                         cloudy=cloudy[index],
                         prediction=prediction[index],
                         target=target[index],
                         sar=sar[index],
+                        model_output=_select_example_item(model_output, index),
                     )
                     title = _build_example_title(
                         split_label,

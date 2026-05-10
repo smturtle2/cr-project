@@ -17,6 +17,9 @@ _DEFAULT_BUILD_METRICS = shared_main.build_metrics
 _DEFAULT_BUILD_BEST_EPOCH_SELECTOR = shared_main.build_best_epoch_selector
 _DEFAULT_BUILD_SCHEDULER = shared_main.build_scheduler
 _DEFAULT_BUILD_SCHEDULER_MONITOR = shared_main.build_scheduler_monitor
+_DEFAULT_BUILD_EXAMPLE_OUTPUT = shared_main.build_example_output
+_DEFAULT_BUILD_EXAMPLE_PREDICTION = shared_main.build_example_prediction
+_DEFAULT_BUILD_EXAMPLE_PANELS = shared_main.build_example_panels
 
 
 # 이 파일은 그대로 실행하는 용도가 아니라 개인 작업용 템플릿이다.
@@ -72,6 +75,32 @@ def build_scheduler_monitor() -> str | None:
     return _DEFAULT_BUILD_SCHEDULER_MONITOR()
 
 
+def build_example_panels(
+    *,
+    cloudy: torch.Tensor,
+    prediction: torch.Tensor,
+    target: torch.Tensor,
+    sar: torch.Tensor,
+    model_output=None,
+):
+    # examples에 들어갈 패널 구성도 개인 실험에서 덮어쓸 수 있다.
+    return _DEFAULT_BUILD_EXAMPLE_PANELS(
+        cloudy=cloudy,
+        prediction=prediction,
+        target=target,
+        sar=sar,
+        model_output=model_output,
+    )
+
+
+def build_example_output(trainer: shared_main.Trainer, batch: shared_main.Batch):
+    return _DEFAULT_BUILD_EXAMPLE_OUTPUT(trainer, batch)
+
+
+def build_example_prediction(model_output) -> torch.Tensor:
+    return _DEFAULT_BUILD_EXAMPLE_PREDICTION(model_output)
+
+
 @contextmanager
 def use_local_builds() -> Iterator[None]:
     # 공용 러너는 `main.py`에 두고,
@@ -86,6 +115,9 @@ def use_local_builds() -> Iterator[None]:
         "build_best_epoch_selector": build_best_epoch_selector,
         "build_scheduler": build_scheduler,
         "build_scheduler_monitor": build_scheduler_monitor,
+        "build_example_output": build_example_output,
+        "build_example_prediction": build_example_prediction,
+        "build_example_panels": build_example_panels,
     }
     originals = {name: getattr(shared_main, name) for name in overrides}
 
