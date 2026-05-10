@@ -79,8 +79,10 @@ class JointUp2(nn.Module):
 
         h = self.trunk(torch.cat((feat_base, gate_base), dim=1))
 
-        feat_detail = torch.tanh(self.zero_mean_2x(self.feat_head(h)))
-        gate_detail = torch.tanh(self.zero_mean_2x(self.gate_head(h)))
+        feat_detail = torch.tanh(self.feat_head(h))
+        gate_detail = torch.tanh(self.gate_head(h))
+        feat_detail = self.zero_mean_2x(feat_detail)
+        gate_detail = self.zero_mean_2x(gate_detail)
 
         feat_h = feat_base + feat_detail
         gate_h = torch.sigmoid(gate_base + gate_detail)
@@ -254,8 +256,8 @@ class FDT(nn.Module):
 
         sar_com = sar_gate * sar_feat
         cld_com = cld_gate * cld_feat
-        sar_comp = (1.0 - sar_gate) * sar_feat
-        cld_comp = (1.0 - cld_gate) * cld_feat
+        sar_comp = sar_feat - sar_com
+        cld_comp = cld_feat - cld_com
 
         com_fused = self.com_fuse(torch.cat((sar_com, cld_com), dim=1))
         output = torch.cat((com_fused, sar_comp, cld_comp), dim=1)
