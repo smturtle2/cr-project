@@ -2,14 +2,15 @@
 
 ## Dependency Policy
 
-서버 호환성에 따라 학습 의존성을 둘 중 하나로 설치합니다.
+서버 호환성에 따라 학습 의존성을 하나 골라 설치합니다.
 
 - `torch 2.6.x`가 필요한 서버: `uv sync --extra torch26`
+- CUDA 12.9용 최신 `torch`가 필요한 서버: `uv sync --extra cu129`
 - 최신 `torch`가 필요한 서버: `uv sync --extra latest`
-- 위 두 명령은 모두 `cr-train`과 해당 `torch` 버전을 함께 설치합니다
+- 위 명령은 모두 `cr-train`과 해당 `torch` 버전을 함께 설치합니다
 - 현재 `latest` extra는 `torch>=2.11` 기준으로 잠기며, `uv lock --upgrade-package torch`로 최신 stable을 다시 반영할 수 있습니다
 - bare `uv sync`만 실행하면 학습 의존성인 `cr-train`, `torch`가 설치되지 않습니다
-- `torch26`와 `latest`는 동시에 선택할 수 없습니다
+- `torch26`, `cu129`, `latest`는 동시에 선택할 수 없습니다
 - 버전 확인은 `uv run python -c "import torch; print(torch.__version__)"`로 확인합니다
 
 ## Protected Files
@@ -43,7 +44,7 @@ TRAIN_TARGET=other_runner.py ./train.sh --gpu 0
 - 학습 설정은 CLI parse 대신 `main(...)` 호출 인자로 직접 넘깁니다
 - 공용 `main.py` 기본 precision은 `mixed_precision="bf16"` AMP이며, 필요하면 `mixed_precision="off"` 또는 `"fp16"`으로 바꿉니다
 - 실행 자체는 공용 `main.py` 가 담당하므로 학습 루프와 결과 저장 흐름은 동일하게 유지됩니다
-- 임시 러너에서도 `torch`가 필요하면 먼저 `uv sync --extra torch26` 또는 `uv sync --extra latest`로 환경을 맞춥니다
+- 임시 러너에서도 `torch`가 필요하면 먼저 `uv sync --extra torch26`, `uv sync --extra cu129`, `uv sync --extra latest` 중 하나로 환경을 맞춥니다
 - 최신 `cr-train` 기준으로 데이터 로딩은 기본 `streaming=True`이며, 로컬 블록을 쓰려면 `streaming=False`, `dataset_dir=...` 를 넘깁니다
 - 전체 split을 쓰려면 `train_max_samples=None`, `val_max_samples=None`, `test_max_samples=None` 처럼 sample limit을 `None` 으로 넘기면 됩니다
 
