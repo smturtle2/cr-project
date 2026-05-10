@@ -3,7 +3,6 @@
 
 from __future__ import annotations
 
-import math
 from collections import OrderedDict
 from contextlib import nullcontext
 
@@ -134,19 +133,19 @@ class ConAttn(nn.Module):
         bias = bias[:, None, :, :]
 
         attn_dtype = self._attention_dtype(q)
-        q = (q * (self.softmax_scale * math.sqrt(query_head_dim))).to(attn_dtype)
+        q = q.to(attn_dtype)
         k = k.to(attn_dtype)
         v_attn = v.to(attn_dtype)
         weighted_v_attn = (weight.to(attn_dtype) * v_attn).contiguous()
 
         with self._attention_context(q):
-            y = _sdpa(q, k, v_attn)
-            yw = _sdpa(q, k, weighted_v_attn)
+            y = _sdpa(q, k, v_attn, scale=self.softmax_scale)
+            yw = _sdpa(q, k, weighted_v_attn, scale=self.softmax_scale)
 
         y = y.to(v.dtype)
         yw = yw.to(v.dtype)
         background = yw.mean(dim=2, keepdim=True)
-        bias_value = (bias.to(v.dtype) * v).sum(dim=2, keepdim=True)
+        bias_value = (bias.to(v.dtype) * v).mean(dim=2, keepdim=True)
         contrast = yw - background + bias_value
         gate = F.relu(contrast)
         out = y + F.relu(self.lambda_scale).to(y.dtype) * gate
