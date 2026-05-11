@@ -125,11 +125,7 @@ class ResBlock_att_side(nn.Module):
         return self.side(out, side_feature)
 
 
-def init_net(net, init_type="kaiming-uniform", gpu_ids=[]):
-    if len(gpu_ids) > 0:
-        assert torch.cuda.is_available()
-        net.to(gpu_ids[0])
-        net = torch.nn.DataParallel(net, gpu_ids)
+def init_net(net, init_type="kaiming-uniform"):
     init_weights(net, init_type)
     return net
 
@@ -172,7 +168,6 @@ class ACA_CRNet(nn.Module):
         alpha=0.1,
         num_layers=16,
         feature_sizes=256,
-        gpu_ids=[],
         ca=DefaultConAttn,
         ca_kwargs=None,
         mode="direct",
@@ -235,10 +230,6 @@ class ACA_CRNet(nn.Module):
             )
         )
         self.net = nn.ModuleList(m)
-        self.gpu_ids = gpu_ids
-        if len(self.gpu_ids) > 0:
-            assert torch.cuda.is_available()
-            self.net.to(self.gpu_ids[0])
 
     def forward(self, feature, side_feature=None):
         if self.mode == "side" and side_feature is None:
