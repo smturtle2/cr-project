@@ -19,18 +19,17 @@ class FDTDecompositionLossTest(unittest.TestCase):
 
         self.assertLess(float(loss), 1e-4)
 
-    def test_comp_loss_uses_feature_ssim(self) -> None:
+    def test_comp_loss_penalizes_positive_and_negative_correlation(self) -> None:
         loss_fn = FDTDecompositionLoss(common_weight=0.0, comp_weight=1.0)
         feature = torch.randn(1, 96, 32, 32)
-        same_loss = loss_fn(feature, torch.flip(feature, dims=(2,)), feature, feature)
-        different_loss = loss_fn(
-            feature,
-            torch.flip(feature, dims=(2,)),
-            feature,
-            torch.flip(feature, dims=(3,)),
-        )
+        unrelated_feature = torch.randn_like(feature)
 
-        self.assertGreater(float(same_loss), float(different_loss))
+        same_loss = loss_fn(feature, feature, feature, feature)
+        opposite_loss = loss_fn(feature, feature, feature, -feature)
+        unrelated_loss = loss_fn(feature, feature, feature, unrelated_feature)
+
+        self.assertGreater(float(same_loss), float(unrelated_loss))
+        self.assertGreater(float(opposite_loss), float(unrelated_loss))
 
     def test_backward_is_finite(self) -> None:
         loss_fn = FDTDecompositionLoss()

@@ -61,6 +61,28 @@ class FDTDecompositionLoss(nn.Module):
         )
         return ssim_map.mean()
 
+    def _local_corr_squared(
+        self,
+        first: torch.Tensor,
+        second: torch.Tensor,
+    ) -> torch.Tensor:
+        channel = first.size(1)
+        window = self._window_2d.to(device=first.device, dtype=first.dtype)
+        window = window.expand(channel, 1, -1, -1)
+        pad = self.window_size // 2
+
+        mu1 = F.conv2d(first, window, padding=pad, groups=channel)
+        mu2 = F.conv2d(second, window, padding=pad, groups=channel)
+
+        var1 = F.conv2d(first * first, window, padding=pad, groups=channel) - mu1.square()
+        var2 = F.conv2d(second * second, window, padding=pad, groups=channel) - mu2.square()
+        cov12 = F.conv2d(first * second, window, padding=pad, groups=channel) - mu1 * mu2
+
+        var1 = var1.clamp_min(0.0)
+        var2 = var2.clamp_min(0.0)
+        corr12 = cov12 / torch.sqrt(var1 * var2 + self.eps)
+        return corr12.square().mean()
+
     def forward(
         self,
         sar_com: torch.Tensor,
@@ -69,5 +91,5 @@ class FDTDecompositionLoss(nn.Module):
         cld_comp: torch.Tensor,
     ) -> torch.Tensor:
         common_loss = 1.0 - self._feature_ssim(sar_com, cld_com)
-        comp_loss = self._feature_ssim(sar_comp, cld_comp)
+        comp_loss = self._local_corr_squared(sar_comp, cld_comp)
         return self.common_weight * common_loss + self.comp_weight * comp_loss

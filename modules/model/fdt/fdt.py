@@ -7,87 +7,62 @@ import torch.nn.functional as F
 from ..module.attention import TransformerLayer, _sdpa
 
 
-class JointUp2(nn.Module):
-    def __init__(
-        self,
-        feat_in_ch: int,
-        gate_in_ch: int,
-        out_ch: int,
-        hidden_ch: int | None = None,
-    ):
+class _Residual3x3Block(nn.Module):
+    def __init__(self, channels: int):
         super().__init__()
-
-        hidden_ch = hidden_ch or out_ch * 2
-
-        self.feat_proj = nn.Conv2d(feat_in_ch, out_ch, kernel_size=1)
-        self.gate_proj = nn.Conv2d(gate_in_ch, out_ch, kernel_size=1)
-
-        self.trunk = nn.Sequential(
+        self.net = nn.Sequential(
             nn.Conv2d(
-                out_ch * 2,
-                hidden_ch,
+                channels,
+                channels,
                 kernel_size=3,
                 padding=1,
                 padding_mode="replicate",
             ),
             nn.GELU(),
             nn.Conv2d(
-                hidden_ch,
-                hidden_ch,
+                channels,
+                channels,
                 kernel_size=3,
                 padding=1,
                 padding_mode="replicate",
             ),
-            nn.GELU(),
         )
+        nn.init.zeros_(self.net[-1].weight)
+        nn.init.zeros_(self.net[-1].bias)
 
-        self.feat_head = nn.Conv2d(
-            hidden_ch,
-            out_ch,
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return x + self.net(x)
+
+
+class ShuffleUp(nn.Module):
+    def __init__(self, in_channels: int, blocks: int = 2):
+        super().__init__()
+        if in_channels % 4 != 0:
+            raise ValueError("in_channels must be divisible by 4")
+        if blocks < 0:
+            raise ValueError("blocks must be non-negative")
+
+        self.in_channels = in_channels
+        self.out_channels = in_channels // 4
+        self.blocks = blocks
+        self.phase = nn.Conv2d(
+            self.out_channels,
+            self.out_channels,
             kernel_size=3,
             padding=1,
             padding_mode="replicate",
         )
-        self.gate_head = nn.Conv2d(
-            hidden_ch,
-            out_ch,
-            kernel_size=3,
-            padding=1,
-            padding_mode="replicate",
+        self.refine = nn.Sequential(
+            *[_Residual3x3Block(self.out_channels) for _ in range(blocks)]
         )
 
-        nn.init.zeros_(self.feat_head.weight)
-        nn.init.zeros_(self.feat_head.bias)
-        nn.init.zeros_(self.gate_head.weight)
-        nn.init.zeros_(self.gate_head.bias)
+        nn.init.dirac_(self.phase.weight)
+        nn.init.zeros_(self.phase.bias)
 
-    def zero_mean_2x(self, x: torch.Tensor) -> torch.Tensor:
-        low = F.avg_pool2d(x, kernel_size=2, stride=2)
-        low = F.interpolate(low, scale_factor=2, mode="nearest")
-        return x - low
-
-    def forward(
-        self,
-        feat_l: torch.Tensor,
-        gate_l: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        feat_l = self.feat_proj(feat_l)
-        gate_l = self.gate_proj(gate_l)
-
-        feat_base = F.interpolate(feat_l, scale_factor=2, mode="nearest")
-        gate_base = F.interpolate(gate_l, scale_factor=2, mode="nearest")
-
-        h = self.trunk(torch.cat((feat_base, gate_base), dim=1))
-
-        feat_detail = torch.tanh(self.feat_head(h))
-        gate_detail = torch.tanh(self.gate_head(h))
-        feat_detail = self.zero_mean_2x(feat_detail)
-        gate_detail = self.zero_mean_2x(gate_detail)
-
-        feat_h = feat_base + feat_detail
-        gate_h = torch.sigmoid(gate_base + gate_detail)
-
-        return feat_h, gate_h
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x = F.pixel_shuffle(x, 2)
+        x = self.phase(x)
+        return self.refine(x)
 
 
 class CommonGate(nn.Module):
@@ -101,7 +76,13 @@ class CommonGate(nn.Module):
         self.q_proj = nn.Linear(dim, dim)
         self.k_proj = nn.Linear(dim, dim)
         self.v_proj = nn.Linear(dim, dim)
-        self.gate_proj = nn.Conv2d(dim, dim, kernel_size=1)
+        self.gate_head = nn.Sequential(
+            nn.Conv2d(dim * 2, dim, kernel_size=1),
+            nn.GELU(),
+            nn.Conv2d(dim, dim, kernel_size=1),
+        )
+        nn.init.zeros_(self.gate_head[-1].weight)
+        nn.init.zeros_(self.gate_head[-1].bias)
 
     @staticmethod
     def _to_tokens(feature: torch.Tensor) -> torch.Tensor:
@@ -152,7 +133,7 @@ class CommonGate(nn.Module):
         value = self._reshape_heads(self.v_proj(self._to_tokens(other_feat)))
         context_tokens = _sdpa(query, key, value)
         context = self._to_feature(self._restore_heads(context_tokens), height, width)
-        return self.gate_proj(context)
+        return self.gate_head(torch.cat((target_feat, context), dim=1))
 
 
 class Encoder(nn.Module):
@@ -168,14 +149,24 @@ class Encoder(nn.Module):
             nn.Conv2d(
                 in_channels,
                 dim,
+                kernel_size=1,
+            ),
+            nn.GELU(),
+            nn.Conv2d(
+                dim,
+                dim,
                 kernel_size=3,
-                stride=1,
                 padding=1,
                 padding_mode="replicate",
             ),
             nn.GELU(),
             nn.Conv2d(
-                dim, dim, kernel_size=3, stride=2, padding=1, padding_mode="replicate"
+                dim,
+                dim,
+                kernel_size=3,
+                stride=2,
+                padding=1,
+                padding_mode="replicate",
             ),
         )
         self.blocks = nn.ModuleList(
@@ -218,7 +209,6 @@ class FDT(nn.Module):
         num_heads=4,
     ):
         super().__init__()
-        dim = 256 // 2 * 3
         if dim % num_heads != 0:
             raise ValueError("dim must be divisible by num_heads")
         if dim % 4 != 0:
@@ -233,16 +223,16 @@ class FDT(nn.Module):
         self.heads = num_heads
         self.num_heads = num_heads
         self.up_dim = dim // 4
+        self.common_dim = dim // 2
 
         self.sar_encoder = Encoder(sar_channels, dim, num_layers, num_heads)
         self.cld_encoder = Encoder(cloudy_channels, dim, num_layers, num_heads)
 
         self.sar_common_gate = CommonGate(dim, heads=num_heads)
         self.cld_common_gate = CommonGate(dim, heads=num_heads)
-        self.com_fuse = nn.Conv2d(self.up_dim * 2, self.up_dim // 3 * 2, kernel_size=1)
-
-        self.sar_up = JointUp2(dim, dim, self.up_dim)
-        self.cld_up = JointUp2(dim, dim, self.up_dim)
+        self.com_fuse = nn.Conv2d(self.up_dim * 2, self.common_dim, kernel_size=1)
+        self.feat_up = ShuffleUp(dim)
+        self.gate_up = ShuffleUp(dim)
 
     def forward(self, sar: torch.Tensor, cloudy: torch.Tensor):
         sar_feat_l = self.sar_encoder(sar)
@@ -251,8 +241,10 @@ class FDT(nn.Module):
         sar_gate_l = self.sar_common_gate(sar_feat_l, cld_feat_l)
         cld_gate_l = self.cld_common_gate(cld_feat_l, sar_feat_l)
 
-        sar_feat, sar_gate = self.sar_up(sar_feat_l, sar_gate_l)
-        cld_feat, cld_gate = self.cld_up(cld_feat_l, cld_gate_l)
+        sar_feat = self.feat_up(sar_feat_l)
+        cld_feat = self.feat_up(cld_feat_l)
+        sar_gate = torch.sigmoid(self.gate_up(sar_gate_l))
+        cld_gate = torch.sigmoid(self.gate_up(cld_gate_l))
 
         sar_com = sar_gate * sar_feat
         cld_com = cld_gate * cld_feat
