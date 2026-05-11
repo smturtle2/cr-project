@@ -352,7 +352,7 @@ provides-extras = ["torch26", "latest"]
 [[package]]
 name = "cr-train"
 version = "0.1.0"
-source = { git = "https://github.com/smturtle2/cr-train.git#7536fdef7d08afed91037d55ec29b7568db9e4f4" }
+source = { git = "https://github.com/smturtle2/cr-train.git#d54d0205b35fcb7e675fd85f496270a4fa8eae9b" }
 dependencies = [
     { name = "datasets" },
     { name = "numpy" },
