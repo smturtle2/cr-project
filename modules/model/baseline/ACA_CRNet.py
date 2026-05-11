@@ -53,11 +53,7 @@ class ResBlock_att(nn.Module):
         out = self.alpha*out + x
         return out
 
-def init_net(net, init_type="kaiming-uniform", gpu_ids=[]):
-    if len(gpu_ids) > 0:
-        assert(torch.cuda.is_available())
-        net.to(gpu_ids[0])
-        net = torch.nn.DataParallel(net, gpu_ids)
+def init_net(net, init_type="kaiming-uniform"):
     init_weights(net, init_type)
     return net
 
@@ -95,7 +91,6 @@ class ACA_CRNet(nn.Module):
         alpha=0.1,
         num_layers=16,
         feature_sizes=256,
-        gpu_ids=[],
         ca=DefaultConAttn,
         ca_kwargs=None,
         is_baseline=False
@@ -126,10 +121,6 @@ class ACA_CRNet(nn.Module):
             #    m.append(ConAttn(input_channels=feature_sizes, output_channels=feature_sizes, ksize=1, stride=1))
         m.append(nn.Conv2d(feature_sizes,out_channels,kernel_size=3, bias=True,stride=1,padding=1))
         self.net = nn.ModuleList(m)
-        self.gpu_ids=gpu_ids
-        if len(self.gpu_ids) > 0:
-            assert(torch.cuda.is_available())
-            self.net.to(self.gpu_ids[0])
         if is_baseline:
             init_weights(self.net,"kaiming-uniform")
     
