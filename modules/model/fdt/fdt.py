@@ -4,7 +4,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from ..module.attention import TransformerLayer, _sdpa
+from ..module.attention import MultiHeadAttention, TransformerLayer, _AmpRMSNorm
 
 
 class _Residual3x3Block(nn.Module):
@@ -34,7 +34,7 @@ class _Residual3x3Block(nn.Module):
         return x + self.net(x)
 
 
-class ShuffleUp(nn.Module):
+class ResizeConvUp(nn.Module):
     def __init__(self, in_channels: int, blocks: int = 2):
         super().__init__()
         if in_channels % 4 != 0:
@@ -45,23 +45,28 @@ class ShuffleUp(nn.Module):
         self.in_channels = in_channels
         self.out_channels = in_channels // 4
         self.blocks = blocks
-        self.phase = nn.Conv2d(
-            self.out_channels,
-            self.out_channels,
-            kernel_size=3,
-            padding=1,
-            padding_mode="replicate",
+        self.stem = nn.Sequential(
+            nn.Conv2d(
+                in_channels,
+                self.out_channels,
+                kernel_size=3,
+                padding=1,
+                padding_mode="replicate",
+            ),
+            nn.GELU(),
         )
         self.refine = nn.Sequential(
             *[_Residual3x3Block(self.out_channels) for _ in range(blocks)]
         )
 
-        nn.init.dirac_(self.phase.weight)
-        nn.init.zeros_(self.phase.bias)
-
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        x = F.pixel_shuffle(x, 2)
-        x = self.phase(x)
+        x = F.interpolate(
+            x,
+            scale_factor=2,
+            mode="bilinear",
+            align_corners=False,
+        )
+        x = self.stem(x)
         return self.refine(x)
 
 
@@ -72,12 +77,17 @@ class CommonGate(nn.Module):
             raise ValueError("dim must be divisible by heads")
         self.dim = dim
         self.heads = heads
-        self.head_dim = dim // heads
-        self.q_proj = nn.Linear(dim, dim)
-        self.k_proj = nn.Linear(dim, dim)
-        self.v_proj = nn.Linear(dim, dim)
+        self.target_norm = _AmpRMSNorm(dim)
+        self.other_norm = _AmpRMSNorm(dim)
+        self.cross_attn = MultiHeadAttention(dim, num_heads=heads)
         self.gate_head = nn.Sequential(
-            nn.Conv2d(dim * 2, dim, kernel_size=1),
+            nn.Conv2d(
+                dim,
+                dim,
+                kernel_size=3,
+                padding=1,
+                padding_mode="replicate",
+            ),
             nn.GELU(),
             nn.Conv2d(dim, dim, kernel_size=1),
         )
@@ -105,35 +115,18 @@ class CommonGate(nn.Module):
             .contiguous()
         )
 
-    def _reshape_heads(self, tokens: torch.Tensor) -> torch.Tensor:
-        batch, num_tokens, _ = tokens.shape
-        return (
-            tokens.view(
-                batch,
-                num_tokens,
-                self.heads,
-                self.head_dim,
-            )
-            .transpose(1, 2)
-            .contiguous()
-        )
-
-    def _restore_heads(self, tokens: torch.Tensor) -> torch.Tensor:
-        batch, _, num_tokens, _ = tokens.shape
-        return tokens.transpose(1, 2).reshape(batch, num_tokens, self.dim).contiguous()
-
     def forward(
         self,
         target_feat: torch.Tensor,
         other_feat: torch.Tensor,
     ) -> torch.Tensor:
         height, width = target_feat.shape[-2:]
-        query = self._reshape_heads(self.q_proj(self._to_tokens(target_feat)))
-        key = self._reshape_heads(self.k_proj(self._to_tokens(other_feat)))
-        value = self._reshape_heads(self.v_proj(self._to_tokens(other_feat)))
-        context_tokens = _sdpa(query, key, value)
-        context = self._to_feature(self._restore_heads(context_tokens), height, width)
-        return self.gate_head(torch.cat((target_feat, context), dim=1))
+        target_tokens = self.target_norm(self._to_tokens(target_feat))
+        other_tokens = self.other_norm(self._to_tokens(other_feat))
+        context_tokens = self.cross_attn(target_tokens, other_tokens)
+        target = self._to_feature(target_tokens, height, width)
+        context = self._to_feature(context_tokens, height, width)
+        return self.gate_head(torch.abs(target - context))
 
 
 class Encoder(nn.Module):
@@ -231,23 +224,22 @@ class FDT(nn.Module):
         self.sar_common_gate = CommonGate(dim, heads=num_heads)
         self.cld_common_gate = CommonGate(dim, heads=num_heads)
         self.com_fuse = nn.Conv2d(self.up_dim * 2, self.common_dim, kernel_size=1)
-        self.feat_up = ShuffleUp(dim)
-        self.gate_up = ShuffleUp(dim)
+        self.up = ResizeConvUp(dim)
 
     def forward(self, sar: torch.Tensor, cloudy: torch.Tensor):
         sar_feat_l = self.sar_encoder(sar)
         cld_feat_l = self.cld_encoder(cloudy)
 
-        sar_gate_l = self.sar_common_gate(sar_feat_l, cld_feat_l)
-        cld_gate_l = self.cld_common_gate(cld_feat_l, sar_feat_l)
+        sar_gate_l = torch.sigmoid(self.sar_common_gate(sar_feat_l, cld_feat_l))
+        cld_gate_l = torch.sigmoid(self.cld_common_gate(cld_feat_l, sar_feat_l))
 
-        sar_feat = self.feat_up(sar_feat_l)
-        cld_feat = self.feat_up(cld_feat_l)
-        sar_gate = torch.sigmoid(self.gate_up(sar_gate_l))
-        cld_gate = torch.sigmoid(self.gate_up(cld_gate_l))
+        sar_com_l = sar_gate_l * sar_feat_l
+        cld_com_l = cld_gate_l * cld_feat_l
 
-        sar_com = sar_gate * sar_feat
-        cld_com = cld_gate * cld_feat
+        sar_feat = self.up(sar_feat_l)
+        cld_feat = self.up(cld_feat_l)
+        sar_com = self.up(sar_com_l)
+        cld_com = self.up(cld_com_l)
         sar_comp = sar_feat - sar_com
         cld_comp = cld_feat - cld_com
 
