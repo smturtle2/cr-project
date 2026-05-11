@@ -182,6 +182,7 @@ def build_trainer(
     train_crop_size: int | None = 128,
     train_random_flip: bool = True,
     train_random_rot90: bool = True,
+    grad_clip_norm: float | None = 1.0,
     mixed_precision: MixedPrecision = "bf16",
 ) -> Trainer:
     # main.py와 그 소비자들이 같은 Trainer 구성을 공유하도록 공용 생성 helper로 둔다.
@@ -216,6 +217,7 @@ def build_trainer(
         train_crop_size=train_crop_size,
         train_random_flip=train_random_flip,
         train_random_rot90=train_random_rot90,
+        grad_clip_norm=grad_clip_norm,
         mixed_precision=mixed_precision,
     )
 
@@ -1285,6 +1287,7 @@ def main(
     train_crop_size: int | None = 128,
     train_random_flip: bool = True,
     train_random_rot90: bool = True,
+    grad_clip_norm: float | None = 1.0,
     mixed_precision: MixedPrecision = "bf16",
     save_every_n_epochs: int = 0,
     run_test: bool = True,
@@ -1326,6 +1329,7 @@ def main(
             train_crop_size=train_crop_size,
             train_random_flip=train_random_flip,
             train_random_rot90=train_random_rot90,
+            grad_clip_norm=grad_clip_norm,
             mixed_precision=mixed_precision,
         )
         best_selector = build_best_epoch_selector()
