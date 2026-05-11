@@ -64,17 +64,21 @@ def test_fdt_uses_directional_common_gates() -> None:
 
     assert model.sar_common_gate is not model.cld_common_gate
     for gate in (model.sar_common_gate, model.cld_common_gate):
-        assert isinstance(gate.cross_attn, MultiHeadAttention)
-        assert isinstance(gate.gate_head[0], nn.Conv2d)
-        assert gate.gate_head[0].in_channels == model.dim
-        assert gate.gate_head[0].out_channels == model.dim
-        assert gate.gate_head[0].kernel_size == (3, 3)
-        assert isinstance(gate.gate_head[-1], nn.Conv2d)
-        assert gate.gate_head[-1].in_channels == model.dim
-        assert gate.gate_head[-1].out_channels == model.dim
-        assert gate.gate_head[-1].kernel_size == (1, 1)
-        assert torch.count_nonzero(gate.gate_head[-1].weight).item() == 0
-        assert torch.count_nonzero(gate.gate_head[-1].bias).item() == 0
+        assert gate.num_experts == 4
+        assert len(gate.experts) == 4
+        assert isinstance(gate.router[-1], nn.Conv2d)
+        assert gate.router[-1].out_channels == 4
+        assert torch.count_nonzero(gate.router[-1].weight).item() == 0
+        assert torch.count_nonzero(gate.router[-1].bias).item() == 0
+
+        cross_attn_ids = set()
+        for expert in gate.experts:
+            assert isinstance(expert.cross_attn, MultiHeadAttention)
+            cross_attn_ids.add(id(expert.cross_attn))
+            assert not hasattr(expert, "gate_head")
+            assert not hasattr(expert, "query_proj")
+            assert not hasattr(expert, "key_proj")
+        assert len(cross_attn_ids) == 4
 
 
 def test_fdt_defines_comp_as_high_res_residual() -> None:
