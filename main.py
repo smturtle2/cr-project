@@ -14,7 +14,7 @@ from huggingface_hub import get_token
 from torch import nn
 from torch.optim.lr_scheduler import LRScheduler
 
-from cr_train import Trainer
+from cr_train import Trainer, cleanup_distributed, is_primary, setup_distributed_from_env
 from cr_train.data import DATASET_ID, build_dataloader
 from cr_train.data.dataset import prepare_split
 from cr_train.data.runtime import ensure_split_cache
@@ -101,11 +101,13 @@ def seed_everything(seed: int) -> None:
 def print_hf_auth_status() -> None:
     # 데이터셋은 Hugging Face에서 오므로 토큰이 잡혀 있는지만 가볍게 알려 준다.
     # 인증 자체를 여기서 처리하지는 않고, 상태만 보여 준다.
+    if not is_primary():
+        return
     print(f"HF auth: {'configured' if get_token() else 'missing'}")
 
 
 def resolve_device() -> torch.device:
-    return torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    return setup_distributed_from_env()
 
 
 def build_model() -> nn.Module:
@@ -183,10 +185,11 @@ def build_trainer(
     # main.py와 그 소비자들이 같은 Trainer 구성을 공유하도록 공용 생성 helper로 둔다.
     output_dir = Path(output_dir)
     seed_everything(seed)
+    device = resolve_device()
     print_hf_auth_status()
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    model = build_model().to(resolve_device())
+    model = build_model().to(device)
     optimizer = build_optimizer(model)
     scheduler = build_scheduler(optimizer)
     return Trainer(
@@ -572,6 +575,8 @@ def _save_metric_plot(history: Sequence[Mapping[str, int | float]], *, path: Pat
 
 def save_history_plot(history: list[dict[str, int | float]], path: Path) -> None:
     # metric마다 독립 PNG를 남겨 두면 학습이 길어져도 필요한 지표만 바로 열어 보기 쉽다.
+    if not is_primary():
+        return
     if not history:
         return
 
@@ -1041,6 +1046,8 @@ def maybe_save_epoch_examples(
     example_config: ExampleSaveConfig,
     saved_epochs: set[int],
 ) -> dict[str, list[Path]]:
+    if not is_primary():
+        return {}
     if epoch in saved_epochs or example_config.num_examples <= 0 or not example_config.splits:
         return {}
 
@@ -1083,6 +1090,8 @@ def maybe_update_best_state(
         mode=selector.mode,
     ):
         return best_state, False
+    if not is_primary():
+        return BestState(epoch=epoch, score=score), False
 
     checkpoint_path = trainer.save_checkpoint(best_checkpoint_path(output_dir))
     updated_best_state = save_best_state(
@@ -1096,6 +1105,8 @@ def maybe_update_best_state(
 
 
 def maybe_save_epoch_checkpoint(trainer: Trainer, *, save_every_n_epochs: int) -> Path | None:
+    if not is_primary():
+        return None
     if save_every_n_epochs <= 0:
         return None
     if trainer.current_epoch <= 0 or trainer.current_epoch % save_every_n_epochs != 0:
@@ -1280,62 +1291,65 @@ def main(
     # main은 "모델/옵티마이저 조립 -> Trainer 실행 -> 결과물 저장"만 담당한다.
     # Trainer가 이미 해 주는 일은 최대한 그대로 맡기고, 여기서는 프로젝트 전용 후처리만 남긴다.
     # Trainer 생성은 build_trainer()로 모으고, main은 실행 순서와 산출물 정책만 관리한다.
-    output_dir, resume = validate_main_args(
-        output_dir=output_dir,
-        resume=resume,
-        example_mode=example_mode,
-        save_every_n_epochs=save_every_n_epochs,
-    )
-    example_config = build_example_save_config(
-        train_max_samples=train_max_samples,
-        val_max_samples=val_max_samples,
-        test_max_samples=test_max_samples,
-        num_examples=num_examples,
-        example_splits=example_splits,
-    )
+    try:
+        output_dir, resume = validate_main_args(
+            output_dir=output_dir,
+            resume=resume,
+            example_mode=example_mode,
+            save_every_n_epochs=save_every_n_epochs,
+        )
+        example_config = build_example_save_config(
+            train_max_samples=train_max_samples,
+            val_max_samples=val_max_samples,
+            test_max_samples=test_max_samples,
+            num_examples=num_examples,
+            example_splits=example_splits,
+        )
 
-    trainer = build_trainer(
-        batch_size=batch_size,
-        accum_steps=accum_steps,
-        seed=seed,
-        max_epochs=max_epochs,
-        train_max_samples=train_max_samples,
-        val_max_samples=val_max_samples,
-        test_max_samples=test_max_samples,
-        output_dir=output_dir,
-        cache_dir=cache_dir,
-        num_workers=num_workers,
-        multiprocessing_context=multiprocessing_context,
-        scheduler_timing=scheduler_timing,
-        train_crop_size=train_crop_size,
-        train_random_flip=train_random_flip,
-        train_random_rot90=train_random_rot90,
-    )
-    best_selector = build_best_epoch_selector()
-    best_state = load_training_state(
-        trainer,
-        output_dir=output_dir,
-        resume=resume,
-        selector=best_selector,
-    )
-    history, saved_example_epochs = run_training_loop(
-        trainer,
-        output_dir=output_dir,
-        best_state=best_state,
-        best_selector=best_selector,
-        example_mode=example_mode,
-        example_config=example_config,
-        save_every_n_epochs=save_every_n_epochs,
-    )
-    finalize_after_training(
-        trainer,
-        history,
-        output_dir=output_dir,
-        run_test=run_test,
-        example_mode=example_mode,
-        example_config=example_config,
-        saved_example_epochs=saved_example_epochs,
-    )
+        trainer = build_trainer(
+            batch_size=batch_size,
+            accum_steps=accum_steps,
+            seed=seed,
+            max_epochs=max_epochs,
+            train_max_samples=train_max_samples,
+            val_max_samples=val_max_samples,
+            test_max_samples=test_max_samples,
+            output_dir=output_dir,
+            cache_dir=cache_dir,
+            num_workers=num_workers,
+            multiprocessing_context=multiprocessing_context,
+            scheduler_timing=scheduler_timing,
+            train_crop_size=train_crop_size,
+            train_random_flip=train_random_flip,
+            train_random_rot90=train_random_rot90,
+        )
+        best_selector = build_best_epoch_selector()
+        best_state = load_training_state(
+            trainer,
+            output_dir=output_dir,
+            resume=resume,
+            selector=best_selector,
+        )
+        history, saved_example_epochs = run_training_loop(
+            trainer,
+            output_dir=output_dir,
+            best_state=best_state,
+            best_selector=best_selector,
+            example_mode=example_mode,
+            example_config=example_config,
+            save_every_n_epochs=save_every_n_epochs,
+        )
+        finalize_after_training(
+            trainer,
+            history,
+            output_dir=output_dir,
+            run_test=run_test,
+            example_mode=example_mode,
+            example_config=example_config,
+            saved_example_epochs=saved_example_epochs,
+        )
+    finally:
+        cleanup_distributed()
 
 
 if __name__ == "__main__":

@@ -25,6 +25,15 @@ cp tmp_main_base.py tmp_main.py
 uv run python tmp_main.py
 ```
 
+multi-GPU 서버에서는 저장소 루트의 스크립트가 보이는 GPU 개수를 자동으로 잡아
+`torchrun` 또는 단일 프로세스 실행을 선택합니다.
+
+```bash
+./train.sh
+NPROC_PER_NODE=2 ./train.sh
+TRAIN_TARGET=other_runner.py ./train.sh
+```
+
 - `tmp_main_base.py` 는 저장소에 남는 템플릿 파일입니다
 - `tmp_main.py` 는 각자 수정해서 쓰는 로컬 파일이고 `.gitignore` 에 들어 있습니다
 - `tmp_main.py` 에서는 `build_model()`, `build_optimizer()` 를 구현하고 필요하면 `build_loss()`, `build_metrics()` 도 덮어쓰면 됩니다
