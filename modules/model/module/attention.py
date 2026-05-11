@@ -1,8 +1,12 @@
 # -*- coding: utf-8 -*-
 
+import numbers
+
 import torch
 import torch.nn.functional as F
 import torch.nn as nn
+from torch.nn import init
+from torch.nn.parameter import Parameter
 
 
 def _sdpa(query, key, value, *, dropout_p=0.0, scale=None):
@@ -17,12 +21,42 @@ def _sdpa(query, key, value, *, dropout_p=0.0, scale=None):
     )
 
 
-class _AmpRMSNorm(nn.RMSNorm):
+class _AmpRMSNorm(nn.Module):
+    __constants__ = ["normalized_shape", "eps", "elementwise_affine"]
+
+    def __init__(
+        self,
+        normalized_shape,
+        eps=None,
+        elementwise_affine=True,
+        device=None,
+        dtype=None,
+    ):
+        factory_kwargs = {"device": device, "dtype": dtype}
+        super(_AmpRMSNorm, self).__init__()
+        if isinstance(normalized_shape, numbers.Integral):
+            normalized_shape = (normalized_shape,)
+        self.normalized_shape = tuple(normalized_shape)
+        self.eps = eps
+        self.elementwise_affine = elementwise_affine
+        if self.elementwise_affine:
+            self.weight = Parameter(torch.empty(self.normalized_shape, **factory_kwargs))
+        else:
+            self.register_parameter("weight", None)
+        self.reset_parameters()
+
+    def reset_parameters(self):
+        if self.elementwise_affine:
+            init.ones_(self.weight)
+
     def forward(self, x):
         weight = self.weight
         if weight is not None and weight.dtype != x.dtype:
             weight = weight.to(dtype=x.dtype)
         return F.rms_norm(x, self.normalized_shape, weight, self.eps)
+
+    def extra_repr(self):
+        return "{normalized_shape}, eps={eps}, elementwise_affine={elementwise_affine}".format(**self.__dict__)
 
 
 class MultiHeadAttention(nn.Module):
