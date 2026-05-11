@@ -70,7 +70,7 @@ class ResizeConvUp(nn.Module):
         return self.refine(x)
 
 
-class CommonGate(nn.Module):
+class _CrossAttentionGateExpert(nn.Module):
     def __init__(self, dim: int, heads: int = 4):
         super().__init__()
         if dim % heads != 0:
@@ -80,19 +80,6 @@ class CommonGate(nn.Module):
         self.target_norm = _AmpRMSNorm(dim)
         self.other_norm = _AmpRMSNorm(dim)
         self.cross_attn = MultiHeadAttention(dim, num_heads=heads)
-        self.gate_head = nn.Sequential(
-            nn.Conv2d(
-                dim,
-                dim,
-                kernel_size=3,
-                padding=1,
-                padding_mode="replicate",
-            ),
-            nn.GELU(),
-            nn.Conv2d(dim, dim, kernel_size=1),
-        )
-        nn.init.zeros_(self.gate_head[-1].weight)
-        nn.init.zeros_(self.gate_head[-1].bias)
 
     @staticmethod
     def _to_tokens(feature: torch.Tensor) -> torch.Tensor:
@@ -123,10 +110,47 @@ class CommonGate(nn.Module):
         height, width = target_feat.shape[-2:]
         target_tokens = self.target_norm(self._to_tokens(target_feat))
         other_tokens = self.other_norm(self._to_tokens(other_feat))
-        context_tokens = self.cross_attn(target_tokens, other_tokens)
-        target = self._to_feature(target_tokens, height, width)
-        context = self._to_feature(context_tokens, height, width)
-        return self.gate_head(torch.abs(target - context))
+        gate_tokens = self.cross_attn(target_tokens, other_tokens)
+        return self._to_feature(gate_tokens, height, width)
+
+
+class CommonGate(nn.Module):
+    def __init__(self, dim: int, heads: int = 4):
+        super().__init__()
+        if dim % heads != 0:
+            raise ValueError("dim must be divisible by heads")
+        self.dim = dim
+        self.heads = heads
+        self.num_experts = 4
+        self.experts = nn.ModuleList(
+            [
+                _CrossAttentionGateExpert(dim, heads=heads)
+                for _ in range(self.num_experts)
+            ]
+        )
+        self.router = nn.Sequential(
+            nn.Conv2d(dim, dim, kernel_size=1),
+            nn.GELU(),
+            nn.Conv2d(dim, self.num_experts, kernel_size=1),
+        )
+        nn.init.zeros_(self.router[-1].weight)
+        nn.init.zeros_(self.router[-1].bias)
+
+    def forward(
+        self,
+        target_feat: torch.Tensor,
+        other_feat: torch.Tensor,
+    ) -> torch.Tensor:
+        router_logits = self.router(target_feat)
+        router_weights = torch.softmax(router_logits.float(), dim=1).to(
+            dtype=router_logits.dtype
+        )
+
+        expert_logits = torch.stack(
+            [expert(target_feat, other_feat) for expert in self.experts],
+            dim=1,
+        )
+        return (expert_logits * router_weights.unsqueeze(2)).sum(dim=1)
 
 
 class Encoder(nn.Module):
