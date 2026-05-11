@@ -19,7 +19,6 @@ class FDT_CRNet_Direct(nn.Module):
         num_heads=4,
         alpha=0.1,
         init_type="kaiming-uniform",
-        gpu_ids=[],
         ca=DefaultConAttn,
         ca_kwargs=None,
         return_decomposition=False,
@@ -38,12 +37,11 @@ class FDT_CRNet_Direct(nn.Module):
             alpha=alpha,
             num_layers=cr_layers,
             feature_sizes=dim,
-            gpu_ids=[],
             ca=ca,
             ca_kwargs=ca_kwargs,
             mode="direct",
         )
-        self.crnet = init_net(crnet, init_type=init_type, gpu_ids=gpu_ids)
+        self.crnet = init_net(crnet, init_type=init_type)
 
     def forward(self, sar: torch.Tensor, cloudy: torch.Tensor):
         fdt_feature, sar_com, cld_com, sar_comp, cld_comp = self.fdt(sar, cloudy)
@@ -65,7 +63,6 @@ class FDT_CRNet_Side(nn.Module):
         num_heads=4,
         alpha=0.1,
         init_type="kaiming-uniform",
-        gpu_ids=[],
         ca=DefaultConAttn,
         ca_kwargs=None,
         side_mode="residual",
@@ -86,15 +83,14 @@ class FDT_CRNet_Side(nn.Module):
             alpha=alpha,
             num_layers=cr_layers,
             feature_sizes=dim,
-            gpu_ids=[],
             ca=ca,
             ca_kwargs=ca_kwargs,
             mode="side",
             side_mode=side_mode,
             num_heads=num_heads,
         )
-        self.input = init_net(self.input, init_type=init_type, gpu_ids=gpu_ids)
-        self.crnet = init_net(crnet, init_type=init_type, gpu_ids=gpu_ids)
+        self.input = init_net(self.input, init_type=init_type)
+        self.crnet = init_net(crnet, init_type=init_type)
 
     def forward(self, sar: torch.Tensor, cloudy: torch.Tensor):
         main_feature = self.input(sar, cloudy)
