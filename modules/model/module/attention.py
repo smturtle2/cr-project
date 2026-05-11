@@ -17,6 +17,17 @@ def _sdpa(query, key, value, *, dropout_p=0.0, scale=None):
     )
 
 
+class _AmpRMSNorm(nn.Module):
+    def __init__(self, dim):
+        super(_AmpRMSNorm, self).__init__()
+        self.normalized_shape = (dim,)
+        self.weight = nn.Parameter(torch.ones(dim))
+
+    def forward(self, x):
+        weight = self.weight.to(dtype=x.dtype) if self.weight.dtype != x.dtype else self.weight
+        return F.rms_norm(x, self.normalized_shape, weight)
+
+
 class MultiHeadAttention(nn.Module):
     def __init__(self, dim, num_heads=4):
         super(MultiHeadAttention, self).__init__()
@@ -59,9 +70,9 @@ class MultiHeadAttention(nn.Module):
 class TransformerLayer(nn.Module):
     def __init__(self, dim, num_heads=4, mlp_ratio=4):
         super(TransformerLayer, self).__init__()
-        self.norm1 = nn.RMSNorm(dim)
+        self.norm1 = _AmpRMSNorm(dim)
         self.attn = MultiHeadAttention(dim, num_heads=num_heads)
-        self.norm2 = nn.RMSNorm(dim)
+        self.norm2 = _AmpRMSNorm(dim)
         hidden_dim = dim * mlp_ratio
         self.mlp = nn.Sequential(
             nn.Linear(dim, hidden_dim),
