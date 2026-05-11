@@ -5,6 +5,18 @@ import torch.nn.functional as F
 import torch.nn as nn
 
 
+def _sdpa(query, key, value, *, dropout_p=0.0, scale=None):
+    kwargs = {"dropout_p": dropout_p}
+    if scale is not None:
+        kwargs["scale"] = scale
+    return F.scaled_dot_product_attention(
+        query.contiguous(),
+        key.contiguous(),
+        value.contiguous(),
+        **kwargs,
+    )
+
+
 class MultiHeadAttention(nn.Module):
     def __init__(self, dim, num_heads=4):
         super(MultiHeadAttention, self).__init__()
@@ -33,12 +45,7 @@ class MultiHeadAttention(nn.Module):
         k = self._reshape_heads(self.k_proj(tgt))
         v = self._reshape_heads(self.v_proj(tgt))
 
-        out = F.scaled_dot_product_attention(
-            q.contiguous(),
-            k.contiguous(),
-            v.contiguous(),
-            dropout_p=0.0,
-        )
+        out = _sdpa(q, k, v)
 
         if is_self_attention:
             out = out.float()

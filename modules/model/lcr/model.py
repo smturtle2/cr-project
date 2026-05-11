@@ -4,6 +4,8 @@ import torch
 from torch import nn
 from torch.nn import functional as F
 
+from ..module.attention import _sdpa
+
 
 def _reshape_spatial_heads(x: torch.Tensor, heads: int) -> torch.Tensor:
     batch, channels, height, width = x.shape
@@ -49,15 +51,7 @@ class _AttnCore(nn.Module):
         xsa_self_value: torch.Tensor | None = None,
     ) -> torch.Tensor:
         output_dtype = query.dtype
-        query = query.contiguous()
-        key = key.contiguous()
-        value = value.contiguous()
-        out = F.scaled_dot_product_attention(
-            query,
-            key,
-            value,
-            dropout_p=0.0,
-        ).to(dtype=output_dtype)
+        out = _sdpa(query, key, value).to(dtype=output_dtype)
 
         if use_xsa:
             if xsa_self_value is None:

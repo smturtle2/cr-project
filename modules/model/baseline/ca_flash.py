@@ -12,6 +12,8 @@ from torch import nn
 from torch.nn.attention import SDPBackend, sdpa_kernel
 from torch.nn import functional as F
 
+from ..module.attention import _sdpa
+
 
 class ConAttn(nn.Module):
     def __init__(
@@ -136,8 +138,8 @@ class ConAttn(nn.Module):
         weighted_v_attn = (weight.to(attn_dtype) * v_attn).contiguous()
 
         with self._attention_context(q):
-            y = F.scaled_dot_product_attention(q, k, v_attn, dropout_p=0.0)
-            yw = F.scaled_dot_product_attention(q, k, weighted_v_attn, dropout_p=0.0)
+            y = _sdpa(q, k, v_attn)
+            yw = _sdpa(q, k, weighted_v_attn)
 
         y = y.to(v.dtype)
         yw = yw.to(v.dtype)
