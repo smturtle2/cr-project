@@ -25,7 +25,7 @@ class ConAttn(nn.Module):
         rate=1,
         softmax_scale=1.0,
         num_heads=4,
-        flash_dtype=None,
+        flash_dtype=torch.bfloat16,
         lambda_init=1e-3,
     ):
         super().__init__()
@@ -39,8 +39,8 @@ class ConAttn(nn.Module):
             raise ValueError("input_channels must be divisible by rate.")
         if num_heads <= 0:
             raise ValueError("num_heads must be positive.")
-        if flash_dtype is not None and flash_dtype not in (torch.float16, torch.bfloat16):
-            raise ValueError("flash_dtype must be None, torch.float16, or torch.bfloat16.")
+        if flash_dtype != torch.bfloat16:
+            raise ValueError("flash_dtype must be torch.bfloat16.")
 
         query_channels = input_channels // rate
         hidden_channels = input_channels // (4 * rate)
