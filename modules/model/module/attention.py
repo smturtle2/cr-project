@@ -17,15 +17,12 @@ def _sdpa(query, key, value, *, dropout_p=0.0, scale=None):
     )
 
 
-class _AmpRMSNorm(nn.Module):
-    def __init__(self, dim):
-        super(_AmpRMSNorm, self).__init__()
-        self.normalized_shape = (dim,)
-        self.weight = nn.Parameter(torch.ones(dim))
-
+class _AmpRMSNorm(nn.RMSNorm):
     def forward(self, x):
-        weight = self.weight.to(dtype=x.dtype) if self.weight.dtype != x.dtype else self.weight
-        return F.rms_norm(x, self.normalized_shape, weight)
+        weight = self.weight
+        if weight is not None and weight.dtype != x.dtype:
+            weight = weight.to(dtype=x.dtype)
+        return F.rms_norm(x, self.normalized_shape, weight, self.eps)
 
 
 class MultiHeadAttention(nn.Module):
