@@ -56,6 +56,7 @@ LossFn = Callable[[torch.Tensor, Batch], torch.Tensor]
 MetricFn = Callable[[torch.Tensor, Batch], torch.Tensor]
 StepRecord = Mapping[str, Any]
 SchedulerTiming = Literal["after_validation", "before_optimizer_step", "after_optimizer_step"]
+MixedPrecision = Literal["off", "fp16", "bf16"]
 
 
 @dataclass(slots=True, frozen=True)
@@ -181,6 +182,7 @@ def build_trainer(
     train_crop_size: int | None = 128,
     train_random_flip: bool = True,
     train_random_rot90: bool = True,
+    mixed_precision: MixedPrecision = "bf16",
 ) -> Trainer:
     # main.py와 그 소비자들이 같은 Trainer 구성을 공유하도록 공용 생성 helper로 둔다.
     output_dir = Path(output_dir)
@@ -214,6 +216,7 @@ def build_trainer(
         train_crop_size=train_crop_size,
         train_random_flip=train_random_flip,
         train_random_rot90=train_random_rot90,
+        mixed_precision=mixed_precision,
     )
 
 
@@ -1282,6 +1285,7 @@ def main(
     train_crop_size: int | None = 128,
     train_random_flip: bool = True,
     train_random_rot90: bool = True,
+    mixed_precision: MixedPrecision = "bf16",
     save_every_n_epochs: int = 0,
     run_test: bool = True,
     num_examples: int = 4,
@@ -1322,6 +1326,7 @@ def main(
             train_crop_size=train_crop_size,
             train_random_flip=train_random_flip,
             train_random_rot90=train_random_rot90,
+            mixed_precision=mixed_precision,
         )
         best_selector = build_best_epoch_selector()
         best_state = load_training_state(

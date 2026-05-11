@@ -264,7 +264,7 @@ class LCRModelTest(unittest.TestCase):
         self.assertTrue(torch.allclose(enabled, torch.zeros_like(enabled), atol=1e-6))
 
     @unittest.skipUnless(torch.cuda.is_available(), "CUDA is required for flash attention smoke test")
-    def test_attn_core_dense_cuda_fp32_uses_flash_compatible_bf16_inputs(self) -> None:
+    def test_attn_core_dense_cuda_uses_flash_under_bf16_amp(self) -> None:
         from torch.nn.attention import SDPBackend, sdpa_kernel
 
         core = _AttnCore().cuda()
@@ -272,7 +272,7 @@ class LCRModelTest(unittest.TestCase):
         key = torch.randn(1, 6, 128, 40, device="cuda", dtype=torch.float32)
         value = torch.randn(1, 6, 128, 40, device="cuda", dtype=torch.float32)
 
-        with sdpa_kernel(SDPBackend.FLASH_ATTENTION):
+        with torch.amp.autocast("cuda", dtype=torch.bfloat16), sdpa_kernel(SDPBackend.FLASH_ATTENTION):
             out = core(query, key, value)
         torch.cuda.synchronize()
 
@@ -317,34 +317,34 @@ class LCRModelTest(unittest.TestCase):
         self.assertTrue(torch.allclose(out, torch.zeros_like(out), atol=1e-6))
 
     @unittest.skipUnless(torch.cuda.is_available(), "CUDA is required for flash attention smoke test")
-    def test_attn_self_cuda_fp32_uses_flash_compatible_bf16_inputs(self) -> None:
+    def test_attn_self_cuda_uses_flash_under_bf16_amp(self) -> None:
         from torch.nn.attention import SDPBackend, sdpa_kernel
 
         attn = Attn(dim=240, heads=6, use_xsa=True).cuda().eval()
         x = torch.randn(1, 240, 16, 16, device="cuda", dtype=torch.float32)
 
-        with torch.no_grad(), sdpa_kernel(SDPBackend.FLASH_ATTENTION):
+        with torch.no_grad(), torch.amp.autocast("cuda", dtype=torch.bfloat16), sdpa_kernel(SDPBackend.FLASH_ATTENTION):
             out = attn(x)
         torch.cuda.synchronize()
 
         self.assertEqual(out.shape, x.shape)
-        self.assertEqual(out.dtype, torch.float32)
+        self.assertEqual(out.dtype, torch.bfloat16)
         self.assertTrue(bool(torch.isfinite(out).all().item()))
 
     @unittest.skipUnless(torch.cuda.is_available(), "CUDA is required for flash attention smoke test")
-    def test_attn_cross_cuda_fp32_uses_flash_compatible_bf16_inputs(self) -> None:
+    def test_attn_cross_cuda_uses_flash_under_bf16_amp(self) -> None:
         from torch.nn.attention import SDPBackend, sdpa_kernel
 
         attn = Attn(dim=240, heads=6).cuda().eval()
         query = torch.randn(1, 240, 16, 16, device="cuda", dtype=torch.float32)
         context = torch.randn(1, 240, 16, 16, device="cuda", dtype=torch.float32)
 
-        with torch.no_grad(), sdpa_kernel(SDPBackend.FLASH_ATTENTION):
+        with torch.no_grad(), torch.amp.autocast("cuda", dtype=torch.bfloat16), sdpa_kernel(SDPBackend.FLASH_ATTENTION):
             out = attn(query, context)
         torch.cuda.synchronize()
 
         self.assertEqual(out.shape, query.shape)
-        self.assertEqual(out.dtype, torch.float32)
+        self.assertEqual(out.dtype, torch.bfloat16)
         self.assertTrue(bool(torch.isfinite(out).all().item()))
 
     def test_attn_cross_uses_full_context(self) -> None:
@@ -493,7 +493,7 @@ class LCRModelTest(unittest.TestCase):
         sar = torch.randn(1, 2, 32, 32, device="cuda", dtype=torch.float32)
         cloudy = torch.randn(1, 13, 32, 32, device="cuda", dtype=torch.float32)
 
-        with torch.no_grad(), sdpa_kernel(SDPBackend.FLASH_ATTENTION):
+        with torch.no_grad(), torch.amp.autocast("cuda", dtype=torch.bfloat16), sdpa_kernel(SDPBackend.FLASH_ATTENTION):
             prediction = model(sar, cloudy)
         torch.cuda.synchronize()
 

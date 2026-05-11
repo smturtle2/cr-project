@@ -38,6 +38,7 @@ TRAIN_TARGET=other_runner.py ./train.sh
 - `tmp_main.py` 는 각자 수정해서 쓰는 로컬 파일이고 `.gitignore` 에 들어 있습니다
 - `tmp_main.py` 에서는 `build_model()`, `build_optimizer()` 를 구현하고 필요하면 `build_loss()`, `build_metrics()` 도 덮어쓰면 됩니다
 - 학습 설정은 CLI parse 대신 `main(...)` 호출 인자로 직접 넘깁니다
+- 공용 `main.py` 기본 precision은 `mixed_precision="bf16"` AMP이며, 필요하면 `mixed_precision="off"` 또는 `"fp16"`으로 바꿉니다
 - 실행 자체는 공용 `main.py` 가 담당하므로 학습 루프와 결과 저장 흐름은 동일하게 유지됩니다
 - 노트북/임시 러너에서도 `torch`가 필요하면 먼저 `uv sync --extra torch26` 또는 `uv sync --extra latest`로 환경을 맞춥니다
 - 최신 `cr-train` 기준으로 데이터 로딩은 항상 block-cache streaming 경로를 사용합니다

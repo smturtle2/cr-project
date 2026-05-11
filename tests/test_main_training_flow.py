@@ -65,6 +65,7 @@ class FakeTrainer:
         train_crop_size,
         train_random_flip,
         train_random_rot90,
+        mixed_precision,
     ) -> None:
         del loss, metrics
         self.model = model
@@ -84,6 +85,7 @@ class FakeTrainer:
         self.train_crop_size = train_crop_size
         self.train_random_flip = train_random_flip
         self.train_random_rot90 = train_random_rot90
+        self.mixed_precision = mixed_precision
         self.num_workers = 0 if num_workers == "auto" else int(num_workers)
         self.cache_root = Path(cache_dir) if cache_dir is not None else self.output_dir / "cache"
         self.include_metadata = True
@@ -405,6 +407,7 @@ class MainTrainingFlowTest(unittest.TestCase):
         self.assertEqual(trainer.accum_steps, 4)
         self.assertEqual(trainer.scheduler_timing, "after_optimizer_step")
         self.assertEqual(trainer.scheduler_monitor, "val.metrics.mae")
+        self.assertEqual(trainer.mixed_precision, "bf16")
 
     def test_main_preserves_sample_limits(self) -> None:
         records = [

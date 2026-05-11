@@ -3,7 +3,6 @@
 import torch
 import torch.nn.functional as F
 import torch.nn as nn
-from torch.nn.attention import SDPBackend, sdpa_kernel
 
 
 class MultiHeadAttention(nn.Module):
@@ -34,15 +33,16 @@ class MultiHeadAttention(nn.Module):
         k = self._reshape_heads(self.k_proj(tgt))
         v = self._reshape_heads(self.v_proj(tgt))
 
-        q_attn = q.to(torch.float16)
-        k_attn = k.to(torch.float16)
-        v_attn = v.to(torch.float16)
-        with sdpa_kernel(SDPBackend.FLASH_ATTENTION):
-            out = F.scaled_dot_product_attention(q_attn, k_attn, v_attn, dropout_p=0.0)
+        out = F.scaled_dot_product_attention(
+            q.contiguous(),
+            k.contiguous(),
+            v.contiguous(),
+            dropout_p=0.0,
+        )
 
         if is_self_attention:
             out = out.float()
-            v_norm = F.normalize(v_attn.float(), dim=-1, eps=1e-6)
+            v_norm = F.normalize(v.float(), dim=-1, eps=1e-6)
             out = out - (out * v_norm).sum(dim=-1, keepdim=True) * v_norm
 
         out = self._restore_heads(out.to(query.dtype))

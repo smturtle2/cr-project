@@ -49,14 +49,9 @@ class _AttnCore(nn.Module):
         xsa_self_value: torch.Tensor | None = None,
     ) -> torch.Tensor:
         output_dtype = query.dtype
-        if query.is_cuda and query.dtype == torch.float32:
-            query = query.to(torch.bfloat16).contiguous()
-            key = key.to(torch.bfloat16).contiguous()
-            value = value.to(torch.bfloat16).contiguous()
-        elif query.is_cuda:
-            query = query.contiguous()
-            key = key.contiguous()
-            value = value.contiguous()
+        query = query.contiguous()
+        key = key.contiguous()
+        value = value.contiguous()
         out = F.scaled_dot_product_attention(
             query,
             key,

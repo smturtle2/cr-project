@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import math
 from collections import OrderedDict
+from contextlib import nullcontext
 
 import torch
 from torch import nn
@@ -22,7 +23,7 @@ class ConAttn(nn.Module):
         rate=1,
         softmax_scale=1.0,
         num_heads=4,
-        flash_dtype=torch.float16,
+        flash_dtype=None,
         lambda_init=1e-3,
     ):
         super().__init__()
@@ -36,8 +37,8 @@ class ConAttn(nn.Module):
             raise ValueError("input_channels must be divisible by rate.")
         if num_heads <= 0:
             raise ValueError("num_heads must be positive.")
-        if flash_dtype not in (torch.float16, torch.bfloat16):
-            raise ValueError("flash_dtype must be torch.float16 or torch.bfloat16.")
+        if flash_dtype is not None and flash_dtype not in (torch.float16, torch.bfloat16):
+            raise ValueError("flash_dtype must be None, torch.float16, or torch.bfloat16.")
 
         query_channels = input_channels // rate
         hidden_channels = input_channels // (4 * rate)
@@ -95,9 +96,14 @@ class ConAttn(nn.Module):
         return super().load_state_dict(state_dict, strict=strict, assign=assign)
 
     def _attention_dtype(self, x: torch.Tensor) -> torch.dtype:
-        if x.is_cuda:
+        if x.is_cuda and self.flash_dtype is not None:
             return self.flash_dtype
         return x.dtype
+
+    def _attention_context(self, x: torch.Tensor):
+        if x.is_cuda and x.dtype in (torch.float16, torch.bfloat16):
+            return sdpa_kernel(SDPBackend.FLASH_ATTENTION)
+        return nullcontext()
 
     def forward(self, x):
         """Apply output-domain background contrast attention."""
@@ -129,7 +135,7 @@ class ConAttn(nn.Module):
         v_attn = v.to(attn_dtype)
         weighted_v_attn = (weight.to(attn_dtype) * v_attn).contiguous()
 
-        with sdpa_kernel(SDPBackend.FLASH_ATTENTION):
+        with self._attention_context(q):
             y = F.scaled_dot_product_attention(q, k, v_attn, dropout_p=0.0)
             yw = F.scaled_dot_product_attention(q, k, weighted_v_attn, dropout_p=0.0)
 
