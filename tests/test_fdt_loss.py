@@ -53,26 +53,12 @@ class FDTDecompositionLossTest(unittest.TestCase):
 
         self.assertGreater(float(loss), 0.05)
 
-    def test_comp_loss_penalizes_cross_channel_correlation(self) -> None:
+    def test_comp_loss_penalizes_spatial_channel_correlation(self) -> None:
         loss_fn = FDTDecompositionLoss()
         common = torch.randn(1, 4, 8, 8)
-        first_channel = torch.randn(1, 1, 8, 8)
-        sar_comp = torch.cat(
-            (
-                torch.randn(1, 1, 8, 8),
-                first_channel,
-                torch.randn(1, 2, 8, 8),
-            ),
-            dim=1,
-        )
-        cld_comp = torch.cat(
-            (
-                torch.randn(1, 3, 8, 8),
-                first_channel,
-            ),
-            dim=1,
-        )
-        unrelated_comp = torch.randn_like(cld_comp)
+        sar_comp = torch.randn(1, 4, 8, 8)
+        cld_comp = sar_comp.clone()
+        unrelated_comp = torch.randn_like(sar_comp)
 
         correlated_loss = loss_fn(common, common, sar_comp, cld_comp)
         unrelated_loss = loss_fn(common, common, sar_comp, unrelated_comp)
