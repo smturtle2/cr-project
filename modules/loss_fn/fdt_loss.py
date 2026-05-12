@@ -14,16 +14,41 @@ class FDTDecompositionLoss(nn.Module):
         self.eps = eps
 
     @staticmethod
-    def _flatten_spatial(feature: torch.Tensor) -> torch.Tensor:
-        return feature.flatten(2).float()
+    def _tokens(feature: torch.Tensor) -> torch.Tensor:
+        return feature.flatten(2).transpose(1, 2).float()
 
-    def _spatial_channel_similarity(
+    def _joint_pc1_maps(
+        self,
+        first: torch.Tensor,
+        second: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        batch_size, _, height, width = first.shape
+        num_positions = height * width
+        with torch.autocast(device_type=first.device.type, enabled=False):
+            first_tokens = self._tokens(first)
+            second_tokens = self._tokens(second)
+            merged = torch.cat((first_tokens, second_tokens), dim=1)
+            centered = merged - merged.mean(dim=1, keepdim=True)
+
+        with torch.no_grad(), torch.autocast(device_type=first.device.type, enabled=False):
+            basis_source = centered.detach().float()
+            covariance = basis_source.transpose(1, 2) @ basis_source
+            _, eigenvectors = torch.linalg.eigh(covariance)
+            pc1 = eigenvectors[:, :, -1]
+
+        with torch.autocast(device_type=first.device.type, enabled=False):
+            projected = torch.bmm(centered.float(), pc1.unsqueeze(-1)).squeeze(-1)
+        first_map = projected[:, :num_positions].reshape(batch_size, height, width)
+        second_map = projected[:, num_positions:].reshape(batch_size, height, width)
+        return first_map, second_map
+
+    def _map_ncc(
         self,
         first: torch.Tensor,
         second: torch.Tensor,
     ) -> torch.Tensor:
-        first = self._flatten_spatial(first)
-        second = self._flatten_spatial(second)
+        first = first.flatten(1)
+        second = second.flatten(1)
         first = first - first.mean(dim=1, keepdim=True)
         second = second - second.mean(dim=1, keepdim=True)
 
@@ -38,16 +63,16 @@ class FDTDecompositionLoss(nn.Module):
         sar_com: torch.Tensor,
         cld_com: torch.Tensor,
     ) -> torch.Tensor:
-        similarity = self._spatial_channel_similarity(sar_com, cld_com)
-        return 1.0 - similarity.mean()
+        sar_map, cld_map = self._joint_pc1_maps(sar_com, cld_com)
+        return 1.0 - self._map_ncc(sar_map, cld_map).mean()
 
     def _comp_decorrelation_loss(
         self,
         sar_comp: torch.Tensor,
         cld_comp: torch.Tensor,
     ) -> torch.Tensor:
-        similarity = self._spatial_channel_similarity(sar_comp, cld_comp)
-        return similarity.square().mean()
+        sar_map, cld_map = self._joint_pc1_maps(sar_comp, cld_comp)
+        return self._map_ncc(sar_map, cld_map).square().mean()
 
     def forward(
         self,

@@ -41,6 +41,18 @@ class FDTDecompositionLossTest(unittest.TestCase):
 
         self.assertLess(float(loss), 1e-4)
 
+    def test_common_loss_tracks_dominant_spatial_component(self) -> None:
+        loss_fn = FDTDecompositionLoss()
+        spatial = torch.randn(1, 1, 8, 8)
+        mismatch = torch.randn(1, 1, 8, 8)
+        sar_com = torch.cat((8.0 * spatial, mismatch), dim=1)
+        cld_com = torch.cat((8.0 * spatial, -mismatch), dim=1)
+        zeros = torch.zeros_like(sar_com)
+
+        loss = loss_fn(sar_com, cld_com, zeros, zeros)
+
+        self.assertLess(float(loss), 0.05)
+
     def test_comp_loss_is_computed_per_sample(self) -> None:
         loss_fn = FDTDecompositionLoss()
         common = torch.randn(2, 16, 8, 8)
@@ -53,11 +65,25 @@ class FDTDecompositionLossTest(unittest.TestCase):
 
         self.assertGreater(float(loss), 0.05)
 
-    def test_comp_loss_penalizes_spatial_channel_correlation(self) -> None:
+    def test_comp_loss_penalizes_pc1_spatial_correlation(self) -> None:
         loss_fn = FDTDecompositionLoss()
         common = torch.randn(1, 4, 8, 8)
         sar_comp = torch.randn(1, 4, 8, 8)
         cld_comp = sar_comp.clone()
+        unrelated_comp = torch.randn_like(sar_comp)
+
+        correlated_loss = loss_fn(common, common, sar_comp, cld_comp)
+        unrelated_loss = loss_fn(common, common, sar_comp, unrelated_comp)
+
+        self.assertGreater(float(correlated_loss), float(unrelated_loss))
+
+    def test_comp_loss_penalizes_dominant_spatial_component_correlation(self) -> None:
+        loss_fn = FDTDecompositionLoss()
+        common = torch.randn(1, 2, 8, 8)
+        spatial = torch.randn(1, 1, 8, 8)
+        mismatch = torch.randn(1, 1, 8, 8)
+        sar_comp = torch.cat((8.0 * spatial, mismatch), dim=1)
+        cld_comp = torch.cat((8.0 * spatial, -mismatch), dim=1)
         unrelated_comp = torch.randn_like(sar_comp)
 
         correlated_loss = loss_fn(common, common, sar_comp, cld_comp)
