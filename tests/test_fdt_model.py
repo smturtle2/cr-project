@@ -4,7 +4,6 @@ import torch
 import torch.nn as nn
 
 from modules.model.fdt import FDT, FDT_CRNet_Direct, FDT_CRNet_Side, ResizeConvUp
-from modules.model.module.attention import MultiHeadAttention
 
 
 def test_fdt_imports_and_runs_forward() -> None:
@@ -59,26 +58,96 @@ def test_fdt_encoders_share_architecture_not_weights() -> None:
     assert sar_proj[4].stride == (2, 2)
 
 
-def test_fdt_uses_directional_common_gates() -> None:
+def test_fdt_uses_paired_common_transformer() -> None:
     model = FDT(num_layers=1, num_heads=4).eval()
 
-    assert model.sar_common_gate is not model.cld_common_gate
-    for gate in (model.sar_common_gate, model.cld_common_gate):
-        assert gate.num_experts == 4
-        assert len(gate.experts) == 4
-        assert isinstance(gate.router[-1], nn.Conv2d)
-        assert gate.router[-1].out_channels == 4
-        assert torch.count_nonzero(gate.router[-1].weight).item() == 0
-        assert torch.count_nonzero(gate.router[-1].bias).item() == 0
+    assert not hasattr(model, "sar_common_gate")
+    assert not hasattr(model, "cld_common_gate")
+    assert model.common_extractor.num_layers == model.num_layers
+    assert len(model.common_extractor.blocks) == model.num_layers
 
-        cross_attn_ids = set()
-        for expert in gate.experts:
-            assert isinstance(expert.cross_attn, MultiHeadAttention)
-            cross_attn_ids.add(id(expert.cross_attn))
-            assert not hasattr(expert, "gate_head")
-            assert not hasattr(expert, "query_proj")
-            assert not hasattr(expert, "key_proj")
-        assert len(cross_attn_ids) == 4
+    block = model.common_extractor.blocks[0]
+    assert block.heads == model.num_heads
+    assert block.sar_self_attn is not block.cld_self_attn
+    assert block.sar_cross_attn is not block.cld_cross_attn
+    assert isinstance(block.sar_mlp, nn.Sequential)
+    assert isinstance(block.cld_mlp, nn.Sequential)
+    assert not hasattr(block, "num_experts")
+    assert not hasattr(block, "experts")
+    assert not hasattr(block, "router")
+
+
+def test_common_extractor_returns_modality_specific_features() -> None:
+    torch.manual_seed(0)
+    model = FDT(num_layers=1, num_heads=4).eval()
+    sar_feat = torch.randn(2, model.dim, 8, 8)
+    cld_feat = torch.randn_like(sar_feat)
+
+    with torch.no_grad():
+        sar_com, cld_com = model.common_extractor(sar_feat, cld_feat)
+
+    assert sar_com.shape == sar_feat.shape
+    assert cld_com.shape == cld_feat.shape
+    assert sar_com.dtype == sar_feat.dtype
+    assert cld_com.dtype == cld_feat.dtype
+    assert bool(torch.isfinite(sar_com).all().item())
+    assert bool(torch.isfinite(cld_com).all().item())
+    assert not torch.allclose(sar_com, cld_com)
+
+
+def test_common_block_cross_reads_self_snapshots() -> None:
+    class SelfMarker(nn.Module):
+        def __init__(self, value: float):
+            super().__init__()
+            self.value = value
+
+        def forward(self, x: torch.Tensor) -> torch.Tensor:
+            return torch.full_like(x, self.value)
+
+    class CrossRecorder(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.query = None
+            self.source = None
+
+        def forward(
+            self,
+            query: torch.Tensor,
+            tgt: torch.Tensor | None = None,
+        ) -> torch.Tensor:
+            self.query = query.detach().clone()
+            self.source = tgt.detach().clone()
+            return torch.zeros_like(query)
+
+    class ZeroMLP(nn.Module):
+        def forward(self, x: torch.Tensor) -> torch.Tensor:
+            return torch.zeros_like(x)
+
+    model = FDT(dim=8, num_layers=1, num_heads=4).eval()
+    block = model.common_extractor.blocks[0]
+    block.sar_self_norm = nn.Identity()
+    block.cld_self_norm = nn.Identity()
+    block.sar_cross_query_norm = nn.Identity()
+    block.sar_cross_source_norm = nn.Identity()
+    block.cld_cross_query_norm = nn.Identity()
+    block.cld_cross_source_norm = nn.Identity()
+    block.sar_self_attn = SelfMarker(3.0)
+    block.cld_self_attn = SelfMarker(5.0)
+    block.sar_cross_attn = CrossRecorder()
+    block.cld_cross_attn = CrossRecorder()
+    block.sar_mlp_norm = nn.Identity()
+    block.cld_mlp_norm = nn.Identity()
+    block.sar_mlp = ZeroMLP()
+    block.cld_mlp = ZeroMLP()
+
+    sar_tokens = torch.zeros(1, 2, 8)
+    cld_tokens = torch.zeros_like(sar_tokens)
+    block(sar_tokens, cld_tokens)
+
+    assert torch.allclose(block.sar_cross_attn.query, torch.full_like(sar_tokens, 3.0))
+    assert torch.allclose(block.sar_cross_attn.source, torch.full_like(cld_tokens, 5.0))
+    assert torch.allclose(block.cld_cross_attn.query, torch.full_like(cld_tokens, 5.0))
+    assert torch.allclose(block.cld_cross_attn.source, torch.full_like(sar_tokens, 3.0))
 
 
 def test_fdt_defines_comp_as_high_res_residual() -> None:
