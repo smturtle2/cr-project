@@ -805,7 +805,7 @@ def _save_example_figure(
     split_label: str,
     example_index: int,
     title: str,
-    panels: Sequence[tuple[str, np.ndarray, str | None]],
+    panels: Sequence[tuple[str, np.ndarray, str | None] | tuple[str, np.ndarray, str | None, float, float]],
 ) -> Path:
     import matplotlib.pyplot as plt
 
@@ -820,11 +820,16 @@ def _save_example_figure(
     )
     fig.suptitle(title, fontsize=11)
     flat_axes = np.atleast_1d(axes).flat
-    for ax, (panel_title, image, cmap) in zip(flat_axes, panels):
+    for ax, panel in zip(flat_axes, panels):
+        panel_title, image, cmap = panel[:3]
+        imshow_kwargs = {}
+        if len(panel) == 5:
+            imshow_kwargs["vmin"] = panel[3]
+            imshow_kwargs["vmax"] = panel[4]
         if cmap is None:
-            ax.imshow(image)
+            ax.imshow(image, **imshow_kwargs)
         else:
-            ax.imshow(image, cmap=cmap)
+            ax.imshow(image, cmap=cmap, **imshow_kwargs)
         ax.set_title(panel_title)
         ax.axis("off")
     for ax in flat_axes:

@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 import unittest
+from pathlib import Path
+from tempfile import TemporaryDirectory
+from unittest.mock import patch
 
 import numpy as np
 import torch
 
-from main import normalize_rgb_triplet
+from main import _save_example_figure, normalize_rgb_triplet
 
 
 class MainVisualizationTest(unittest.TestCase):
@@ -38,6 +41,35 @@ class MainVisualizationTest(unittest.TestCase):
         self.assertGreaterEqual(float(prediction_rgb_c.min()), 0.0)
         self.assertLessEqual(float(prediction_rgb_b.max()), 1.0)
         self.assertLessEqual(float(prediction_rgb_c.max()), 1.0)
+
+    def test_example_figure_accepts_fixed_color_scale_panel(self) -> None:
+        captured_kwargs: list[dict] = []
+
+        def record_imshow(self, image, **kwargs):
+            del self, image
+            captured_kwargs.append(kwargs)
+            return None
+
+        panels = (
+            ("RGB", np.zeros((2, 2, 3)), None),
+            ("Corr", np.zeros((2, 2)), "coolwarm", -1.0, 1.0),
+        )
+
+        with TemporaryDirectory() as tmpdir:
+            with patch("matplotlib.axes.Axes.imshow", new=record_imshow):
+                path = _save_example_figure(
+                    output_dir=Path(tmpdir),
+                    split_label="test",
+                    example_index=1,
+                    title="example",
+                    panels=panels,
+                )
+                self.assertTrue(path.exists())
+
+        self.assertEqual(captured_kwargs[0], {})
+        self.assertEqual(captured_kwargs[1]["cmap"], "coolwarm")
+        self.assertEqual(captured_kwargs[1]["vmin"], -1.0)
+        self.assertEqual(captured_kwargs[1]["vmax"], 1.0)
 
 
 if __name__ == "__main__":
