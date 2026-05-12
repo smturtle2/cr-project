@@ -70,16 +70,70 @@ class ResizeConvUp(nn.Module):
         return self.refine(x)
 
 
-class _CrossAttentionGateExpert(nn.Module):
-    def __init__(self, dim: int, heads: int = 4):
+class PairedCommonBlock(nn.Module):
+    def __init__(self, dim: int, heads: int = 4, mlp_ratio: int = 4):
         super().__init__()
         if dim % heads != 0:
             raise ValueError("dim must be divisible by heads")
         self.dim = dim
         self.heads = heads
-        self.target_norm = _AmpRMSNorm(dim)
-        self.other_norm = _AmpRMSNorm(dim)
-        self.cross_attn = MultiHeadAttention(dim, num_heads=heads)
+        self.sar_self_norm = _AmpRMSNorm(dim)
+        self.cld_self_norm = _AmpRMSNorm(dim)
+        self.sar_self_attn = MultiHeadAttention(dim, num_heads=heads)
+        self.cld_self_attn = MultiHeadAttention(dim, num_heads=heads)
+
+        self.sar_cross_query_norm = _AmpRMSNorm(dim)
+        self.sar_cross_source_norm = _AmpRMSNorm(dim)
+        self.cld_cross_query_norm = _AmpRMSNorm(dim)
+        self.cld_cross_source_norm = _AmpRMSNorm(dim)
+        self.sar_cross_attn = MultiHeadAttention(dim, num_heads=heads)
+        self.cld_cross_attn = MultiHeadAttention(dim, num_heads=heads)
+
+        hidden_dim = dim * mlp_ratio
+        self.sar_mlp_norm = _AmpRMSNorm(dim)
+        self.cld_mlp_norm = _AmpRMSNorm(dim)
+        self.sar_mlp = nn.Sequential(
+            nn.Linear(dim, hidden_dim),
+            nn.ReLU(True),
+            nn.Linear(hidden_dim, dim),
+        )
+        self.cld_mlp = nn.Sequential(
+            nn.Linear(dim, hidden_dim),
+            nn.ReLU(True),
+            nn.Linear(hidden_dim, dim),
+        )
+
+    def forward(
+        self,
+        sar_tokens: torch.Tensor,
+        cld_tokens: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        sar_self = sar_tokens + self.sar_self_attn(self.sar_self_norm(sar_tokens))
+        cld_self = cld_tokens + self.cld_self_attn(self.cld_self_norm(cld_tokens))
+
+        sar_cross = sar_self + self.sar_cross_attn(
+            self.sar_cross_query_norm(sar_self),
+            self.sar_cross_source_norm(cld_self),
+        )
+        cld_cross = cld_self + self.cld_cross_attn(
+            self.cld_cross_query_norm(cld_self),
+            self.cld_cross_source_norm(sar_self),
+        )
+
+        sar_out = sar_cross + self.sar_mlp(self.sar_mlp_norm(sar_cross))
+        cld_out = cld_cross + self.cld_mlp(self.cld_mlp_norm(cld_cross))
+        return sar_out, cld_out
+
+
+class PairedCommonTransformer(nn.Module):
+    def __init__(self, dim: int, num_layers: int, heads: int):
+        super().__init__()
+        self.dim = dim
+        self.num_layers = num_layers
+        self.heads = heads
+        self.blocks = nn.ModuleList(
+            [PairedCommonBlock(dim, heads=heads) for _ in range(num_layers)]
+        )
 
     @staticmethod
     def _to_tokens(feature: torch.Tensor) -> torch.Tensor:
@@ -93,64 +147,24 @@ class _CrossAttentionGateExpert(nn.Module):
     ) -> torch.Tensor:
         return (
             tokens.transpose(1, 2)
-            .reshape(
-                tokens.shape[0],
-                tokens.shape[2],
-                height,
-                width,
-            )
+            .reshape(tokens.shape[0], tokens.shape[2], height, width)
             .contiguous()
         )
 
     def forward(
         self,
-        target_feat: torch.Tensor,
-        other_feat: torch.Tensor,
-    ) -> torch.Tensor:
-        height, width = target_feat.shape[-2:]
-        target_tokens = self.target_norm(self._to_tokens(target_feat))
-        other_tokens = self.other_norm(self._to_tokens(other_feat))
-        gate_tokens = self.cross_attn(target_tokens, other_tokens)
-        return self._to_feature(gate_tokens, height, width)
-
-
-class CommonGate(nn.Module):
-    def __init__(self, dim: int, heads: int = 4):
-        super().__init__()
-        if dim % heads != 0:
-            raise ValueError("dim must be divisible by heads")
-        self.dim = dim
-        self.heads = heads
-        self.num_experts = 4
-        self.experts = nn.ModuleList(
-            [
-                _CrossAttentionGateExpert(dim, heads=heads)
-                for _ in range(self.num_experts)
-            ]
+        sar_feat: torch.Tensor,
+        cld_feat: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        height, width = sar_feat.shape[-2:]
+        sar_tokens = self._to_tokens(sar_feat)
+        cld_tokens = self._to_tokens(cld_feat)
+        for block in self.blocks:
+            sar_tokens, cld_tokens = block(sar_tokens, cld_tokens)
+        return (
+            self._to_feature(sar_tokens, height, width),
+            self._to_feature(cld_tokens, height, width),
         )
-        self.router = nn.Sequential(
-            nn.Conv2d(dim, dim, kernel_size=1),
-            nn.GELU(),
-            nn.Conv2d(dim, self.num_experts, kernel_size=1),
-        )
-        nn.init.zeros_(self.router[-1].weight)
-        nn.init.zeros_(self.router[-1].bias)
-
-    def forward(
-        self,
-        target_feat: torch.Tensor,
-        other_feat: torch.Tensor,
-    ) -> torch.Tensor:
-        router_logits = self.router(target_feat)
-        router_weights = torch.softmax(router_logits.float(), dim=1).to(
-            dtype=router_logits.dtype
-        )
-
-        expert_logits = torch.stack(
-            [expert(target_feat, other_feat) for expert in self.experts],
-            dim=1,
-        )
-        return (expert_logits * router_weights.unsqueeze(2)).sum(dim=1)
 
 
 class Encoder(nn.Module):
@@ -245,8 +259,11 @@ class FDT(nn.Module):
         self.sar_encoder = Encoder(sar_channels, dim, num_layers, num_heads)
         self.cld_encoder = Encoder(cloudy_channels, dim, num_layers, num_heads)
 
-        self.sar_common_gate = CommonGate(dim, heads=num_heads)
-        self.cld_common_gate = CommonGate(dim, heads=num_heads)
+        self.common_extractor = PairedCommonTransformer(
+            dim,
+            num_layers=num_layers,
+            heads=num_heads,
+        )
         self.com_fuse = nn.Conv2d(self.up_dim * 2, self.common_dim, kernel_size=1)
         self.up = ResizeConvUp(dim)
 
@@ -254,11 +271,7 @@ class FDT(nn.Module):
         sar_feat_l = self.sar_encoder(sar)
         cld_feat_l = self.cld_encoder(cloudy)
 
-        sar_gate_l = torch.sigmoid(self.sar_common_gate(sar_feat_l, cld_feat_l))
-        cld_gate_l = torch.sigmoid(self.cld_common_gate(cld_feat_l, sar_feat_l))
-
-        sar_com_l = sar_gate_l * sar_feat_l
-        cld_com_l = cld_gate_l * cld_feat_l
+        sar_com_l, cld_com_l = self.common_extractor(sar_feat_l, cld_feat_l)
 
         sar_feat = self.up(sar_feat_l)
         cld_feat = self.up(cld_feat_l)
