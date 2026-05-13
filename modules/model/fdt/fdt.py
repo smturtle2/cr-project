@@ -45,18 +45,13 @@ class ResizeConvUp(nn.Module):
         self.in_channels = in_channels
         self.out_channels = in_channels // 4
         self.blocks = blocks
-        self.stem = nn.Sequential(
-            nn.Conv2d(
-                in_channels,
-                self.out_channels,
-                kernel_size=3,
-                padding=1,
-                padding_mode="replicate",
-            ),
-            nn.GELU(),
+        self.residuals = nn.Sequential(
+            *[_Residual3x3Block(in_channels) for _ in range(blocks)]
         )
-        self.refine = nn.Sequential(
-            *[_Residual3x3Block(self.out_channels) for _ in range(blocks)]
+        self.refine = nn.Conv2d(
+            in_channels,
+            self.out_channels,
+            kernel_size=1,
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -66,26 +61,23 @@ class ResizeConvUp(nn.Module):
             mode="bilinear",
             align_corners=False,
         )
-        x = self.stem(x)
+        x = self.residuals(x)
         return self.refine(x)
 
 
-class PairedCommonBlock(nn.Module):
+class PairedCompBlock(nn.Module):
     def __init__(self, dim: int, heads: int = 4, mlp_ratio: int = 4):
         super().__init__()
         if dim % heads != 0:
             raise ValueError("dim must be divisible by heads")
         self.dim = dim
         self.heads = heads
-        self.sar_self_norm = _AmpRMSNorm(dim)
-        self.cld_self_norm = _AmpRMSNorm(dim)
-        self.sar_self_attn = MultiHeadAttention(dim, num_heads=heads)
-        self.cld_self_attn = MultiHeadAttention(dim, num_heads=heads)
-
-        self.sar_cross_query_norm = _AmpRMSNorm(dim)
-        self.sar_cross_source_norm = _AmpRMSNorm(dim)
-        self.cld_cross_query_norm = _AmpRMSNorm(dim)
-        self.cld_cross_source_norm = _AmpRMSNorm(dim)
+        self.sar_query_norm = _AmpRMSNorm(dim)
+        self.sar_key_norm = _AmpRMSNorm(dim)
+        self.sar_value_norm = _AmpRMSNorm(dim)
+        self.cld_query_norm = _AmpRMSNorm(dim)
+        self.cld_key_norm = _AmpRMSNorm(dim)
+        self.cld_value_norm = _AmpRMSNorm(dim)
         self.sar_cross_attn = MultiHeadAttention(dim, num_heads=heads)
         self.cld_cross_attn = MultiHeadAttention(dim, num_heads=heads)
 
@@ -105,19 +97,20 @@ class PairedCommonBlock(nn.Module):
 
     def forward(
         self,
-        sar_tokens: torch.Tensor,
-        cld_tokens: torch.Tensor,
+        sar_state: torch.Tensor,
+        cld_state: torch.Tensor,
+        sar_anchor: torch.Tensor,
+        cld_anchor: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        sar_self = sar_tokens + self.sar_self_attn(self.sar_self_norm(sar_tokens))
-        cld_self = cld_tokens + self.cld_self_attn(self.cld_self_norm(cld_tokens))
-
-        sar_cross = sar_self + self.sar_cross_attn(
-            self.sar_cross_query_norm(sar_self),
-            self.sar_cross_source_norm(cld_self),
+        sar_cross = sar_state + self.sar_cross_attn(
+            self.sar_query_norm(sar_state),
+            self.sar_key_norm(cld_state),
+            self.sar_value_norm(sar_anchor),
         )
-        cld_cross = cld_self + self.cld_cross_attn(
-            self.cld_cross_query_norm(cld_self),
-            self.cld_cross_source_norm(sar_self),
+        cld_cross = cld_state + self.cld_cross_attn(
+            self.cld_query_norm(cld_state),
+            self.cld_key_norm(sar_state),
+            self.cld_value_norm(cld_anchor),
         )
 
         sar_out = sar_cross + self.sar_mlp(self.sar_mlp_norm(sar_cross))
@@ -125,15 +118,17 @@ class PairedCommonBlock(nn.Module):
         return sar_out, cld_out
 
 
-class PairedCommonTransformer(nn.Module):
+class PairedCompTransformer(nn.Module):
     def __init__(self, dim: int, num_layers: int, heads: int):
         super().__init__()
         self.dim = dim
         self.num_layers = num_layers
         self.heads = heads
         self.blocks = nn.ModuleList(
-            [PairedCommonBlock(dim, heads=heads) for _ in range(num_layers)]
+            [PairedCompBlock(dim, heads=heads) for _ in range(num_layers)]
         )
+        self.sar_comp_head = nn.Linear(dim, dim)
+        self.cld_comp_head = nn.Linear(dim, dim)
 
     @staticmethod
     def _to_tokens(feature: torch.Tensor) -> torch.Tensor:
@@ -157,13 +152,22 @@ class PairedCommonTransformer(nn.Module):
         cld_feat: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         height, width = sar_feat.shape[-2:]
-        sar_tokens = self._to_tokens(sar_feat)
-        cld_tokens = self._to_tokens(cld_feat)
+        sar_anchor = self._to_tokens(sar_feat)
+        cld_anchor = self._to_tokens(cld_feat)
+        sar_tokens = sar_anchor
+        cld_tokens = cld_anchor
         for block in self.blocks:
-            sar_tokens, cld_tokens = block(sar_tokens, cld_tokens)
+            sar_tokens, cld_tokens = block(
+                sar_tokens,
+                cld_tokens,
+                sar_anchor,
+                cld_anchor,
+            )
+        sar_comp = self.sar_comp_head(sar_tokens)
+        cld_comp = self.cld_comp_head(cld_tokens)
         return (
-            self._to_feature(sar_tokens, height, width),
-            self._to_feature(cld_tokens, height, width),
+            self._to_feature(sar_comp, height, width),
+            self._to_feature(cld_comp, height, width),
         )
 
 
@@ -259,7 +263,7 @@ class FDT(nn.Module):
         self.sar_encoder = Encoder(sar_channels, dim, num_layers, num_heads)
         self.cld_encoder = Encoder(cloudy_channels, dim, num_layers, num_heads)
 
-        self.common_extractor = PairedCommonTransformer(
+        self.comp_extractor = PairedCompTransformer(
             dim,
             num_layers=num_layers,
             heads=num_heads,
@@ -271,14 +275,14 @@ class FDT(nn.Module):
         sar_feat_l = self.sar_encoder(sar)
         cld_feat_l = self.cld_encoder(cloudy)
 
-        sar_com_l, cld_com_l = self.common_extractor(sar_feat_l, cld_feat_l)
+        sar_comp_l, cld_comp_l = self.comp_extractor(sar_feat_l, cld_feat_l)
 
         sar_feat = self.up(sar_feat_l)
         cld_feat = self.up(cld_feat_l)
-        sar_com = self.up(sar_com_l)
-        cld_com = self.up(cld_com_l)
-        sar_comp = sar_feat - sar_com
-        cld_comp = cld_feat - cld_com
+        sar_comp = self.up(sar_comp_l)
+        cld_comp = self.up(cld_comp_l)
+        sar_com = sar_feat - sar_comp
+        cld_com = cld_feat - cld_comp
 
         com_fused = self.com_fuse(torch.cat((sar_com, cld_com), dim=1))
         output = torch.cat((com_fused, sar_comp, cld_comp), dim=1)
