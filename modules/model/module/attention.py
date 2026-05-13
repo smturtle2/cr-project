@@ -78,14 +78,16 @@ class MultiHeadAttention(nn.Module):
         b, _, n, _ = x.shape
         return x.transpose(1, 2).reshape(b, n, self.dim)
 
-    def forward(self, query, tgt=None):
-        is_self_attention = tgt is None
+    def forward(self, query, tgt=None, value=None):
+        is_self_attention = tgt is None and value is None
         if tgt is None:
             tgt = query
+        if value is None:
+            value = tgt
 
         q = self._reshape_heads(self.q_proj(query))
         k = self._reshape_heads(self.k_proj(tgt))
-        v = self._reshape_heads(self.v_proj(tgt))
+        v = self._reshape_heads(self.v_proj(value))
 
         out = _sdpa(q, k, v)
 
