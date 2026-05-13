@@ -162,10 +162,10 @@ def test_common_block_cross_reads_current_states_and_fixed_anchors() -> None:
     block(sar_state, cld_state, sar_anchor, cld_anchor)
 
     assert torch.allclose(block.sar_cross_attn.query, sar_state)
-    assert torch.allclose(block.sar_cross_attn.key, cld_state)
+    assert torch.allclose(block.sar_cross_attn.key, cld_anchor)
     assert torch.allclose(block.sar_cross_attn.value, sar_anchor)
     assert torch.allclose(block.cld_cross_attn.query, cld_state)
-    assert torch.allclose(block.cld_cross_attn.key, sar_state)
+    assert torch.allclose(block.cld_cross_attn.key, sar_anchor)
     assert torch.allclose(block.cld_cross_attn.value, cld_anchor)
 
 

@@ -104,12 +104,12 @@ class PairedCommonBlock(nn.Module):
     ) -> tuple[torch.Tensor, torch.Tensor]:
         sar_cross = sar_state + self.sar_cross_attn(
             self.sar_query_norm(sar_state),
-            self.sar_key_norm(cld_state),
+            self.sar_key_norm(cld_anchor),
             self.sar_value_norm(sar_anchor),
         )
         cld_cross = cld_state + self.cld_cross_attn(
             self.cld_query_norm(cld_state),
-            self.cld_key_norm(sar_state),
+            self.cld_key_norm(sar_anchor),
             self.cld_value_norm(cld_anchor),
         )
 
