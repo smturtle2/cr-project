@@ -78,16 +78,16 @@ def test_multi_head_attention_accepts_distinct_value_source() -> None:
     assert torch.allclose(actual, expected)
 
 
-def test_fdt_uses_paired_comp_transformer() -> None:
+def test_fdt_uses_paired_common_transformer() -> None:
     model = FDT(num_layers=1, num_heads=4).eval()
 
     assert not hasattr(model, "sar_common_gate")
     assert not hasattr(model, "cld_common_gate")
-    assert not hasattr(model, "common_extractor")
-    assert model.comp_extractor.num_layers == model.num_layers
-    assert len(model.comp_extractor.blocks) == model.num_layers
+    assert not hasattr(model, "comp_extractor")
+    assert model.common_extractor.num_layers == model.num_layers
+    assert len(model.common_extractor.blocks) == model.num_layers
 
-    block = model.comp_extractor.blocks[0]
+    block = model.common_extractor.blocks[0]
     assert block.heads == model.num_heads
     assert not hasattr(block, "sar_self_attn")
     assert not hasattr(block, "cld_self_attn")
@@ -99,25 +99,25 @@ def test_fdt_uses_paired_comp_transformer() -> None:
     assert not hasattr(block, "router")
 
 
-def test_comp_extractor_returns_modality_specific_features() -> None:
+def test_common_extractor_returns_modality_common_features() -> None:
     torch.manual_seed(0)
     model = FDT(num_layers=1, num_heads=4).eval()
     sar_feat = torch.randn(2, model.dim, 8, 8)
     cld_feat = torch.randn_like(sar_feat)
 
     with torch.no_grad():
-        sar_comp, cld_comp = model.comp_extractor(sar_feat, cld_feat)
+        sar_com, cld_com = model.common_extractor(sar_feat, cld_feat)
 
-    assert sar_comp.shape == sar_feat.shape
-    assert cld_comp.shape == cld_feat.shape
-    assert sar_comp.dtype == sar_feat.dtype
-    assert cld_comp.dtype == cld_feat.dtype
-    assert bool(torch.isfinite(sar_comp).all().item())
-    assert bool(torch.isfinite(cld_comp).all().item())
-    assert not torch.allclose(sar_comp, cld_comp)
+    assert sar_com.shape == sar_feat.shape
+    assert cld_com.shape == cld_feat.shape
+    assert sar_com.dtype == sar_feat.dtype
+    assert cld_com.dtype == cld_feat.dtype
+    assert bool(torch.isfinite(sar_com).all().item())
+    assert bool(torch.isfinite(cld_com).all().item())
+    assert not torch.allclose(sar_com, cld_com)
 
 
-def test_comp_block_cross_reads_current_states_and_fixed_anchors() -> None:
+def test_common_block_cross_reads_current_states_and_fixed_anchors() -> None:
     class CrossRecorder(nn.Module):
         def __init__(self):
             super().__init__()
@@ -141,7 +141,7 @@ def test_comp_block_cross_reads_current_states_and_fixed_anchors() -> None:
             return torch.zeros_like(x)
 
     model = FDT(dim=8, num_layers=1, num_heads=4).eval()
-    block = model.comp_extractor.blocks[0]
+    block = model.common_extractor.blocks[0]
     block.sar_query_norm = nn.Identity()
     block.sar_key_norm = nn.Identity()
     block.sar_value_norm = nn.Identity()
@@ -169,7 +169,7 @@ def test_comp_block_cross_reads_current_states_and_fixed_anchors() -> None:
     assert torch.allclose(block.cld_cross_attn.value, cld_anchor)
 
 
-def test_fdt_defines_com_as_high_res_residual() -> None:
+def test_fdt_defines_comp_as_high_res_residual() -> None:
     model = FDT(num_layers=1, num_heads=4).eval()
     sar = torch.randn(1, 2, 16, 16)
     cloudy = torch.randn(1, 13, 16, 16)
@@ -181,14 +181,14 @@ def test_fdt_defines_com_as_high_res_residual() -> None:
         cld_feat_l = model.cld_encoder(cloudy)
         sar_feat = model.up(sar_feat_l)
         cld_feat = model.up(cld_feat_l)
-        sar_comp_l, cld_comp_l = model.comp_extractor(sar_feat_l, cld_feat_l)
-        expected_sar_comp = model.up(sar_comp_l)
-        expected_cld_comp = model.up(cld_comp_l)
+        sar_com_l, cld_com_l = model.common_extractor(sar_feat_l, cld_feat_l)
+        expected_sar_com = model.up(sar_com_l)
+        expected_cld_com = model.up(cld_com_l)
 
-    assert torch.allclose(sar_comp, expected_sar_comp)
-    assert torch.allclose(cld_comp, expected_cld_comp)
-    assert torch.allclose(sar_com, sar_feat - sar_comp)
-    assert torch.allclose(cld_com, cld_feat - cld_comp)
+    assert torch.allclose(sar_com, expected_sar_com)
+    assert torch.allclose(cld_com, expected_cld_com)
+    assert torch.allclose(sar_comp, sar_feat - sar_com)
+    assert torch.allclose(cld_comp, cld_feat - cld_com)
 
 
 def test_resize_conv_up_returns_expected_feature_shape() -> None:
