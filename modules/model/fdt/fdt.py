@@ -65,7 +65,43 @@ class ResizeConvUp(nn.Module):
         return self.refine(x)
 
 
-class Encoder(nn.Module):
+class FeatureTransformerEncoder(nn.Module):
+    def __init__(
+        self,
+        dim: int,
+        num_layers: int,
+        heads: int,
+    ):
+        super().__init__()
+        self.blocks = nn.ModuleList(
+            [TransformerLayer(dim, num_heads=heads) for _ in range(num_layers)]
+        )
+
+    @staticmethod
+    def _to_tokens(feature: torch.Tensor) -> torch.Tensor:
+        return feature.flatten(2).transpose(1, 2).contiguous()
+
+    @staticmethod
+    def _to_feature(
+        tokens: torch.Tensor,
+        height: int,
+        width: int,
+    ) -> torch.Tensor:
+        return (
+            tokens.transpose(1, 2)
+            .reshape(tokens.shape[0], tokens.shape[2], height, width)
+            .contiguous()
+        )
+
+    def forward(self, feature: torch.Tensor) -> torch.Tensor:
+        height, width = feature.shape[-2:]
+        tokens = self._to_tokens(feature)
+        for block in self.blocks:
+            tokens = block(tokens)
+        return self._to_feature(tokens, height, width)
+
+
+class Encoder(FeatureTransformerEncoder):
     def __init__(
         self,
         in_channels: int,
@@ -73,7 +109,7 @@ class Encoder(nn.Module):
         num_layers: int,
         heads: int,
     ):
-        super().__init__()
+        super().__init__(dim, num_layers, heads)
         self.proj = nn.Sequential(
             nn.Conv2d(
                 in_channels,
@@ -98,85 +134,19 @@ class Encoder(nn.Module):
                 padding_mode="replicate",
             ),
         )
-        self.blocks = nn.ModuleList(
-            [TransformerLayer(dim, num_heads=heads) for _ in range(num_layers)]
-        )
-
-    @staticmethod
-    def _to_tokens(feature: torch.Tensor) -> torch.Tensor:
-        return feature.flatten(2).transpose(1, 2).contiguous()
-
-    @staticmethod
-    def _to_feature(
-        tokens: torch.Tensor,
-        height: int,
-        width: int,
-    ) -> torch.Tensor:
-        return (
-            tokens.transpose(1, 2)
-            .reshape(tokens.shape[0], tokens.shape[2], height, width)
-            .contiguous()
-        )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        feature = self.proj(x)
-        height, width = feature.shape[-2:]
-        tokens = self._to_tokens(feature)
-        for block in self.blocks:
-            tokens = block(tokens)
-        return self._to_feature(tokens, height, width)
+        return super().forward(self.proj(x))
 
 
-class CommonEncoder(nn.Module):
+class CommonEncoder(FeatureTransformerEncoder):
     def __init__(
         self,
         dim: int,
         num_layers: int,
         heads: int,
     ):
-        super().__init__()
-        self.proj = nn.Sequential(
-            nn.Conv2d(
-                dim,
-                dim,
-                kernel_size=1,
-            ),
-            nn.GELU(),
-            nn.Conv2d(
-                dim,
-                dim,
-                kernel_size=3,
-                padding=1,
-                padding_mode="replicate",
-            ),
-        )
-        self.blocks = nn.ModuleList(
-            [TransformerLayer(dim, num_heads=heads) for _ in range(num_layers)]
-        )
-
-    @staticmethod
-    def _to_tokens(feature: torch.Tensor) -> torch.Tensor:
-        return feature.flatten(2).transpose(1, 2).contiguous()
-
-    @staticmethod
-    def _to_feature(
-        tokens: torch.Tensor,
-        height: int,
-        width: int,
-    ) -> torch.Tensor:
-        return (
-            tokens.transpose(1, 2)
-            .reshape(tokens.shape[0], tokens.shape[2], height, width)
-            .contiguous()
-        )
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        feature = self.proj(x)
-        height, width = feature.shape[-2:]
-        tokens = self._to_tokens(feature)
-        for block in self.blocks:
-            tokens = block(tokens)
-        return self._to_feature(tokens, height, width)
+        super().__init__(dim, num_layers, heads)
 
 
 # Feature Decomposition Transformer
