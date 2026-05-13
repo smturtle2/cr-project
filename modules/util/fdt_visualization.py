@@ -104,10 +104,13 @@ def _zscore_map(values: np.ndarray, *, eps: float = 1e-6) -> np.ndarray:
     return (values - values.mean()) / max(float(values.std()), eps)
 
 
-def _pc1_agreement_panel(first: np.ndarray, second: np.ndarray) -> np.ndarray:
+def _clip01(value: float) -> float:
+    return float(np.clip(value, 0.0, 1.0))
+
+
+def _pc1_similarity_panel(first: np.ndarray, second: np.ndarray) -> np.ndarray:
     difference = np.abs(_zscore_map(first) - _zscore_map(second))
-    high = float(np.quantile(difference, 0.98))
-    return 1.0 - np.clip(difference / max(high, 1e-6), 0.0, 1.0)
+    return 1.0 - np.clip(difference / 2.0, 0.0, 1.0)
 
 
 def build_fdt_example_panels(
@@ -132,9 +135,9 @@ def build_fdt_example_panels(
     sar_comp_pc1, cld_comp_pc1 = _joint_pc1_maps(sar_comp, cld_comp)
     sar_comp_pca, cld_comp_pca = _normalize_paired_maps(sar_comp_pc1, cld_comp_pc1)
     common_ncc = _map_ncc(sar_com_pc1, cld_com_pc1)
-    common_agreement = _pc1_agreement_panel(sar_com_pc1, cld_com_pc1)
+    common_match = _pc1_similarity_panel(sar_com_pc1, cld_com_pc1) * _clip01(common_ncc)
     comp_ncc_squared = _map_ncc(sar_comp_pc1, cld_comp_pc1) ** 2
-    comp_agreement = _pc1_agreement_panel(sar_comp_pc1, cld_comp_pc1)
+    comp_leak = _pc1_similarity_panel(sar_comp_pc1, cld_comp_pc1) * _clip01(comp_ncc_squared)
     cloudy_rgb, prediction_rgb, target_rgb = normalize_rgb_triplet(
         cloudy,
         prediction,
@@ -145,11 +148,11 @@ def build_fdt_example_panels(
         ("Prediction RGB", prediction_rgb, None),
         ("Target RGB", target_rgb, None),
         ("SAR Mean", normalize_map(sar.mean(dim=0)), "gray"),
-        (f"Com Match  {common_ncc:+.2f}  ↑ Good", common_agreement, "viridis", 0.0, 1.0),
+        (f"Com Match  {common_ncc:+.2f}  ↑ Good", common_match, "magma", 0.0, 1.0),
         ("SAR Feat PCA", sar_feat_pca, "viridis"),
         ("SAR Com PCA", sar_com_pca, "viridis"),
         ("SAR Comp PCA", sar_comp_pca, "viridis"),
-        (f"Comp Leak  {comp_ncc_squared: .2f}  ↓ Good", comp_agreement, "magma", 0.0, 1.0),
+        (f"Comp Leak  {comp_ncc_squared: .2f}  ↓ Good", comp_leak, "magma", 0.0, 1.0),
         ("Cloudy Feat PCA", cld_feat_pca, "viridis"),
         ("Cloudy Com PCA", cld_com_pca, "viridis"),
         ("Cloudy Comp PCA", cld_comp_pca, "viridis"),
@@ -474,6 +477,8 @@ def save_fdt_split_tsne_scatter(
     max_samples: int | None,
     epoch: int,
     output_dir: Path,
+    path: Path | None = None,
+    title: str | None = None,
     build_loader: Callable[..., Any],
     build_example_output: Callable[[Any, Mapping[str, Any]], Any],
     is_primary: Callable[[], bool],
@@ -499,8 +504,8 @@ def save_fdt_split_tsne_scatter(
     )
     return _save_tsne_scatter_figure(
         grouped_features,
-        path=output_dir / f"{split}_tsne_scatter.png",
-        title=f"{split} epoch {epoch:03d} t-SNE scatter",
+        path=path or output_dir / f"{split}_tsne_scatter.png",
+        title=title or f"{split} epoch {epoch:03d} t-SNE scatter",
         pre_pca_dim=pre_pca_dim,
         random_seed=random_seed,
         scatter_size=scatter_size,
