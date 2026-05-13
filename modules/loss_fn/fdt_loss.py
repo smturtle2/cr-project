@@ -73,21 +73,39 @@ class FDTDecompositionLoss(nn.Module):
         second_var = second.square().mean(dim=1)
         return 2.0 * cov / (first_var + second_var + self.eps)
 
+    def _linear_cka(
+        self,
+        first: torch.Tensor,
+        second: torch.Tensor,
+    ) -> torch.Tensor:
+        with torch.autocast(device_type=first.device.type, enabled=False):
+            first = self._tokens(first)
+            second = self._tokens(second)
+            first = first - first.mean(dim=1, keepdim=True)
+            second = second - second.mean(dim=1, keepdim=True)
+
+            cross_cov = first.transpose(1, 2) @ second
+            first_cov = first.transpose(1, 2) @ first
+            second_cov = second.transpose(1, 2) @ second
+
+            numerator = cross_cov.square().sum(dim=(1, 2))
+            first_norm = first_cov.square().sum(dim=(1, 2))
+            second_norm = second_cov.square().sum(dim=(1, 2))
+            return numerator / torch.sqrt(first_norm * second_norm + self.eps)
+
     def _common_alignment_loss(
         self,
         sar_com: torch.Tensor,
         cld_com: torch.Tensor,
     ) -> torch.Tensor:
-        sar_map, cld_map = self._joint_pc1_maps(sar_com, cld_com)
-        return 1.0 - self._map_ccc(sar_map, cld_map).mean()
+        return 1.0 - self._linear_cka(sar_com, cld_com).mean()
 
     def _comp_decorrelation_loss(
         self,
         sar_comp: torch.Tensor,
         cld_comp: torch.Tensor,
     ) -> torch.Tensor:
-        sar_map, cld_map = self._joint_pc1_maps(sar_comp, cld_comp)
-        return self._map_ccc(sar_map, cld_map).square().mean()
+        return self._linear_cka(sar_comp, cld_comp).mean()
 
     def forward(
         self,
