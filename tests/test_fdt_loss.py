@@ -20,28 +20,28 @@ class FDTDecompositionLossTest(unittest.TestCase):
 
         self.assertLess(float(loss), 1e-4)
 
-    def test_negative_common_correlation_has_large_loss(self) -> None:
+    def test_sign_flipped_common_features_have_small_common_loss(self) -> None:
         loss_fn = FDTDecompositionLoss()
         feature = torch.randn(2, 32, 16, 16)
         zeros = torch.zeros_like(feature)
 
         loss = loss_fn(feature, -feature, zeros, zeros)
 
-        self.assertGreater(float(loss), 1.9)
-
-    def test_common_loss_is_computed_per_sample(self) -> None:
-        loss_fn = FDTDecompositionLoss()
-        first = torch.randn(1, 16, 8, 8)
-        second = torch.randn(1, 16, 8, 8)
-        sar_com = torch.cat((first, second), dim=0)
-        cld_com = torch.cat((first, second), dim=0)
-        zeros = torch.zeros_like(sar_com)
-
-        loss = loss_fn(sar_com, cld_com, zeros, zeros)
-
         self.assertLess(float(loss), 1e-4)
 
-    def test_common_loss_tracks_dominant_spatial_component(self) -> None:
+    def test_common_cka_is_computed_per_sample(self) -> None:
+        loss_fn = FDTDecompositionLoss()
+        first = torch.randn(1, 16, 8, 8)
+        second = torch.randn_like(first)
+        sar_com = torch.cat((first, second), dim=0)
+        cld_com = torch.cat((first, -second), dim=0)
+
+        cka = loss_fn._linear_cka(sar_com, cld_com)
+
+        self.assertEqual(cka.shape, (2,))
+        self.assertTrue(bool(torch.all(cka > 1.0 - 1e-4).item()))
+
+    def test_common_loss_tracks_shared_spatial_representation(self) -> None:
         loss_fn = FDTDecompositionLoss()
         spatial = torch.randn(1, 1, 8, 8)
         mismatch = torch.randn(1, 1, 8, 8)
@@ -65,7 +65,7 @@ class FDTDecompositionLossTest(unittest.TestCase):
 
         self.assertGreater(float(loss), 0.05)
 
-    def test_comp_loss_penalizes_pc1_spatial_correlation(self) -> None:
+    def test_comp_loss_penalizes_spatial_token_cka(self) -> None:
         loss_fn = FDTDecompositionLoss()
         common = torch.randn(1, 4, 8, 8)
         sar_comp = torch.randn(1, 4, 8, 8)
@@ -77,7 +77,7 @@ class FDTDecompositionLossTest(unittest.TestCase):
 
         self.assertGreater(float(correlated_loss), float(unrelated_loss))
 
-    def test_comp_loss_penalizes_dominant_spatial_component_correlation(self) -> None:
+    def test_comp_loss_penalizes_shared_spatial_representation(self) -> None:
         loss_fn = FDTDecompositionLoss()
         common = torch.randn(1, 2, 8, 8)
         spatial = torch.randn(1, 1, 8, 8)
