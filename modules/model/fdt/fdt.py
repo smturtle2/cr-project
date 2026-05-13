@@ -65,7 +65,7 @@ class ResizeConvUp(nn.Module):
         return self.refine(x)
 
 
-class PairedCompBlock(nn.Module):
+class PairedCommonBlock(nn.Module):
     def __init__(self, dim: int, heads: int = 4, mlp_ratio: int = 4):
         super().__init__()
         if dim % heads != 0:
@@ -118,17 +118,17 @@ class PairedCompBlock(nn.Module):
         return sar_out, cld_out
 
 
-class PairedCompTransformer(nn.Module):
+class PairedCommonTransformer(nn.Module):
     def __init__(self, dim: int, num_layers: int, heads: int):
         super().__init__()
         self.dim = dim
         self.num_layers = num_layers
         self.heads = heads
         self.blocks = nn.ModuleList(
-            [PairedCompBlock(dim, heads=heads) for _ in range(num_layers)]
+            [PairedCommonBlock(dim, heads=heads) for _ in range(num_layers)]
         )
-        self.sar_comp_head = nn.Linear(dim, dim)
-        self.cld_comp_head = nn.Linear(dim, dim)
+        self.sar_common_head = nn.Linear(dim, dim)
+        self.cld_common_head = nn.Linear(dim, dim)
 
     @staticmethod
     def _to_tokens(feature: torch.Tensor) -> torch.Tensor:
@@ -163,11 +163,11 @@ class PairedCompTransformer(nn.Module):
                 sar_anchor,
                 cld_anchor,
             )
-        sar_comp = self.sar_comp_head(sar_tokens)
-        cld_comp = self.cld_comp_head(cld_tokens)
+        sar_common = self.sar_common_head(sar_tokens)
+        cld_common = self.cld_common_head(cld_tokens)
         return (
-            self._to_feature(sar_comp, height, width),
-            self._to_feature(cld_comp, height, width),
+            self._to_feature(sar_common, height, width),
+            self._to_feature(cld_common, height, width),
         )
 
 
@@ -263,7 +263,7 @@ class FDT(nn.Module):
         self.sar_encoder = Encoder(sar_channels, dim, num_layers, num_heads)
         self.cld_encoder = Encoder(cloudy_channels, dim, num_layers, num_heads)
 
-        self.comp_extractor = PairedCompTransformer(
+        self.common_extractor = PairedCommonTransformer(
             dim,
             num_layers=num_layers,
             heads=num_heads,
@@ -275,14 +275,14 @@ class FDT(nn.Module):
         sar_feat_l = self.sar_encoder(sar)
         cld_feat_l = self.cld_encoder(cloudy)
 
-        sar_comp_l, cld_comp_l = self.comp_extractor(sar_feat_l, cld_feat_l)
+        sar_com_l, cld_com_l = self.common_extractor(sar_feat_l, cld_feat_l)
 
         sar_feat = self.up(sar_feat_l)
         cld_feat = self.up(cld_feat_l)
-        sar_comp = self.up(sar_comp_l)
-        cld_comp = self.up(cld_comp_l)
-        sar_com = sar_feat - sar_comp
-        cld_com = cld_feat - cld_comp
+        sar_com = self.up(sar_com_l)
+        cld_com = self.up(cld_com_l)
+        sar_comp = sar_feat - sar_com
+        cld_comp = cld_feat - cld_com
 
         com_fused = self.com_fuse(torch.cat((sar_com, cld_com), dim=1))
         output = torch.cat((com_fused, sar_comp, cld_comp), dim=1)
