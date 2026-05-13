@@ -65,7 +65,7 @@ class ResizeConvUp(nn.Module):
         return self.refine(x)
 
 
-class FeatureTransformerBase:
+class FeatureTransformerBase(nn.Module):
     @staticmethod
     def _to_tokens(feature: torch.Tensor) -> torch.Tensor:
         return feature.flatten(2).transpose(1, 2).contiguous()
@@ -83,7 +83,7 @@ class FeatureTransformerBase:
         )
 
 
-class Encoder(nn.Module, FeatureTransformerBase):
+class Encoder(FeatureTransformerBase):
     def __init__(
         self,
         in_channels: int,
@@ -129,7 +129,7 @@ class Encoder(nn.Module, FeatureTransformerBase):
         return self._to_feature(tokens, height, width)
 
 
-class CommonEncoder(nn.Module, FeatureTransformerBase):
+class CommonEncoder(FeatureTransformerBase):
     def __init__(
         self,
         dim: int,
