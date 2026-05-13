@@ -58,13 +58,28 @@ class FDTDecompositionLoss(nn.Module):
         )
         return numerator / denominator
 
+    def _map_ccc(
+        self,
+        first: torch.Tensor,
+        second: torch.Tensor,
+    ) -> torch.Tensor:
+        first = first.flatten(1)
+        second = second.flatten(1)
+        first = first - first.mean(dim=1, keepdim=True)
+        second = second - second.mean(dim=1, keepdim=True)
+
+        cov = (first * second).mean(dim=1)
+        first_var = first.square().mean(dim=1)
+        second_var = second.square().mean(dim=1)
+        return 2.0 * cov / (first_var + second_var + self.eps)
+
     def _common_alignment_loss(
         self,
         sar_com: torch.Tensor,
         cld_com: torch.Tensor,
     ) -> torch.Tensor:
         sar_map, cld_map = self._joint_pc1_maps(sar_com, cld_com)
-        return 1.0 - self._map_ncc(sar_map, cld_map).mean()
+        return 1.0 - self._map_ccc(sar_map, cld_map).mean()
 
     def _comp_decorrelation_loss(
         self,
@@ -72,7 +87,7 @@ class FDTDecompositionLoss(nn.Module):
         cld_comp: torch.Tensor,
     ) -> torch.Tensor:
         sar_map, cld_map = self._joint_pc1_maps(sar_comp, cld_comp)
-        return self._map_ncc(sar_map, cld_map).square().mean()
+        return self._map_ccc(sar_map, cld_map).square().mean()
 
     def forward(
         self,
