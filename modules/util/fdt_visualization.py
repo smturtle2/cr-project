@@ -1,7 +1,8 @@
 from __future__ import annotations
 
+from collections.abc import Callable, Mapping
 from pathlib import Path
-from typing import Any, Callable, Mapping, Sequence
+from typing import Any
 
 import numpy as np
 import torch
@@ -159,10 +160,6 @@ def build_fdt_example_panels(
     )
 
 
-def _split_seed_offset(split: str) -> int:
-    return {"train": 0, "validation": 10_000, "test": 20_000}.get(split, 30_000)
-
-
 def _sample_feature_points(
     feature: torch.Tensor,
     indices: np.ndarray,
@@ -173,7 +170,7 @@ def _sample_feature_points(
     return np.nan_to_num(tokens[indices].numpy(), copy=False)
 
 
-def _append_tsne_patch_samples(
+def _append_tsne_sample_points(
     grouped_features: dict[str, list[np.ndarray]],
     *,
     sar_com: torch.Tensor,
@@ -181,11 +178,11 @@ def _append_tsne_patch_samples(
     sar_comp: torch.Tensor,
     cld_comp: torch.Tensor,
     rng: np.random.Generator,
-    points_per_patch: int,
+    points_per_sample: int,
 ) -> None:
     num_positions = sar_com.shape[-2] * sar_com.shape[-1]
-    sample_count = min(points_per_patch, num_positions)
-    indices = rng.choice(num_positions, size=sample_count, replace=False)
+    point_count = min(points_per_sample, num_positions)
+    indices = rng.choice(num_positions, size=point_count, replace=False)
     grouped_features["SAR Com"].append(_sample_feature_points(sar_com, indices))
     grouped_features["Cloudy Com"].append(_sample_feature_points(cld_com, indices))
     grouped_features["SAR Comp"].append(_sample_feature_points(sar_comp, indices))
@@ -208,65 +205,70 @@ def _cap_group_points(
     return features[indices]
 
 
-def _collect_split_tsne_features(
-    trainer: Any,
+def _collect_tsne_features(
+    dataloader: Any,
+    predict_fn: Callable[[Mapping[str, Any]], Any],
     *,
-    split: str,
-    max_samples: int | None,
-    epoch: int,
-    build_loader: Callable[..., Any],
-    build_example_output: Callable[[Any, Mapping[str, Any]], Any],
-    num_patches: int,
+    progress_label: str,
+    sample_count: int,
     max_points_per_group: int,
     random_seed: int,
+    show_progress: bool,
 ) -> dict[str, np.ndarray]:
-    dataloader = build_loader(
-        trainer,
-        split=split,
-        max_samples=max_samples,
-        training=False,
-        epoch_index=max(epoch - 1, 0),
-    )
-    rng = np.random.default_rng(random_seed + epoch + _split_seed_offset(split))
+    rng = np.random.default_rng(random_seed)
     grouped_features: dict[str, list[np.ndarray]] = {name: [] for name in TSNE_GROUPS}
-    points_per_patch = max(
+    points_per_sample = max(
         1,
-        (max_points_per_group + num_patches - 1) // num_patches,
+        (max_points_per_group + sample_count - 1) // sample_count,
     )
 
-    was_training = trainer.model.training
-    trainer.model.eval()
-    patches_seen = 0
+    samples_seen = 0
     iterator = iter(dataloader)
+    progress = None
     try:
+        if show_progress:
+            try:
+                from tqdm.auto import tqdm
+
+                progress = tqdm(
+                    total=sample_count,
+                    desc=progress_label,
+                    unit="sample",
+                    leave=False,
+                )
+            except ImportError:
+                progress = None
         with torch.no_grad():
-            while patches_seen < num_patches:
+            while samples_seen < sample_count:
                 try:
                     batch = next(iterator)
                 except StopIteration:
                     break
 
-                model_output = build_example_output(trainer, batch)
+                model_output = predict_fn(batch)
                 _, sar_com, cld_com, sar_comp, cld_comp = split_fdt_output(
                     model_output
                 )
                 batch_size = sar_com.shape[0]
                 for batch_index in range(batch_size):
-                    if patches_seen >= num_patches:
+                    if samples_seen >= sample_count:
                         break
-                    _append_tsne_patch_samples(
+                    _append_tsne_sample_points(
                         grouped_features,
                         sar_com=sar_com[batch_index],
                         cld_com=cld_com[batch_index],
                         sar_comp=sar_comp[batch_index],
                         cld_comp=cld_comp[batch_index],
                         rng=rng,
-                        points_per_patch=points_per_patch,
+                        points_per_sample=points_per_sample,
                     )
-                    patches_seen += 1
+                    samples_seen += 1
+                    if progress is not None:
+                        progress.update(1)
     finally:
+        if progress is not None:
+            progress.close()
         del iterator
-        trainer.model.train(was_training)
 
     return {
         name: _cap_group_points(
@@ -401,6 +403,7 @@ def _save_tsne_scatter_figure(
 ) -> Path | None:
     import matplotlib.pyplot as plt
 
+    print("fitting t-SNE scatter...")
     grouped_embedding = _fit_tsne_embedding(
         grouped_features,
         pre_pca_dim=pre_pca_dim,
@@ -470,42 +473,36 @@ def _save_tsne_scatter_figure(
     return path
 
 
-def save_fdt_split_tsne_scatter(
-    trainer: Any,
+def save_fdt_tsne_scatter(
     *,
-    split: str,
-    max_samples: int | None,
-    epoch: int,
-    output_dir: Path,
-    path: Path | None = None,
-    title: str | None = None,
-    build_loader: Callable[..., Any],
-    build_example_output: Callable[[Any, Mapping[str, Any]], Any],
+    dataloader: Any,
+    predict_fn: Callable[[Mapping[str, Any]], Any],
+    path: Path,
+    title: str,
     is_primary: Callable[[], bool],
-    num_patches: int = 128,
+    sample_count: int = 128,
     max_points_per_group: int = 4096,
     pre_pca_dim: int = 50,
     random_seed: int = 42,
     scatter_size: float = 3,
     scatter_alpha: float = 0.12,
+    show_progress: bool = True,
 ) -> Path | None:
     if not is_primary():
         return None
-    grouped_features = _collect_split_tsne_features(
-        trainer,
-        split=split,
-        max_samples=max_samples,
-        epoch=epoch,
-        build_loader=build_loader,
-        build_example_output=build_example_output,
-        num_patches=num_patches,
+    grouped_features = _collect_tsne_features(
+        dataloader,
+        predict_fn,
+        progress_label="t-SNE samples",
+        sample_count=sample_count,
         max_points_per_group=max_points_per_group,
         random_seed=random_seed,
+        show_progress=show_progress,
     )
     return _save_tsne_scatter_figure(
         grouped_features,
-        path=path or output_dir / f"{split}_tsne_scatter.png",
-        title=title or f"{split} epoch {epoch:03d} t-SNE scatter",
+        path=path,
+        title=title,
         pre_pca_dim=pre_pca_dim,
         random_seed=random_seed,
         scatter_size=scatter_size,
@@ -513,40 +510,47 @@ def save_fdt_split_tsne_scatter(
     )
 
 
+def load_fdt_checkpoint_model(
+    model: torch.nn.Module,
+    checkpoint_path: Path,
+    device: torch.device,
+) -> int:
+    checkpoint = torch.load(checkpoint_path, map_location=device)
+    if not isinstance(checkpoint, Mapping) or "model" not in checkpoint:
+        raise TypeError("checkpoint must contain a model state dict")
+    state_owner = model.module if hasattr(model, "module") else model
+    state_owner.load_state_dict(checkpoint["model"])
+    return int(checkpoint.get("epoch", 0))
+
+
 def save_fdt_tsne_for_splits(
-    trainer: Any,
     *,
-    splits: Sequence[str],
-    max_samples_by_split: Mapping[str, int | None],
-    epoch: int,
+    dataloaders_by_split: Mapping[str, Any],
+    predict_fn: Callable[[Mapping[str, Any]], Any],
     output_dir: Path,
-    num_examples: int,
-    build_loader: Callable[..., Any],
-    build_example_output: Callable[[Any, Mapping[str, Any]], Any],
     is_primary: Callable[[], bool],
-    num_patches: int = 128,
+    sample_count: int = 128,
     max_points_per_group: int = 4096,
     pre_pca_dim: int = 50,
     random_seed: int = 42,
     scatter_size: float = 3,
     scatter_alpha: float = 0.12,
+    show_progress: bool = True,
 ) -> None:
-    if num_examples <= 0 or not splits:
+    if not dataloaders_by_split:
         return
-    for split in splits:
-        save_fdt_split_tsne_scatter(
-            trainer,
-            split=split,
-            max_samples=max_samples_by_split[split],
-            epoch=epoch,
-            output_dir=output_dir / split,
-            build_loader=build_loader,
-            build_example_output=build_example_output,
+    for split, dataloader in dataloaders_by_split.items():
+        save_fdt_tsne_scatter(
+            dataloader=dataloader,
+            predict_fn=predict_fn,
+            path=output_dir / split / f"{split}_tsne_scatter.png",
+            title=f"{split} t-SNE scatter",
             is_primary=is_primary,
-            num_patches=num_patches,
+            sample_count=sample_count,
             max_points_per_group=max_points_per_group,
             pre_pca_dim=pre_pca_dim,
             random_seed=random_seed,
             scatter_size=scatter_size,
             scatter_alpha=scatter_alpha,
+            show_progress=show_progress,
         )
