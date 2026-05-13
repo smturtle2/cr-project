@@ -65,18 +65,7 @@ class ResizeConvUp(nn.Module):
         return self.refine(x)
 
 
-class FeatureTransformerEncoder(nn.Module):
-    def __init__(
-        self,
-        dim: int,
-        num_layers: int,
-        heads: int,
-    ):
-        super().__init__()
-        self.blocks = nn.ModuleList(
-            [TransformerLayer(dim, num_heads=heads) for _ in range(num_layers)]
-        )
-
+class FeatureTransformerBase:
     @staticmethod
     def _to_tokens(feature: torch.Tensor) -> torch.Tensor:
         return feature.flatten(2).transpose(1, 2).contiguous()
@@ -93,15 +82,8 @@ class FeatureTransformerEncoder(nn.Module):
             .contiguous()
         )
 
-    def forward(self, feature: torch.Tensor) -> torch.Tensor:
-        height, width = feature.shape[-2:]
-        tokens = self._to_tokens(feature)
-        for block in self.blocks:
-            tokens = block(tokens)
-        return self._to_feature(tokens, height, width)
 
-
-class Encoder(FeatureTransformerEncoder):
+class Encoder(nn.Module, FeatureTransformerBase):
     def __init__(
         self,
         in_channels: int,
@@ -109,7 +91,7 @@ class Encoder(FeatureTransformerEncoder):
         num_layers: int,
         heads: int,
     ):
-        super().__init__(dim, num_layers, heads)
+        super().__init__()
         self.proj = nn.Sequential(
             nn.Conv2d(
                 in_channels,
@@ -134,19 +116,37 @@ class Encoder(FeatureTransformerEncoder):
                 padding_mode="replicate",
             ),
         )
+        self.blocks = nn.ModuleList(
+            [TransformerLayer(dim, num_heads=heads) for _ in range(num_layers)]
+        )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return super().forward(self.proj(x))
+        feature = self.proj(x)
+        height, width = feature.shape[-2:]
+        tokens = self._to_tokens(feature)
+        for block in self.blocks:
+            tokens = block(tokens)
+        return self._to_feature(tokens, height, width)
 
 
-class CommonEncoder(FeatureTransformerEncoder):
+class CommonEncoder(nn.Module, FeatureTransformerBase):
     def __init__(
         self,
         dim: int,
         num_layers: int,
         heads: int,
     ):
-        super().__init__(dim, num_layers, heads)
+        super().__init__()
+        self.blocks = nn.ModuleList(
+            [TransformerLayer(dim, num_heads=heads) for _ in range(num_layers)]
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        height, width = x.shape[-2:]
+        tokens = self._to_tokens(x)
+        for block in self.blocks:
+            tokens = block(tokens)
+        return self._to_feature(tokens, height, width)
 
 
 # Feature Decomposition Transformer
