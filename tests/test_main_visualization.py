@@ -11,6 +11,7 @@ from torch import nn
 
 from main import _save_example_figure, normalize_rgb_triplet
 from modules.util.fdt_visualization import (
+    build_fdt_example_panels,
     load_fdt_checkpoint_model,
     save_fdt_tsne_scatter,
 )
@@ -75,6 +76,51 @@ class MainVisualizationTest(unittest.TestCase):
         self.assertEqual(captured_kwargs[1]["cmap"], "coolwarm")
         self.assertEqual(captured_kwargs[1]["vmin"], -1.0)
         self.assertEqual(captured_kwargs[1]["vmax"], 1.0)
+
+    def test_fdt_example_match_panels_use_two_score_titles(self) -> None:
+        def normalize_triplet(*_):
+            return tuple(np.zeros((4, 4, 3), dtype=np.float32) for _ in range(3))
+
+        def normalize_map(tensor):
+            return np.zeros(tuple(tensor.shape), dtype=np.float32)
+
+        feature = torch.randn(8, 4, 4)
+        model_output = (
+            torch.zeros(13, 4, 4),
+            feature,
+            feature.roll(shifts=1, dims=-1),
+            torch.randn(8, 4, 4),
+            torch.randn(8, 4, 4),
+        )
+
+        panels = build_fdt_example_panels(
+            cloudy=torch.zeros(13, 4, 4),
+            prediction=torch.zeros(13, 4, 4),
+            target=torch.zeros(13, 4, 4),
+            sar=torch.zeros(2, 4, 4),
+            model_output=model_output,
+            normalize_rgb_triplet=normalize_triplet,
+            normalize_map=normalize_map,
+        )
+        common_panel = panels[4]
+        comp_panel = panels[8]
+
+        self.assertRegex(
+            common_panel[0],
+            r"^COM MATCH \| [+-]\d+\.\d{2} \| [+-]\d+\.\d{2}$",
+        )
+        self.assertNotIn("Ch", common_panel[0])
+        self.assertNotIn("Sp", common_panel[0])
+        self.assertEqual(common_panel[2:], ("viridis", 0.0, 1.0))
+        self.assertTrue(np.isfinite(common_panel[1]).all())
+        self.assertRegex(
+            comp_panel[0],
+            r"^COMP LEAK \| [+-]\d+\.\d{2} \| [+-]\d+\.\d{2}$",
+        )
+        self.assertNotIn("Ch", comp_panel[0])
+        self.assertNotIn("Sp", comp_panel[0])
+        self.assertEqual(comp_panel[2:], ("magma", 0.0, 1.0))
+        self.assertTrue(np.isfinite(comp_panel[1]).all())
 
     def test_fdt_tsne_scatter_uses_dataloader_and_predict_fn(self) -> None:
         captured = {}

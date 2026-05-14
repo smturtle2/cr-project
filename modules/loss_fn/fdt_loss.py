@@ -17,39 +17,54 @@ class FDTDecompositionLoss(nn.Module):
         self,
         first: torch.Tensor,
         second: torch.Tensor,
+        *,
+        dim: int,
     ) -> torch.Tensor:
-        # [B, N] -> [B, N], where N = C*H*W
-        first = first - first.mean(dim=1, keepdim=True)
-        second = second - second.mean(dim=1, keepdim=True)
-        # [B, N] -> [B]
-        numerator = 2.0 * (first * second).mean(dim=1)
-        denominator = first.square().mean(dim=1) + second.square().mean(dim=1)
+        first = first - first.mean(dim=dim, keepdim=True)
+        second = second - second.mean(dim=dim, keepdim=True)
+        numerator = 2.0 * (first * second).mean(dim=dim)
+        denominator = first.square().mean(dim=dim) + second.square().mean(dim=dim)
         return numerator / (denominator + self.eps)
 
-    def _feature_score(
+    def _feature_scores(
         self,
         first: torch.Tensor,
         second: torch.Tensor,
-    ) -> torch.Tensor:
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         with torch.autocast(device_type=first.device.type, enabled=False):
-            # [B, C, H, W] -> [B, C*H*W]
-            first = first.float().flatten(1)
-            second = second.float().flatten(1)
-            return self._centered_ccc(first, second)
+            first = first.float()
+            second = second.float()
+            # [B, C, H, W] -> [B, H*W, C] -> [B, H*W] -> [B]
+            channel_score = self._centered_ccc(
+                first.flatten(2).transpose(1, 2),
+                second.flatten(2).transpose(1, 2),
+                dim=-1,
+            ).mean(dim=1)
+            # [B, C, H, W] -> [B, C, H*W] -> [B, C] -> [B]
+            spatial_score = self._centered_ccc(
+                first.flatten(2),
+                second.flatten(2),
+                dim=-1,
+            ).mean(dim=1)
+            return channel_score, spatial_score
 
     def _common_alignment_loss(
         self,
         sar_com: torch.Tensor,
         cld_com: torch.Tensor,
     ) -> torch.Tensor:
-        return (1.0 - self._feature_score(sar_com, cld_com).mean()) / 2.0
+        channel_score, spatial_score = self._feature_scores(sar_com, cld_com)
+        return (
+            (1.0 - channel_score).square() + (1.0 - spatial_score).square()
+        ).mean()
 
     def _comp_decorrelation_loss(
         self,
         sar_comp: torch.Tensor,
         cld_comp: torch.Tensor,
     ) -> torch.Tensor:
-        return self._feature_score(sar_comp, cld_comp).square().mean()
+        channel_score, spatial_score = self._feature_scores(sar_comp, cld_comp)
+        return (channel_score.square() + spatial_score.square()).mean()
 
     def forward(
         self,
