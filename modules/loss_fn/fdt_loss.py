@@ -13,99 +13,62 @@ class FDTDecompositionLoss(nn.Module):
         super().__init__()
         self.eps = eps
 
-    @staticmethod
-    def _tokens(feature: torch.Tensor) -> torch.Tensor:
-        return feature.flatten(2).transpose(1, 2).float()
-
-    def _joint_pc1_maps(
-        self,
-        first: torch.Tensor,
-        second: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        batch_size, _, height, width = first.shape
-        num_positions = height * width
-        with torch.autocast(device_type=first.device.type, enabled=False):
-            first_tokens = self._tokens(first)
-            second_tokens = self._tokens(second)
-            merged = torch.cat((first_tokens, second_tokens), dim=1)
-            centered = merged - merged.mean(dim=1, keepdim=True)
-
-        with torch.no_grad(), torch.autocast(device_type=first.device.type, enabled=False):
-            basis_source = centered.detach().float()
-            covariance = basis_source.transpose(1, 2) @ basis_source
-            _, eigenvectors = torch.linalg.eigh(covariance)
-            pc1 = eigenvectors[:, :, -1]
-
-        with torch.autocast(device_type=first.device.type, enabled=False):
-            projected = torch.bmm(centered.float(), pc1.unsqueeze(-1)).squeeze(-1)
-        first_map = projected[:, :num_positions].reshape(batch_size, height, width)
-        second_map = projected[:, num_positions:].reshape(batch_size, height, width)
-        return first_map, second_map
-
-    def _map_ncc(
+    def _centered_ccc(
         self,
         first: torch.Tensor,
         second: torch.Tensor,
     ) -> torch.Tensor:
-        first = first.flatten(1)
-        second = second.flatten(1)
-        first = first - first.mean(dim=1, keepdim=True)
-        second = second - second.mean(dim=1, keepdim=True)
+        first = first - first.mean(dim=-1, keepdim=True)
+        second = second - second.mean(dim=-1, keepdim=True)
 
-        numerator = (first * second).sum(dim=1)
-        denominator = torch.sqrt(
-            first.square().sum(dim=1) * second.square().sum(dim=1) + self.eps
-        )
-        return numerator / denominator
-
-    def _map_ccc(
-        self,
-        first: torch.Tensor,
-        second: torch.Tensor,
-    ) -> torch.Tensor:
-        first = first.flatten(1)
-        second = second.flatten(1)
-        first = first - first.mean(dim=1, keepdim=True)
-        second = second - second.mean(dim=1, keepdim=True)
-
-        cov = (first * second).mean(dim=1)
-        first_var = first.square().mean(dim=1)
-        second_var = second.square().mean(dim=1)
+        cov = (first * second).mean(dim=-1)
+        first_var = first.square().mean(dim=-1)
+        second_var = second.square().mean(dim=-1)
         return 2.0 * cov / (first_var + second_var + self.eps)
 
-    def _linear_cka(
+    def _channel_axis_ccc(
+        self,
+        first: torch.Tensor,
+        second: torch.Tensor,
+    ) -> torch.Tensor:
+        first = first.flatten(2).transpose(1, 2)
+        second = second.flatten(2).transpose(1, 2)
+        return self._centered_ccc(first, second).mean(dim=1)
+
+    def _spatial_axis_ccc(
+        self,
+        first: torch.Tensor,
+        second: torch.Tensor,
+    ) -> torch.Tensor:
+        first = first.flatten(2)
+        second = second.flatten(2)
+        return self._centered_ccc(first, second).mean(dim=1)
+
+    def _feature_ccc(
         self,
         first: torch.Tensor,
         second: torch.Tensor,
     ) -> torch.Tensor:
         with torch.autocast(device_type=first.device.type, enabled=False):
-            first = self._tokens(first)
-            second = self._tokens(second)
-            first = first - first.mean(dim=1, keepdim=True)
-            second = second - second.mean(dim=1, keepdim=True)
-
-            cross_cov = first.transpose(1, 2) @ second
-            first_cov = first.transpose(1, 2) @ first
-            second_cov = second.transpose(1, 2) @ second
-
-            numerator = cross_cov.square().sum(dim=(1, 2))
-            first_norm = first_cov.square().sum(dim=(1, 2))
-            second_norm = second_cov.square().sum(dim=(1, 2))
-            return numerator / torch.sqrt(first_norm * second_norm + self.eps)
+            first = first.float()
+            second = second.float()
+            channel_score = self._channel_axis_ccc(first, second)
+            spatial_score = self._spatial_axis_ccc(first, second)
+            return 0.5 * (channel_score + spatial_score)
 
     def _common_alignment_loss(
         self,
         sar_com: torch.Tensor,
         cld_com: torch.Tensor,
     ) -> torch.Tensor:
-        return 1.0 - self._linear_cka(sar_com, cld_com).mean()
+        return 1.0 - self._feature_ccc(sar_com, cld_com).mean()
 
     def _comp_decorrelation_loss(
         self,
         sar_comp: torch.Tensor,
         cld_comp: torch.Tensor,
     ) -> torch.Tensor:
-        return self._linear_cka(sar_comp, cld_comp).mean()
+        return self._feature_ccc(sar_comp, cld_comp).square().mean()
 
     def forward(
         self,

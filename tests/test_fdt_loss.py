@@ -20,28 +20,39 @@ class FDTDecompositionLossTest(unittest.TestCase):
 
         self.assertLess(float(loss), 1e-4)
 
-    def test_sign_flipped_common_features_have_small_common_loss(self) -> None:
+    def test_sign_flipped_common_features_have_large_common_loss(self) -> None:
         loss_fn = FDTDecompositionLoss()
         feature = torch.randn(2, 32, 16, 16)
         zeros = torch.zeros_like(feature)
 
         loss = loss_fn(feature, -feature, zeros, zeros)
 
-        self.assertLess(float(loss), 1e-4)
+        self.assertGreater(float(loss), 1.9)
 
-    def test_common_cka_is_computed_per_sample(self) -> None:
+    def test_feature_ccc_is_computed_per_sample(self) -> None:
         loss_fn = FDTDecompositionLoss()
         first = torch.randn(1, 16, 8, 8)
         second = torch.randn_like(first)
         sar_com = torch.cat((first, second), dim=0)
         cld_com = torch.cat((first, -second), dim=0)
 
-        cka = loss_fn._linear_cka(sar_com, cld_com)
+        ccc = loss_fn._feature_ccc(sar_com, cld_com)
 
-        self.assertEqual(cka.shape, (2,))
-        self.assertTrue(bool(torch.all(cka > 1.0 - 1e-4).item()))
+        self.assertEqual(ccc.shape, (2,))
+        self.assertGreater(float(ccc[0]), 1.0 - 1e-4)
+        self.assertLess(float(ccc[1]), -1.0 + 1e-4)
 
-    def test_common_loss_tracks_shared_spatial_representation(self) -> None:
+    def test_common_loss_penalizes_scale_mismatch(self) -> None:
+        loss_fn = FDTDecompositionLoss()
+        feature = torch.randn(1, 16, 8, 8)
+        zeros = torch.zeros_like(feature)
+
+        exact_loss = loss_fn(feature, feature, zeros, zeros)
+        scaled_loss = loss_fn(feature, 2.0 * feature, zeros, zeros)
+
+        self.assertGreater(float(scaled_loss), float(exact_loss) + 0.1)
+
+    def test_common_loss_does_not_let_one_dominant_channel_hide_mismatch(self) -> None:
         loss_fn = FDTDecompositionLoss()
         spatial = torch.randn(1, 1, 8, 8)
         mismatch = torch.randn(1, 1, 8, 8)
@@ -51,7 +62,21 @@ class FDTDecompositionLossTest(unittest.TestCase):
 
         loss = loss_fn(sar_com, cld_com, zeros, zeros)
 
-        self.assertLess(float(loss), 0.05)
+        self.assertGreater(float(loss), 0.25)
+
+    def test_feature_ccc_balances_channel_and_spatial_axes(self) -> None:
+        loss_fn = FDTDecompositionLoss()
+        feature = torch.randn(1, 4, 8, 8)
+        spatial_permuted = feature.roll(shifts=1, dims=3)
+        channel_permuted = feature.roll(shifts=1, dims=1)
+
+        exact_score = loss_fn._feature_ccc(feature, feature)
+        spatial_score = loss_fn._feature_ccc(feature, spatial_permuted)
+        channel_score = loss_fn._feature_ccc(feature, channel_permuted)
+
+        self.assertGreater(float(exact_score), 1.0 - 1e-4)
+        self.assertLess(float(spatial_score), float(exact_score) - 0.1)
+        self.assertLess(float(channel_score), float(exact_score) - 0.1)
 
     def test_comp_loss_is_computed_per_sample(self) -> None:
         loss_fn = FDTDecompositionLoss()
@@ -65,7 +90,7 @@ class FDTDecompositionLossTest(unittest.TestCase):
 
         self.assertGreater(float(loss), 0.05)
 
-    def test_comp_loss_penalizes_spatial_token_cka(self) -> None:
+    def test_comp_loss_penalizes_matching_feature_ccc(self) -> None:
         loss_fn = FDTDecompositionLoss()
         common = torch.randn(1, 4, 8, 8)
         sar_comp = torch.randn(1, 4, 8, 8)
