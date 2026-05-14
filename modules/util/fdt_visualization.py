@@ -86,32 +86,49 @@ def _pca_heatmaps(
     return _normalize_paired_maps(*_joint_pc1_maps(first, second))
 
 
-def _map_ncc(
-    first: np.ndarray,
-    second: np.ndarray,
+def _raw_ccc_score_and_contribution(
+    first: torch.Tensor,
+    second: torch.Tensor,
     *,
     eps: float = 1e-6,
-) -> float:
-    first_values = first.reshape(-1) - first.mean()
-    second_values = second.reshape(-1) - second.mean()
-    numerator = float(np.sum(first_values * second_values))
+) -> tuple[float, np.ndarray]:
+    first_values = first.detach().cpu().float().numpy()
+    second_values = second.detach().cpu().float().numpy()
+    if first_values.ndim != 3 or second_values.ndim != 3:
+        raise ValueError("features must have shape CxHxW")
+    if first_values.shape != second_values.shape:
+        raise ValueError("paired features must have the same shape")
+
+    first_values = first_values - first_values.mean()
+    second_values = second_values - second_values.mean()
+    product = first_values * second_values
     denominator = float(
-        np.sqrt(np.sum(first_values**2) * np.sum(second_values**2) + eps)
+        np.square(first_values).mean() + np.square(second_values).mean() + eps
     )
-    return numerator / denominator
-
-
-def _zscore_map(values: np.ndarray, *, eps: float = 1e-6) -> np.ndarray:
-    return (values - values.mean()) / max(float(values.std()), eps)
+    score = float(2.0 * product.mean() / denominator)
+    contribution = 2.0 * product.mean(axis=0) / denominator
+    return score, np.nan_to_num(contribution, copy=False)
 
 
 def _clip01(value: float) -> float:
     return float(np.clip(value, 0.0, 1.0))
 
 
-def _pc1_similarity_panel(first: np.ndarray, second: np.ndarray) -> np.ndarray:
-    difference = np.abs(_zscore_map(first) - _zscore_map(second))
-    return 1.0 - np.clip(difference / 2.0, 0.0, 1.0)
+def _normalize_nonnegative_map(values: np.ndarray, *, eps: float = 1e-6) -> np.ndarray:
+    high = float(np.quantile(values, 0.98))
+    if high <= eps:
+        return np.zeros_like(values)
+    return np.clip(values / high, 0.0, 1.0)
+
+
+def _positive_contribution_panel(contribution: np.ndarray, score: float) -> np.ndarray:
+    positive = np.clip(contribution, 0.0, None)
+    return _normalize_nonnegative_map(positive) * _clip01(score)
+
+
+def _leak_contribution_panel(contribution: np.ndarray, leak_score: float) -> np.ndarray:
+    leak = np.abs(contribution)
+    return _normalize_nonnegative_map(leak) * _clip01(leak_score)
 
 
 def build_fdt_example_panels(
@@ -135,10 +152,11 @@ def build_fdt_example_panels(
     sar_com_pca, cld_com_pca = _normalize_paired_maps(sar_com_pc1, cld_com_pc1)
     sar_comp_pc1, cld_comp_pc1 = _joint_pc1_maps(sar_comp, cld_comp)
     sar_comp_pca, cld_comp_pca = _normalize_paired_maps(sar_comp_pc1, cld_comp_pc1)
-    common_ncc = _map_ncc(sar_com_pc1, cld_com_pc1)
-    common_match = _pc1_similarity_panel(sar_com_pc1, cld_com_pc1) * _clip01(common_ncc)
-    comp_ncc_squared = _map_ncc(sar_comp_pc1, cld_comp_pc1) ** 2
-    comp_leak = _pc1_similarity_panel(sar_comp_pc1, cld_comp_pc1) * _clip01(comp_ncc_squared)
+    common_score, common_contribution = _raw_ccc_score_and_contribution(sar_com, cld_com)
+    common_match = _positive_contribution_panel(common_contribution, common_score)
+    comp_score, comp_contribution = _raw_ccc_score_and_contribution(sar_comp, cld_comp)
+    comp_leak_score = comp_score**2
+    comp_leak = _leak_contribution_panel(comp_contribution, comp_leak_score)
     cloudy_rgb, prediction_rgb, target_rgb = normalize_rgb_triplet(
         cloudy,
         prediction,
@@ -149,11 +167,11 @@ def build_fdt_example_panels(
         ("Prediction RGB", prediction_rgb, None),
         ("Target RGB", target_rgb, None),
         ("SAR Mean", normalize_map(sar.mean(dim=0)), "gray"),
-        (f"Com Match  {common_ncc:+.2f}  ↑ Good", common_match, "magma", 0.0, 1.0),
+        (f"Com Match  {common_score:+.2f}  ↑ Good", common_match, "magma", 0.0, 1.0),
         ("SAR Feat PCA", sar_feat_pca, "viridis"),
         ("SAR Com PCA", sar_com_pca, "viridis"),
         ("SAR Comp PCA", sar_comp_pca, "viridis"),
-        (f"Comp Leak  {comp_ncc_squared: .2f}  ↓ Good", comp_leak, "magma", 0.0, 1.0),
+        (f"Comp Leak  {comp_leak_score: .2f}  ↓ Good", comp_leak, "magma", 0.0, 1.0),
         ("Cloudy Feat PCA", cld_feat_pca, "viridis"),
         ("Cloudy Com PCA", cld_com_pca, "viridis"),
         ("Cloudy Comp PCA", cld_comp_pca, "viridis"),
