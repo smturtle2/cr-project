@@ -86,49 +86,51 @@ def _pca_heatmaps(
     return _normalize_paired_maps(*_joint_pc1_maps(first, second))
 
 
-def _raw_ccc_score_and_contribution(
+def _centered_ccc_numpy(
+    first: torch.Tensor | np.ndarray,
+    second: torch.Tensor | np.ndarray,
+    *,
+    axis: int,
+    eps: float = 1e-6,
+) -> np.ndarray:
+    if isinstance(first, torch.Tensor):
+        first_values = first.detach().cpu().float().numpy()
+    else:
+        first_values = np.asarray(first, dtype=np.float32)
+    if isinstance(second, torch.Tensor):
+        second_values = second.detach().cpu().float().numpy()
+    else:
+        second_values = np.asarray(second, dtype=np.float32)
+    if first_values.shape != second_values.shape:
+        raise ValueError("paired features must have the same shape")
+
+    first_values = first_values - first_values.mean(axis=axis, keepdims=True)
+    second_values = second_values - second_values.mean(axis=axis, keepdims=True)
+    numerator = 2.0 * (first_values * second_values).mean(axis=axis)
+    denominator = np.square(first_values).mean(axis=axis) + np.square(
+        second_values,
+    ).mean(axis=axis)
+    return np.nan_to_num(numerator / (denominator + eps), copy=False)
+
+
+def _axis_ccc_diagnostics(
     first: torch.Tensor,
     second: torch.Tensor,
     *,
     eps: float = 1e-6,
-) -> tuple[float, np.ndarray]:
-    first_values = first.detach().cpu().float().numpy()
-    second_values = second.detach().cpu().float().numpy()
-    if first_values.ndim != 3 or second_values.ndim != 3:
+) -> tuple[float, float, np.ndarray]:
+    if first.ndim != 3 or second.ndim != 3:
         raise ValueError("features must have shape CxHxW")
-    if first_values.shape != second_values.shape:
+    if first.shape != second.shape:
         raise ValueError("paired features must have the same shape")
 
-    first_values = first_values - first_values.mean()
-    second_values = second_values - second_values.mean()
-    product = first_values * second_values
-    denominator = float(
-        np.square(first_values).mean() + np.square(second_values).mean() + eps
-    )
-    score = float(2.0 * product.mean() / denominator)
-    contribution = 2.0 * product.mean(axis=0) / denominator
-    return score, np.nan_to_num(contribution, copy=False)
-
-
-def _clip01(value: float) -> float:
-    return float(np.clip(value, 0.0, 1.0))
-
-
-def _normalize_nonnegative_map(values: np.ndarray, *, eps: float = 1e-6) -> np.ndarray:
-    high = float(np.quantile(values, 0.98))
-    if high <= eps:
-        return np.zeros_like(values)
-    return np.clip(values / high, 0.0, 1.0)
-
-
-def _positive_contribution_panel(contribution: np.ndarray, score: float) -> np.ndarray:
-    positive = np.clip(contribution, 0.0, None)
-    return _normalize_nonnegative_map(positive) * _clip01(score)
-
-
-def _leak_contribution_panel(contribution: np.ndarray, leak_score: float) -> np.ndarray:
-    leak = np.abs(contribution)
-    return _normalize_nonnegative_map(leak) * _clip01(leak_score)
+    channel_map = _centered_ccc_numpy(first, second, axis=0, eps=eps)
+    channels = first.detach().cpu().float().reshape(first.shape[0], -1)
+    second_channels = second.detach().cpu().float().reshape(second.shape[0], -1)
+    spatial_scores = _centered_ccc_numpy(channels, second_channels, axis=1, eps=eps)
+    channel_score = float(channel_map.mean())
+    spatial_score = float(spatial_scores.mean())
+    return channel_score, spatial_score, channel_map
 
 
 def build_fdt_example_panels(
@@ -152,11 +154,21 @@ def build_fdt_example_panels(
     sar_com_pca, cld_com_pca = _normalize_paired_maps(sar_com_pc1, cld_com_pc1)
     sar_comp_pc1, cld_comp_pc1 = _joint_pc1_maps(sar_comp, cld_comp)
     sar_comp_pca, cld_comp_pca = _normalize_paired_maps(sar_comp_pc1, cld_comp_pc1)
-    common_score, common_contribution = _raw_ccc_score_and_contribution(sar_com, cld_com)
-    common_match = _positive_contribution_panel(common_contribution, common_score)
-    comp_score, comp_contribution = _raw_ccc_score_and_contribution(sar_comp, cld_comp)
-    comp_leak_score = comp_score**2
-    comp_leak = _leak_contribution_panel(comp_contribution, comp_leak_score)
+    common_channel_score, common_spatial_score, common_channel_map = (
+        _axis_ccc_diagnostics(sar_com, cld_com)
+    )
+    common_match = np.clip((common_channel_map + 1.0) / 2.0, 0.0, 1.0)
+    comp_channel_score, comp_spatial_score, comp_channel_map = _axis_ccc_diagnostics(
+        sar_comp,
+        cld_comp,
+    )
+    comp_leak = np.clip(np.abs(comp_channel_map), 0.0, 1.0)
+    common_title = (
+        f"COM MATCH | {common_channel_score:+.2f} | {common_spatial_score:+.2f}"
+    )
+    comp_title = (
+        f"COMP LEAK | {comp_channel_score:+.2f} | {comp_spatial_score:+.2f}"
+    )
     cloudy_rgb, prediction_rgb, target_rgb = normalize_rgb_triplet(
         cloudy,
         prediction,
@@ -167,11 +179,11 @@ def build_fdt_example_panels(
         ("Prediction RGB", prediction_rgb, None),
         ("Target RGB", target_rgb, None),
         ("SAR Mean", normalize_map(sar.mean(dim=0)), "gray"),
-        (f"Com Match  {common_score:+.2f}  ↑ Good", common_match, "magma", 0.0, 1.0),
+        (common_title, common_match, "viridis", 0.0, 1.0),
         ("SAR Feat PCA", sar_feat_pca, "viridis"),
         ("SAR Com PCA", sar_com_pca, "viridis"),
         ("SAR Comp PCA", sar_comp_pca, "viridis"),
-        (f"Comp Leak  {comp_leak_score: .2f}  ↓ Good", comp_leak, "magma", 0.0, 1.0),
+        (comp_title, comp_leak, "magma", 0.0, 1.0),
         ("Cloudy Feat PCA", cld_feat_pca, "viridis"),
         ("Cloudy Com PCA", cld_com_pca, "viridis"),
         ("Cloudy Comp PCA", cld_comp_pca, "viridis"),
