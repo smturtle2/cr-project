@@ -44,10 +44,16 @@ class FDT_CRNet_Direct(nn.Module):
         self.crnet = init_net(crnet, init_type=init_type)
 
     def forward(self, sar: torch.Tensor, cloudy: torch.Tensor):
-        fdt_feature, sar_com, cld_com, sar_comp, cld_comp = self.fdt(sar, cloudy)
+        (
+            fdt_feature,
+            feat1_com,
+            feat2_com,
+            feat1_comp,
+            feat2_comp,
+        ) = self.fdt(sar, cloudy)
         prediction = cloudy + self.crnet(fdt_feature)
         if self.return_decomposition:
-            return prediction, sar_com, cld_com, sar_comp, cld_comp
+            return prediction, feat1_com, feat2_com, feat1_comp, feat2_comp
         return prediction
 
 
@@ -94,8 +100,14 @@ class FDT_CRNet_Side(nn.Module):
 
     def forward(self, sar: torch.Tensor, cloudy: torch.Tensor):
         main_feature = self.input(sar, cloudy)
-        fdt_feature, sar_com, cld_com, sar_comp, cld_comp = self.fdt(sar, cloudy)
+        (
+            fdt_feature,
+            feat1_com,
+            feat2_com,
+            feat1_comp,
+            feat2_comp,
+        ) = self.fdt(sar, cloudy)
         prediction = cloudy + self.crnet(main_feature, fdt_feature)
         if self.return_decomposition:
-            return prediction, sar_com, cld_com, sar_comp, cld_comp
+            return prediction, feat1_com, feat2_com, feat1_comp, feat2_comp
         return prediction

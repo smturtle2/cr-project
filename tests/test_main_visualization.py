@@ -156,7 +156,10 @@ class MainVisualizationTest(unittest.TestCase):
 
         self.assertEqual(actual, path)
         self.assertEqual(captured["kwargs"]["title"], "test")
-        self.assertEqual(set(captured["features"]), {"SAR Com", "Cloudy Com", "SAR Comp", "Cloudy Comp"})
+        self.assertEqual(
+            set(captured["features"]),
+            {"Feat 1 Com", "Feat 2 Com", "Feat 1 Comp", "Feat 2 Comp"},
+        )
         for features in captured["features"].values():
             self.assertEqual(features.shape, (8, 2))
 

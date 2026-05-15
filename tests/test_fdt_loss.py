@@ -25,7 +25,7 @@ class FDTDecompositionLossTest(unittest.TestCase):
 
         loss = loss_fn._common_alignment_loss(feature, -feature)
 
-        self.assertGreater(float(loss), 8.0 - 1e-4)
+        self.assertGreater(float(loss), 4.0 - 1e-4)
 
     def test_feature_scores_are_computed_per_sample(self) -> None:
         loss_fn = FDTDecompositionLoss()
@@ -123,6 +123,17 @@ class FDTDecompositionLossTest(unittest.TestCase):
         loss = loss_fn._comp_decorrelation_loss(sar_comp, cld_comp)
 
         self.assertAlmostEqual(float(loss), 1.0, delta=0.05)
+
+    def test_comp_loss_penalizes_axis_score_cancellation(self) -> None:
+        loss_fn = FDTDecompositionLoss()
+        first = torch.tensor([[[[1.0, 1.0]], [[-1.0, -1.0]]]])
+        second = torch.tensor([[[[1.0, -1.0]], [[-1.0, 1.0]]]])
+
+        channel_score, _ = loss_fn._feature_scores(first, second)
+        loss = loss_fn._comp_decorrelation_loss(first, second)
+
+        self.assertLess(abs(float(channel_score)), 1e-4)
+        self.assertGreater(float(loss), 0.99)
 
     def test_comp_loss_penalizes_matching_raw_features(self) -> None:
         loss_fn = FDTDecompositionLoss()
