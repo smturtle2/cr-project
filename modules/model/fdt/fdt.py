@@ -149,6 +149,42 @@ class CommonEncoder(FeatureTransformerBase):
         return self._to_feature(tokens, height, width)
 
 
+class BranchEncoder(CommonEncoder):
+    pass
+
+
+class JointEncoder(FeatureTransformerBase):
+    def __init__(
+        self,
+        dim: int,
+        num_layers: int,
+        heads: int,
+    ):
+        super().__init__()
+        self.proj = nn.Sequential(
+            nn.Conv2d(dim * 2, dim, kernel_size=1),
+            nn.GELU(),
+            nn.Conv2d(
+                dim,
+                dim,
+                kernel_size=3,
+                padding=1,
+                padding_mode="replicate",
+            ),
+        )
+        self.blocks = nn.ModuleList(
+            [TransformerLayer(dim, num_heads=heads) for _ in range(num_layers)]
+        )
+
+    def forward(self, first: torch.Tensor, second: torch.Tensor) -> torch.Tensor:
+        feature = self.proj(torch.cat((first, second), dim=1))
+        height, width = feature.shape[-2:]
+        tokens = self._to_tokens(feature)
+        for block in self.blocks:
+            tokens = block(tokens)
+        return self._to_feature(tokens, height, width)
+
+
 # Feature Decomposition Transformer
 class FDT(nn.Module):
     def __init__(
@@ -179,31 +215,37 @@ class FDT(nn.Module):
         self.sar_encoder = Encoder(sar_channels, dim, num_layers, num_heads)
         self.cld_encoder = Encoder(cloudy_channels, dim, num_layers, num_heads)
 
-        self.sar_common_encoder = CommonEncoder(dim, num_layers, num_heads)
-        self.cld_common_encoder = CommonEncoder(dim, num_layers, num_heads)
+        self.joint_encoder = JointEncoder(dim, num_layers, num_heads)
+        self.feat1_encoder = BranchEncoder(dim, num_layers, num_heads)
+        self.feat2_encoder = BranchEncoder(dim, num_layers, num_heads)
+        self.feat1_common_encoder = CommonEncoder(dim, num_layers, num_heads)
+        self.feat2_common_encoder = CommonEncoder(dim, num_layers, num_heads)
         self.com_fuse = nn.Conv2d(self.up_dim * 2, self.common_dim, kernel_size=1)
         self.up = ResizeConvUp(dim)
 
     def forward(self, sar: torch.Tensor, cloudy: torch.Tensor):
-        sar_feat_l = self.sar_encoder(sar)
-        cld_feat_l = self.cld_encoder(cloudy)
+        sar_base_l = self.sar_encoder(sar)
+        cld_base_l = self.cld_encoder(cloudy)
+        joint_l = self.joint_encoder(sar_base_l, cld_base_l)
 
-        sar_com_l = self.sar_common_encoder(sar_feat_l)
-        cld_com_l = self.cld_common_encoder(cld_feat_l)
+        feat1_l = self.feat1_encoder(joint_l)
+        feat2_l = self.feat2_encoder(joint_l)
+        feat1_com_l = self.feat1_common_encoder(feat1_l)
+        feat2_com_l = self.feat2_common_encoder(feat2_l)
 
-        sar_feat = self.up(sar_feat_l)
-        cld_feat = self.up(cld_feat_l)
-        sar_com = self.up(sar_com_l)
-        cld_com = self.up(cld_com_l)
-        sar_comp = sar_feat - sar_com
-        cld_comp = cld_feat - cld_com
+        feat1 = self.up(feat1_l)
+        feat2 = self.up(feat2_l)
+        feat1_com = self.up(feat1_com_l)
+        feat2_com = self.up(feat2_com_l)
+        feat1_comp = feat1 - feat1_com
+        feat2_comp = feat2 - feat2_com
 
-        com_fused = self.com_fuse(torch.cat((sar_com, cld_com), dim=1))
-        output = torch.cat((com_fused, sar_comp, cld_comp), dim=1)
+        com_fused = self.com_fuse(torch.cat((feat1_com, feat2_com), dim=1))
+        output = torch.cat((com_fused, feat1_comp, feat2_comp), dim=1)
         return (
             output,
-            sar_com,
-            cld_com,
-            sar_comp,
-            cld_comp,
+            feat1_com,
+            feat2_com,
+            feat1_comp,
+            feat2_comp,
         )
