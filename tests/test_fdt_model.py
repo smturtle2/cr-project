@@ -3,7 +3,7 @@ from __future__ import annotations
 import torch
 import torch.nn as nn
 
-from modules.model.fdt import FDT, FDT_CRNet_Direct, FDT_CRNet_Side, ResizeConvUp
+from modules.model.fdt import FDT, FDT_CRNet_Direct, FDT_CRNet_Side, FDTOutput, RFDB
 from modules.model.module.attention import MultiHeadAttention
 
 
@@ -13,15 +13,37 @@ def test_fdt_imports_and_runs_forward() -> None:
     cloudy = torch.randn(1, 13, 16, 16)
 
     with torch.no_grad():
-        outputs = model(sar, cloudy)
+        output = model(sar, cloudy)
 
-    assert len(outputs) == 5
-    assert outputs[0].shape == (1, 256, 16, 16)
-    for output in outputs[1:]:
-        assert output.shape == (1, 128, 16, 16)
-    for output in outputs:
-        assert output.dtype == cloudy.dtype
-        assert bool(torch.isfinite(output).all().item())
+    assert isinstance(output, FDTOutput)
+    assert output.feature.shape == (1, 256, 16, 16)
+    for feature in (
+        output.highres.sar_com,
+        output.highres.cld_com,
+        output.highres.sar_comp,
+        output.highres.cld_comp,
+    ):
+        assert feature.shape == (1, 256, 16, 16)
+    for feature in (
+        output.lowres.sar_com,
+        output.lowres.cld_com,
+        output.lowres.sar_comp,
+        output.lowres.cld_comp,
+    ):
+        assert feature.shape == (1, 256, 8, 8)
+    for feature in (
+        output.feature,
+        output.highres.sar_com,
+        output.highres.cld_com,
+        output.highres.sar_comp,
+        output.highres.cld_comp,
+        output.lowres.sar_com,
+        output.lowres.cld_com,
+        output.lowres.sar_comp,
+        output.lowres.cld_comp,
+    ):
+        assert feature.dtype == cloudy.dtype
+        assert bool(torch.isfinite(feature).all().item())
 
 
 def test_fdt_decomposes_sar_and_cloudy_features() -> None:
@@ -66,14 +88,14 @@ def test_multi_head_attention_accepts_distinct_value_source() -> None:
     assert torch.allclose(actual, expected)
 
 
-def test_resize_conv_up_returns_expected_feature_shape() -> None:
-    up = ResizeConvUp(256).eval()
+def test_rfdb_returns_expected_feature_shape() -> None:
+    rfdb = RFDB(256).eval()
     feature = torch.randn(2, 256, 8, 8)
 
     with torch.no_grad():
-        actual = up(feature)
+        actual = rfdb(feature)
 
-    assert actual.shape == (2, 128, 16, 16)
+    assert actual.shape == feature.shape
     assert actual.dtype == feature.dtype
     assert bool(torch.isfinite(actual).all().item())
 

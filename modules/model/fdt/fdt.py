@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -7,65 +9,220 @@ import torch.nn.functional as F
 from ..module.attention import TransformerLayer
 
 
-class _Residual3x3Block(nn.Module):
+@dataclass
+class FDTDecomposition:
+    sar_com: torch.Tensor
+    cld_com: torch.Tensor
+    sar_comp: torch.Tensor
+    cld_comp: torch.Tensor
+
+
+@dataclass
+class FDTOutput:
+    feature: torch.Tensor
+    lowres: FDTDecomposition
+    highres: FDTDecomposition
+
+
+class Upsample(nn.Module):
+    def __init__(
+        self,
+        dim: int,
+    ):
+        super().__init__()
+        self.up = nn.Sequential(
+            nn.ConvTranspose2d(
+                dim,
+                dim,
+                kernel_size=4,
+                stride=2,
+                padding=1,
+            ),
+            nn.GELU(),
+        )
+
+    def forward(self, feature: torch.Tensor) -> torch.Tensor:
+        return self.up(feature)
+
+# Enhanced Spatial Attention
+class ESA(nn.Module):
     def __init__(self, channels: int):
         super().__init__()
-        self.net = nn.Sequential(
+        reduced_channels = max(channels // 4, 1)
+        self.conv1 = nn.Conv2d(channels, reduced_channels, kernel_size=1)
+        self.conv_f = nn.Conv2d(reduced_channels, reduced_channels, kernel_size=1)
+        self.conv_max = nn.Conv2d(
+            reduced_channels, reduced_channels, kernel_size=3, padding=1
+        )
+        self.conv2 = nn.Conv2d(
+            reduced_channels, reduced_channels, kernel_size=3, stride=2
+        )
+        self.conv3 = nn.Conv2d(
+            reduced_channels, reduced_channels, kernel_size=3, padding=1
+        )
+        self.conv3_ = nn.Conv2d(
+            reduced_channels, reduced_channels, kernel_size=3, padding=1
+        )
+        self.conv4 = nn.Conv2d(reduced_channels, channels, kernel_size=1)
+        self.relu = nn.ReLU(inplace=True)
+
+    def forward(self, feature: torch.Tensor) -> torch.Tensor:
+        c1_ = self.conv1(feature)
+        c1 = self.conv2(c1_)
+        pool_kernel = min(7, c1.shape[-2], c1.shape[-1])
+        pool_stride = min(3, pool_kernel)
+        pooled = F.max_pool2d(c1, kernel_size=pool_kernel, stride=pool_stride)
+        context = self.relu(self.conv_max(pooled))
+        context = self.relu(self.conv3(context))
+        context = self.conv3_(context)
+        context = F.interpolate(
+            context,
+            size=feature.shape[-2:],
+            mode="bilinear",
+            align_corners=False,
+        )
+        attention = torch.sigmoid(self.conv4(context + self.conv_f(c1_)))
+        return feature * attention
+
+
+class RFDB(nn.Module):
+    def __init__(self, channels: int):
+        super().__init__()
+        distilled_channels = channels // 2
+        if distilled_channels <= 0:
+            raise ValueError("channels must be greater than one")
+        self.c1_d = nn.Conv2d(channels, distilled_channels, kernel_size=1)
+        self.c1_r = nn.Conv2d(channels, channels, kernel_size=3, padding=1)
+        self.c2_d = nn.Conv2d(channels, distilled_channels, kernel_size=1)
+        self.c2_r = nn.Conv2d(channels, channels, kernel_size=3, padding=1)
+        self.c3_d = nn.Conv2d(channels, distilled_channels, kernel_size=1)
+        self.c3_r = nn.Conv2d(channels, channels, kernel_size=3, padding=1)
+        self.c4 = nn.Conv2d(channels, distilled_channels, kernel_size=3, padding=1)
+        self.act = nn.GELU()
+        self.c5 = nn.Conv2d(distilled_channels * 4, channels, kernel_size=1)
+        self.esa = ESA(channels)
+
+    def forward(self, feature: torch.Tensor) -> torch.Tensor:
+        distilled_c1 = self.act(self.c1_d(feature))
+        r_c1 = self.act(self.c1_r(feature) + feature)
+
+        distilled_c2 = self.act(self.c2_d(r_c1))
+        r_c2 = self.act(self.c2_r(r_c1) + r_c1)
+
+        distilled_c3 = self.act(self.c3_d(r_c2))
+        r_c3 = self.act(self.c3_r(r_c2) + r_c2)
+
+        r_c4 = self.act(self.c4(r_c3))
+        fused = self.c5(
+            torch.cat((distilled_c1, distilled_c2, distilled_c3, r_c4), dim=1)
+        )
+        return self.esa(fused)
+
+
+class HighResEncoder(nn.Module):
+    def __init__(self, in_channels: int, dim: int):
+        super().__init__()
+        self.blocks = nn.Sequential(
             nn.Conv2d(
-                channels,
-                channels,
+                in_channels,
+                dim,
                 kernel_size=3,
+                stride=1,
+                padding=1,
+                padding_mode="replicate",
+            ),
+            nn.GELU(),
+            RFDB(dim),
+        )
+
+    def forward(self, image: torch.Tensor) -> torch.Tensor:
+        return self.blocks(image)
+
+
+class CommonGate(nn.Module):
+    def __init__(self, dim: int, heads: int = 4):
+        super().__init__()
+        if dim % heads != 0:
+            raise ValueError("dim must be divisible by heads")
+        self.dim = dim
+        self.heads = heads
+        self.channel_key = nn.Conv2d(dim, 1, kernel_size=1)
+        self.channel_query = nn.Conv2d(dim, dim, kernel_size=1)
+        self.spatial_key = nn.Conv2d(dim, dim, kernel_size=1)
+        self.spatial_query = nn.Conv2d(dim, dim, kernel_size=1)
+        self.gate_proj = nn.Conv2d(dim * 2, dim, kernel_size=1)
+
+    def forward(
+        self,
+        target_feat: torch.Tensor,
+        other_feat: torch.Tensor,
+    ) -> torch.Tensor:
+        batch, channels, height, width = target_feat.shape
+
+        channel_query = self.channel_query(target_feat).view(
+            batch,
+            channels,
+            height * width,
+        )
+        channel_key = (
+            self.channel_key(other_feat)
+            .view(batch, 1, height * width)
+            .transpose(1, 2)
+            .contiguous()
+        )
+        channel_relevance = torch.sigmoid(torch.bmm(channel_query, channel_key))
+        channel_feature = channel_relevance.unsqueeze(2) * target_feat
+
+        spatial_query = (
+            self.spatial_query(target_feat)
+            .view(batch, channels, height * width)
+            .transpose(1, 2)
+            .contiguous()
+        )
+        spatial_key = (
+            self.spatial_key(other_feat)
+            .view(batch, channels, height * width)
+            .mean(dim=2)
+            .unsqueeze(2)
+        )
+        spatial_relevance = torch.sigmoid(torch.bmm(spatial_query, spatial_key))
+        spatial_feature = (
+            spatial_relevance.transpose(1, 2)
+            .contiguous()
+            .view(batch, 1, height, width)
+            * target_feat
+        )
+
+        return self.gate_proj(torch.cat((channel_feature, spatial_feature), dim=1))
+
+
+class Encoder(nn.Module):
+    def __init__(
+        self,
+        in_channels: int,
+        dim: int,
+        num_layers: int,
+        heads: int,
+    ):
+        super().__init__()
+        self.proj = nn.Sequential(
+            nn.Conv2d(
+                in_channels,
+                dim,
+                kernel_size=3,
+                stride=1,
                 padding=1,
                 padding_mode="replicate",
             ),
             nn.GELU(),
             nn.Conv2d(
-                channels,
-                channels,
-                kernel_size=3,
-                padding=1,
-                padding_mode="replicate",
+                dim, dim, kernel_size=3, stride=2, padding=1, padding_mode="replicate"
             ),
         )
-        nn.init.zeros_(self.net[-1].weight)
-        nn.init.zeros_(self.net[-1].bias)
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return x + self.net(x)
-
-
-class ResizeConvUp(nn.Module):
-    def __init__(self, in_channels: int, blocks: int = 2):
-        super().__init__()
-        if in_channels % 2 != 0:
-            raise ValueError("in_channels must be divisible by 2")
-        if blocks < 0:
-            raise ValueError("blocks must be non-negative")
-
-        self.in_channels = in_channels
-        self.out_channels = in_channels // 2
-        self.blocks = blocks
-        self.residuals = nn.Sequential(
-            *[_Residual3x3Block(in_channels) for _ in range(blocks)]
-        )
-        self.refine = nn.Conv2d(
-            in_channels,
-            self.out_channels,
-            kernel_size=1,
+        self.blocks = nn.ModuleList(
+            [TransformerLayer(dim, num_heads=heads) for _ in range(num_layers)]
         )
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        x = F.interpolate(
-            x,
-            scale_factor=2,
-            mode="bilinear",
-            align_corners=False,
-        )
-        x = self.residuals(x)
-        return self.refine(x)
-
-
-class FeatureTransformerBase(nn.Module):
     @staticmethod
     def _to_tokens(feature: torch.Tensor) -> torch.Tensor:
         return feature.flatten(2).transpose(1, 2).contiguous()
@@ -82,68 +239,10 @@ class FeatureTransformerBase(nn.Module):
             .contiguous()
         )
 
-
-class Encoder(FeatureTransformerBase):
-    def __init__(
-        self,
-        in_channels: int,
-        dim: int,
-        num_layers: int,
-        heads: int,
-    ):
-        super().__init__()
-        self.proj = nn.Sequential(
-            nn.Conv2d(
-                in_channels,
-                dim,
-                kernel_size=1,
-            ),
-            nn.GELU(),
-            nn.Conv2d(
-                dim,
-                dim,
-                kernel_size=3,
-                padding=1,
-                padding_mode="replicate",
-            ),
-            nn.GELU(),
-            nn.Conv2d(
-                dim,
-                dim,
-                kernel_size=3,
-                stride=2,
-                padding=1,
-                padding_mode="replicate",
-            ),
-        )
-        self.blocks = nn.ModuleList(
-            [TransformerLayer(dim, num_heads=heads) for _ in range(num_layers)]
-        )
-
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         feature = self.proj(x)
         height, width = feature.shape[-2:]
         tokens = self._to_tokens(feature)
-        for block in self.blocks:
-            tokens = block(tokens)
-        return self._to_feature(tokens, height, width)
-
-
-class CommonEncoder(FeatureTransformerBase):
-    def __init__(
-        self,
-        dim: int,
-        num_layers: int,
-        heads: int,
-    ):
-        super().__init__()
-        self.blocks = nn.ModuleList(
-            [TransformerLayer(dim, num_heads=heads) for _ in range(num_layers)]
-        )
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        height, width = x.shape[-2:]
-        tokens = self._to_tokens(x)
         for block in self.blocks:
             tokens = block(tokens)
         return self._to_feature(tokens, height, width)
@@ -162,8 +261,6 @@ class FDT(nn.Module):
         super().__init__()
         if dim % num_heads != 0:
             raise ValueError("dim must be divisible by num_heads")
-        if dim % 2 != 0:
-            raise ValueError("dim must be divisible by 2")
         if num_layers <= 0:
             raise ValueError("num_layers must be greater than zero")
 
@@ -173,37 +270,81 @@ class FDT(nn.Module):
         self.num_layers = num_layers
         self.heads = num_heads
         self.num_heads = num_heads
-        self.up_dim = dim // 2
-        self.common_dim = dim // 2
+        self.high_dim = dim
+        self.common_out_dim = dim // 4
+        self.comp_out_dim = (dim - self.common_out_dim) // 2
+        if self.common_out_dim + self.comp_out_dim * 2 != dim:
+            raise ValueError("dim must support common/complementary projection split")
 
         self.sar_encoder = Encoder(sar_channels, dim, num_layers, num_heads)
         self.cld_encoder = Encoder(cloudy_channels, dim, num_layers, num_heads)
+        self.sar_high_encoder = HighResEncoder(sar_channels, self.high_dim)
+        self.cld_high_encoder = HighResEncoder(cloudy_channels, self.high_dim)
 
-        self.sar_common_encoder = CommonEncoder(dim, num_layers, num_heads)
-        self.cld_common_encoder = CommonEncoder(dim, num_layers, num_heads)
-        self.com_fuse = nn.Conv2d(self.up_dim * 2, self.common_dim, kernel_size=1)
-        self.up = ResizeConvUp(dim)
+        self.sar_common_gate = CommonGate(dim, heads=num_heads)
+        self.cld_common_gate = CommonGate(dim, heads=num_heads)
+        self.sar_high_common_gate = CommonGate(dim, heads=num_heads)
+        self.cld_high_common_gate = CommonGate(dim, heads=num_heads)
+        self.sar_low_decomp_fuse = nn.Conv2d(dim * 2, dim, kernel_size=1)
+        self.cld_low_decomp_fuse = nn.Conv2d(dim * 2, dim, kernel_size=1)
+        self.sar_fuse = nn.Conv2d(self.high_dim + dim, dim, kernel_size=1)
+        self.cld_fuse = nn.Conv2d(self.high_dim + dim, dim, kernel_size=1)
+        self.com_fuse = nn.Conv2d(dim * 2, self.common_out_dim, kernel_size=1)
+        self.sar_comp_proj = nn.Conv2d(dim, self.comp_out_dim, kernel_size=1)
+        self.cld_comp_proj = nn.Conv2d(dim, self.comp_out_dim, kernel_size=1)
 
-    def forward(self, sar: torch.Tensor, cloudy: torch.Tensor):
+        self.sar_feat_up = Upsample(dim)
+        self.cld_feat_up = Upsample(dim)
+
+    @staticmethod
+    def _decompose(
+        sar_feat: torch.Tensor,
+        cld_feat: torch.Tensor,
+        sar_gate: torch.Tensor,
+        cld_gate: torch.Tensor,
+    ) -> FDTDecomposition:
+        return FDTDecomposition(
+            sar_com=sar_gate * sar_feat,
+            cld_com=cld_gate * cld_feat,
+            sar_comp=(1.0 - sar_gate) * sar_feat,
+            cld_comp=(1.0 - cld_gate) * cld_feat,
+        )
+
+    def forward(self, sar: torch.Tensor, cloudy: torch.Tensor) -> FDTOutput:
         sar_feat_l = self.sar_encoder(sar)
         cld_feat_l = self.cld_encoder(cloudy)
 
-        sar_com_l = self.sar_common_encoder(sar_feat_l)
-        cld_com_l = self.cld_common_encoder(cld_feat_l)
-
-        sar_feat = self.up(sar_feat_l)
-        cld_feat = self.up(cld_feat_l)
-        sar_com = self.up(sar_com_l)
-        cld_com = self.up(cld_com_l)
-        sar_comp = sar_feat - sar_com
-        cld_comp = cld_feat - cld_com
-
-        com_fused = self.com_fuse(torch.cat((sar_com, cld_com), dim=1))
-        output = torch.cat((com_fused, sar_comp), dim=1)
-        return (
-            output,
-            sar_com,
-            cld_com,
-            sar_comp,
-            cld_comp,
+        sar_gate_l = self.sar_common_gate(sar_feat_l, cld_feat_l)
+        cld_gate_l = self.cld_common_gate(cld_feat_l, sar_feat_l)
+        lowres = self._decompose(
+            sar_feat_l,
+            cld_feat_l,
+            torch.sigmoid(sar_gate_l),
+            torch.sigmoid(cld_gate_l),
         )
+
+        sar_low = self.sar_low_decomp_fuse(
+            torch.cat((lowres.sar_com, lowres.sar_comp), dim=1)
+        )
+        cld_low = self.cld_low_decomp_fuse(
+            torch.cat((lowres.cld_com, lowres.cld_comp), dim=1)
+        )
+        sar_up = self.sar_feat_up(sar_low)
+        cld_up = self.cld_feat_up(cld_low)
+        sar_high = self.sar_high_encoder(sar)
+        cld_high = self.cld_high_encoder(cloudy)
+
+        sar_feat = self.sar_fuse(torch.cat((sar_high, sar_up), dim=1))
+        cld_feat = self.cld_fuse(torch.cat((cld_high, cld_up), dim=1))
+        sar_gate = torch.sigmoid(self.sar_high_common_gate(sar_feat, cld_feat))
+        cld_gate = torch.sigmoid(self.cld_high_common_gate(cld_feat, sar_feat))
+
+        highres = self._decompose(sar_feat, cld_feat, sar_gate, cld_gate)
+
+        com_fused = self.com_fuse(
+            torch.cat((highres.sar_com, highres.cld_com), dim=1)
+        )
+        sar_comp = self.sar_comp_proj(highres.sar_comp)
+        cld_comp = self.cld_comp_proj(highres.cld_comp)
+        feature = torch.cat((com_fused, sar_comp, cld_comp), dim=1)
+        return FDTOutput(feature=feature, lowres=lowres, highres=highres)
