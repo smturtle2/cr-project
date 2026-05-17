@@ -443,7 +443,7 @@ provides-extras = ["torch26", "latest"]
 [[package]]
 name = "cr-train"
 version = "0.1.0"
-source = { git = "https://github.com/smturtle2/cr-train.git#26cfb2940bfd7c8e426a4924969f2b6d8a5ffce8" }
+source = { git = "https://github.com/smturtle2/cr-train.git#a4bfb8bb76585733922ba684e4d970db32b880a3" }
 dependencies = [
     { name = "boto3" },
     { name = "datasets" },
