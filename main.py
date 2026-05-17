@@ -19,6 +19,8 @@ from cr_train.data import DATASET_ID, build_dataloader
 from cr_train.data.dataset import prepare_split
 from cr_train.data.runtime import ensure_split_cache
 
+from modules.util.env_eak import prepare_b2_environment
+
 
 # Sentinel-2 13채널 중 사람이 보기 쉬운 RGB 조합(B4, B3, B2) 인덱스다.
 RGB_CHANNELS = (3, 2, 1)
@@ -57,6 +59,7 @@ MetricFn = Callable[[torch.Tensor, Batch], torch.Tensor]
 StepRecord = Mapping[str, Any]
 SchedulerTiming = Literal["after_validation", "before_optimizer_step", "after_optimizer_step"]
 MixedPrecision = Literal["off", "fp16", "bf16"]
+CacheSource = Literal["local", "B2"]
 
 
 @dataclass(slots=True, frozen=True)
@@ -176,6 +179,10 @@ def build_trainer(
     test_max_samples: int | None = 2048,
     output_dir: str | Path = Path("artifacts"),
     cache_dir: str | Path | None = None,
+    cache_src: CacheSource = "local",
+    b2_staging_dir: str | Path | None = None,
+    b2_staging_max_blocks: int = 80,
+    b2_download_workers: int | None = None,
     num_workers: int | str = "auto",
     multiprocessing_context: str | None = None,
     scheduler_timing: SchedulerTiming = "after_validation",
@@ -186,6 +193,7 @@ def build_trainer(
     mixed_precision: MixedPrecision = "bf16",
 ) -> Trainer:
     # main.py와 그 소비자들이 같은 Trainer 구성을 공유하도록 공용 생성 helper로 둔다.
+    prepare_b2_environment(cache_src)
     output_dir = Path(output_dir)
     seed_everything(seed)
     device = resolve_device()
@@ -208,6 +216,10 @@ def build_trainer(
         max_test_samples=test_max_samples,
         output_dir=output_dir,
         cache_dir=cache_dir,
+        cache_src=cache_src,
+        b2_staging_dir=b2_staging_dir,
+        b2_staging_max_blocks=b2_staging_max_blocks,
+        b2_download_workers=b2_download_workers,
         batch_size=batch_size,
         accum_steps=accum_steps,
         epochs=max_epochs,
@@ -603,15 +615,21 @@ def build_loader(
     epoch_index: int,
 ):
     # 예시 이미지를 만들거나 notebook에서 배치 shape를 확인할 때만 별도 loader가 필요하다.
-    # 최신 cr-train은 캐시 기반 split 준비만 지원하므로 먼저 필요한 블록을 항상 맞춘다.
-    ensure_split_cache(
-        split=split,
-        dataset_name=DATASET_ID,
-        revision=None,
-        max_samples=max_samples,
-        seed=trainer.seed,
-        cache_root=trainer.cache_root,
-    )
+    # local cache는 먼저 필요한 블록을 맞추고, B2 cache는 이미 materialized된 원격 cache를 읽는다.
+    cache_src = getattr(trainer, "cache_src", "local")
+    b2_staging_dir = getattr(trainer, "b2_staging_dir", None)
+    b2_staging_max_blocks = getattr(trainer, "b2_staging_max_blocks", 80)
+    b2_download_workers = getattr(trainer, "b2_download_workers", None)
+    prepare_b2_environment(cache_src)
+    if cache_src == "local":
+        ensure_split_cache(
+            split=split,
+            dataset_name=DATASET_ID,
+            revision=None,
+            max_samples=max_samples,
+            seed=trainer.seed,
+            cache_root=trainer.cache_root,
+        )
 
     prepared = prepare_split(
         split=split,
@@ -622,6 +640,10 @@ def build_loader(
         epoch=epoch_index,
         training=training,
         cache_root=trainer.cache_root,
+        cache_src=cache_src,
+        b2_staging_dir=b2_staging_dir if cache_src == "B2" else None,
+        b2_staging_max_blocks=b2_staging_max_blocks,
+        b2_download_workers=b2_download_workers if cache_src == "B2" else None,
     )
 
     return build_dataloader(
@@ -1285,6 +1307,10 @@ def main(
     test_max_samples: int | None = 2048,
     output_dir: str | Path = Path("artifacts"),
     cache_dir: str | Path | None = None,
+    cache_src: CacheSource = "local",
+    b2_staging_dir: str | Path | None = None,
+    b2_staging_max_blocks: int = 80,
+    b2_download_workers: int | None = None,
     resume: str | Path | None = None,
     num_workers: int | str = "auto",
     multiprocessing_context: str | None = None,
@@ -1328,6 +1354,10 @@ def main(
             test_max_samples=test_max_samples,
             output_dir=output_dir,
             cache_dir=cache_dir,
+            cache_src=cache_src,
+            b2_staging_dir=b2_staging_dir,
+            b2_staging_max_blocks=b2_staging_max_blocks,
+            b2_download_workers=b2_download_workers,
             num_workers=num_workers,
             multiprocessing_context=multiprocessing_context,
             scheduler_timing=scheduler_timing,
