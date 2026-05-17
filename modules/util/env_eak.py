@@ -118,6 +118,13 @@ def _decrypt_eak_payload(path: Path) -> bytes:
         raise RuntimeError(f"{path.name} could not be decrypted") from exc
 
 
+def _normalize_env_value(value: str) -> str:
+    value = value.strip()
+    if len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}:
+        return value[1:-1]
+    return value
+
+
 def load_env_eak(eak_path: str | os.PathLike[str] = DEFAULT_EAK_PATH) -> None:
     eak_path = Path(eak_path)
     decrypted = _decrypt_eak_payload(eak_path)
@@ -133,7 +140,7 @@ def load_env_eak(eak_path: str | os.PathLike[str] = DEFAULT_EAK_PATH) -> None:
         key = key.strip()
         if not separator or not key or not key.replace("_", "A").isalnum() or key[0].isdigit():
             raise ValueError(f"{eak_path.name} contains an invalid environment line at {line_number}")
-        os.environ[key] = value
+        os.environ[key] = _normalize_env_value(value)
 
 
 def prepare_b2_environment(

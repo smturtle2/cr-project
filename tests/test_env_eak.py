@@ -17,9 +17,9 @@ class EnvEakTest(unittest.TestCase):
             env_path = Path(tmp_dir) / "env"
             eak_path = Path(tmp_dir) / "env.eak"
             env_path.write_text(
-                "B2_BUCKET=unit-bucket\n"
-                "B2_ENDPOINT=https://unit.example\n"
-                "B2_KEY_ID=unit-key-id\n"
+                'B2_BUCKET="unit-bucket"\n'
+                'B2_ENDPOINT="https://unit.example"\n'
+                "B2_KEY_ID='unit-key-id'\n"
                 "B2_APP_KEY=unit-app-key\n",
                 encoding="utf-8",
             )
