@@ -7,12 +7,12 @@ from typing import Any
 import numpy as np
 import torch
 
-TSNE_GROUPS = ("Feat 1 Com", "Feat 2 Com", "Feat 1 Comp", "Feat 2 Comp")
+TSNE_GROUPS = ("SAR Com", "Cloudy Com", "SAR Comp", "Cloudy Comp")
 TSNE_GROUP_COLORS = {
-    "Feat 1 Com": "#2563eb",
-    "Feat 2 Com": "#06b6d4",
-    "Feat 1 Comp": "#dc2626",
-    "Feat 2 Comp": "#f97316",
+    "SAR Com": "#2563eb",
+    "Cloudy Com": "#06b6d4",
+    "SAR Comp": "#dc2626",
+    "Cloudy Comp": "#f97316",
 }
 
 
@@ -23,8 +23,8 @@ def split_fdt_output(
         raise TypeError(
             "FDT_CRNet must return prediction and four decomposition tensors"
         )
-    prediction, feat1_com, feat2_com, feat1_comp, feat2_comp = model_output
-    return prediction, feat1_com, feat2_com, feat1_comp, feat2_comp
+    prediction, sar_com, cld_com, sar_comp, cld_comp = model_output
+    return prediction, sar_com, cld_com, sar_comp, cld_comp
 
 
 def prediction_from_fdt_output(model_output: Any) -> torch.Tensor:
@@ -146,29 +146,21 @@ def build_fdt_example_panels(
     ],
     normalize_map: Callable[[torch.Tensor], np.ndarray],
 ):
-    _, feat1_com, feat2_com, feat1_comp, feat2_comp = split_fdt_output(
-        model_output
-    )
-    feat1_feat = feat1_com + feat1_comp
-    feat2_feat = feat2_com + feat2_comp
-    feat1_feat_pca, feat2_feat_pca = _pca_heatmaps(feat1_feat, feat2_feat)
-    feat1_com_pc1, feat2_com_pc1 = _joint_pc1_maps(feat1_com, feat2_com)
-    feat1_com_pca, feat2_com_pca = _normalize_paired_maps(
-        feat1_com_pc1, feat2_com_pc1
-    )
-    feat1_comp_pc1, feat2_comp_pc1 = _joint_pc1_maps(
-        feat1_comp, feat2_comp
-    )
-    feat1_comp_pca, feat2_comp_pca = _normalize_paired_maps(
-        feat1_comp_pc1, feat2_comp_pc1
-    )
+    _, sar_com, cld_com, sar_comp, cld_comp = split_fdt_output(model_output)
+    sar_feat = sar_com + sar_comp
+    cld_feat = cld_com + cld_comp
+    sar_feat_pca, cld_feat_pca = _pca_heatmaps(sar_feat, cld_feat)
+    sar_com_pc1, cld_com_pc1 = _joint_pc1_maps(sar_com, cld_com)
+    sar_com_pca, cld_com_pca = _normalize_paired_maps(sar_com_pc1, cld_com_pc1)
+    sar_comp_pc1, cld_comp_pc1 = _joint_pc1_maps(sar_comp, cld_comp)
+    sar_comp_pca, cld_comp_pca = _normalize_paired_maps(sar_comp_pc1, cld_comp_pc1)
     common_channel_score, common_spatial_score, common_channel_map = (
-        _axis_ccc_diagnostics(feat1_com, feat2_com)
+        _axis_ccc_diagnostics(sar_com, cld_com)
     )
     common_match = np.clip((common_channel_map + 1.0) / 2.0, 0.0, 1.0)
     comp_channel_score, comp_spatial_score, comp_channel_map = _axis_ccc_diagnostics(
-        feat1_comp,
-        feat2_comp,
+        sar_comp,
+        cld_comp,
     )
     comp_leak = np.clip(np.abs(comp_channel_map), 0.0, 1.0)
     common_title = (
@@ -188,13 +180,13 @@ def build_fdt_example_panels(
         ("Target RGB", target_rgb, None),
         ("SAR Mean", normalize_map(sar.mean(dim=0)), "gray"),
         (common_title, common_match, "viridis", 0.0, 1.0),
-        ("Feat 1 PCA", feat1_feat_pca, "viridis"),
-        ("Feat 1 Com PCA", feat1_com_pca, "viridis"),
-        ("Feat 1 Comp PCA", feat1_comp_pca, "viridis"),
+        ("SAR Feat PCA", sar_feat_pca, "viridis"),
+        ("SAR Com PCA", sar_com_pca, "viridis"),
+        ("SAR Comp PCA", sar_comp_pca, "viridis"),
         (comp_title, comp_leak, "magma", 0.0, 1.0),
-        ("Feat 2 PCA", feat2_feat_pca, "viridis"),
-        ("Feat 2 Com PCA", feat2_com_pca, "viridis"),
-        ("Feat 2 Comp PCA", feat2_comp_pca, "viridis"),
+        ("Cloudy Feat PCA", cld_feat_pca, "viridis"),
+        ("Cloudy Com PCA", cld_com_pca, "viridis"),
+        ("Cloudy Comp PCA", cld_comp_pca, "viridis"),
     )
 
 
@@ -211,28 +203,20 @@ def _sample_feature_points(
 def _append_tsne_sample_points(
     grouped_features: dict[str, list[np.ndarray]],
     *,
-    feat1_com: torch.Tensor,
-    feat2_com: torch.Tensor,
-    feat1_comp: torch.Tensor,
-    feat2_comp: torch.Tensor,
+    sar_com: torch.Tensor,
+    cld_com: torch.Tensor,
+    sar_comp: torch.Tensor,
+    cld_comp: torch.Tensor,
     rng: np.random.Generator,
     points_per_sample: int,
 ) -> None:
-    num_positions = feat1_com.shape[-2] * feat1_com.shape[-1]
+    num_positions = sar_com.shape[-2] * sar_com.shape[-1]
     point_count = min(points_per_sample, num_positions)
     indices = rng.choice(num_positions, size=point_count, replace=False)
-    grouped_features["Feat 1 Com"].append(
-        _sample_feature_points(feat1_com, indices)
-    )
-    grouped_features["Feat 2 Com"].append(
-        _sample_feature_points(feat2_com, indices)
-    )
-    grouped_features["Feat 1 Comp"].append(
-        _sample_feature_points(feat1_comp, indices)
-    )
-    grouped_features["Feat 2 Comp"].append(
-        _sample_feature_points(feat2_comp, indices)
-    )
+    grouped_features["SAR Com"].append(_sample_feature_points(sar_com, indices))
+    grouped_features["Cloudy Com"].append(_sample_feature_points(cld_com, indices))
+    grouped_features["SAR Comp"].append(_sample_feature_points(sar_comp, indices))
+    grouped_features["Cloudy Comp"].append(_sample_feature_points(cld_comp, indices))
 
 
 def _cap_group_points(
@@ -294,21 +278,21 @@ def _collect_tsne_features(
                 model_output = predict_fn(batch)
                 (
                     _,
-                    feat1_com,
-                    feat2_com,
-                    feat1_comp,
-                    feat2_comp,
+                    sar_com,
+                    cld_com,
+                    sar_comp,
+                    cld_comp,
                 ) = split_fdt_output(model_output)
-                batch_size = feat1_com.shape[0]
+                batch_size = sar_com.shape[0]
                 for batch_index in range(batch_size):
                     if samples_seen >= sample_count:
                         break
                     _append_tsne_sample_points(
                         grouped_features,
-                        feat1_com=feat1_com[batch_index],
-                        feat2_com=feat2_com[batch_index],
-                        feat1_comp=feat1_comp[batch_index],
-                        feat2_comp=feat2_comp[batch_index],
+                        sar_com=sar_com[batch_index],
+                        cld_com=cld_com[batch_index],
+                        sar_comp=sar_comp[batch_index],
+                        cld_comp=cld_comp[batch_index],
                         rng=rng,
                         points_per_sample=points_per_sample,
                     )
@@ -482,7 +466,7 @@ def _save_tsne_scatter_figure(
     _plot_tsne_panel(
         axes[1],
         grouped_embedding,
-        labels=("Feat 1 Com", "Feat 2 Com"),
+        labels=("SAR Com", "Cloudy Com"),
         title="Com Only",
         x_limits=x_limits,
         y_limits=y_limits,
@@ -493,7 +477,7 @@ def _save_tsne_scatter_figure(
     _plot_tsne_panel(
         axes[2],
         grouped_embedding,
-        labels=("Feat 1 Comp", "Feat 2 Comp"),
+        labels=("SAR Comp", "Cloudy Comp"),
         title="Comp Only",
         x_limits=x_limits,
         y_limits=y_limits,
