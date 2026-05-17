@@ -21,6 +21,7 @@ class FDTDecomposition:
 class FDTOutput:
     feature: torch.Tensor
     lowres: FDTDecomposition
+    midres: FDTDecomposition
     highres: FDTDecomposition
 
 
@@ -281,20 +282,28 @@ class FDT(nn.Module):
         self.sar_high_encoder = HighResEncoder(sar_channels, self.high_dim)
         self.cld_high_encoder = HighResEncoder(cloudy_channels, self.high_dim)
 
-        self.sar_common_gate = CommonGate(dim, heads=num_heads)
-        self.cld_common_gate = CommonGate(dim, heads=num_heads)
+        self.sar_low_common_gate = CommonGate(dim, heads=num_heads)
+        self.cld_low_common_gate = CommonGate(dim, heads=num_heads)
+        self.sar_mid_common_gate = CommonGate(dim, heads=num_heads)
+        self.cld_mid_common_gate = CommonGate(dim, heads=num_heads)
         self.sar_high_common_gate = CommonGate(dim, heads=num_heads)
         self.cld_high_common_gate = CommonGate(dim, heads=num_heads)
         self.sar_low_decomp_fuse = nn.Conv2d(dim * 2, dim, kernel_size=1)
         self.cld_low_decomp_fuse = nn.Conv2d(dim * 2, dim, kernel_size=1)
-        self.sar_fuse = nn.Conv2d(self.high_dim + dim, dim, kernel_size=1)
-        self.cld_fuse = nn.Conv2d(self.high_dim + dim, dim, kernel_size=1)
+        self.sar_mid_fuse = nn.Conv2d(dim * 2, dim, kernel_size=1)
+        self.cld_mid_fuse = nn.Conv2d(dim * 2, dim, kernel_size=1)
+        self.sar_mid_decomp_fuse = nn.Conv2d(dim * 2, dim, kernel_size=1)
+        self.cld_mid_decomp_fuse = nn.Conv2d(dim * 2, dim, kernel_size=1)
+        self.sar_high_fuse = nn.Conv2d(self.high_dim + dim, dim, kernel_size=1)
+        self.cld_high_fuse = nn.Conv2d(self.high_dim + dim, dim, kernel_size=1)
         self.com_fuse = nn.Conv2d(dim * 2, self.common_out_dim, kernel_size=1)
         self.sar_comp_proj = nn.Conv2d(dim, self.comp_out_dim, kernel_size=1)
         self.cld_comp_proj = nn.Conv2d(dim, self.comp_out_dim, kernel_size=1)
 
-        self.sar_feat_up = Upsample(dim)
-        self.cld_feat_up = Upsample(dim)
+        self.sar_low_feat_up = Upsample(dim)
+        self.cld_low_feat_up = Upsample(dim)
+        self.sar_mid_feat_up = Upsample(dim)
+        self.cld_mid_feat_up = Upsample(dim)
 
     @staticmethod
     def _decompose(
@@ -310,36 +319,74 @@ class FDT(nn.Module):
             cld_comp=(1.0 - cld_gate) * cld_feat,
         )
 
-    def forward(self, sar: torch.Tensor, cloudy: torch.Tensor) -> FDTOutput:
-        sar_feat_l = self.sar_encoder(sar)
-        cld_feat_l = self.cld_encoder(cloudy)
-
-        sar_gate_l = self.sar_common_gate(sar_feat_l, cld_feat_l)
-        cld_gate_l = self.cld_common_gate(cld_feat_l, sar_feat_l)
-        lowres = self._decompose(
-            sar_feat_l,
-            cld_feat_l,
-            torch.sigmoid(sar_gate_l),
-            torch.sigmoid(cld_gate_l),
+    @staticmethod
+    def _downsample_input(image: torch.Tensor) -> torch.Tensor:
+        return F.interpolate(
+            image,
+            scale_factor=0.5,
+            mode="bilinear",
+            align_corners=False,
+            antialias=True,
         )
 
+    def _decompose_level(
+        self,
+        sar_feat: torch.Tensor,
+        cld_feat: torch.Tensor,
+        sar_gate: CommonGate,
+        cld_gate: CommonGate,
+    ) -> FDTDecomposition:
+        sar_common_gate = torch.sigmoid(sar_gate(sar_feat, cld_feat))
+        cld_common_gate = torch.sigmoid(cld_gate(cld_feat, sar_feat))
+        return self._decompose(sar_feat, cld_feat, sar_common_gate, cld_common_gate)
+
+    def forward(self, sar: torch.Tensor, cloudy: torch.Tensor) -> FDTOutput:
+        sar_low_feat = self.sar_encoder(self._downsample_input(sar))
+        cld_low_feat = self.cld_encoder(self._downsample_input(cloudy))
+        lowres = self._decompose_level(
+            sar_low_feat,
+            cld_low_feat,
+            self.sar_low_common_gate,
+            self.cld_low_common_gate,
+        )
         sar_low = self.sar_low_decomp_fuse(
             torch.cat((lowres.sar_com, lowres.sar_comp), dim=1)
         )
         cld_low = self.cld_low_decomp_fuse(
             torch.cat((lowres.cld_com, lowres.cld_comp), dim=1)
         )
-        sar_up = self.sar_feat_up(sar_low)
-        cld_up = self.cld_feat_up(cld_low)
+        sar_low_up = self.sar_low_feat_up(sar_low)
+        cld_low_up = self.cld_low_feat_up(cld_low)
+
+        sar_mid_base = self.sar_encoder(sar)
+        cld_mid_base = self.cld_encoder(cloudy)
+        sar_mid_feat = self.sar_mid_fuse(torch.cat((sar_mid_base, sar_low_up), dim=1))
+        cld_mid_feat = self.cld_mid_fuse(torch.cat((cld_mid_base, cld_low_up), dim=1))
+        midres = self._decompose_level(
+            sar_mid_feat,
+            cld_mid_feat,
+            self.sar_mid_common_gate,
+            self.cld_mid_common_gate,
+        )
+        sar_mid = self.sar_mid_decomp_fuse(
+            torch.cat((midres.sar_com, midres.sar_comp), dim=1)
+        )
+        cld_mid = self.cld_mid_decomp_fuse(
+            torch.cat((midres.cld_com, midres.cld_comp), dim=1)
+        )
+        sar_mid_up = self.sar_mid_feat_up(sar_mid)
+        cld_mid_up = self.cld_mid_feat_up(cld_mid)
+
         sar_high = self.sar_high_encoder(sar)
         cld_high = self.cld_high_encoder(cloudy)
-
-        sar_feat = self.sar_fuse(torch.cat((sar_high, sar_up), dim=1))
-        cld_feat = self.cld_fuse(torch.cat((cld_high, cld_up), dim=1))
-        sar_gate = torch.sigmoid(self.sar_high_common_gate(sar_feat, cld_feat))
-        cld_gate = torch.sigmoid(self.cld_high_common_gate(cld_feat, sar_feat))
-
-        highres = self._decompose(sar_feat, cld_feat, sar_gate, cld_gate)
+        sar_high_feat = self.sar_high_fuse(torch.cat((sar_high, sar_mid_up), dim=1))
+        cld_high_feat = self.cld_high_fuse(torch.cat((cld_high, cld_mid_up), dim=1))
+        highres = self._decompose_level(
+            sar_high_feat,
+            cld_high_feat,
+            self.sar_high_common_gate,
+            self.cld_high_common_gate,
+        )
 
         com_fused = self.com_fuse(
             torch.cat((highres.sar_com, highres.cld_com), dim=1)
@@ -347,4 +394,4 @@ class FDT(nn.Module):
         sar_comp = self.sar_comp_proj(highres.sar_comp)
         cld_comp = self.cld_comp_proj(highres.cld_comp)
         feature = torch.cat((com_fused, sar_comp, cld_comp), dim=1)
-        return FDTOutput(feature=feature, lowres=lowres, highres=highres)
+        return FDTOutput(feature=feature, lowres=lowres, midres=midres, highres=highres)

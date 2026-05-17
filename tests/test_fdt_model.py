@@ -25,18 +25,29 @@ def test_fdt_imports_and_runs_forward() -> None:
     ):
         assert feature.shape == (1, 256, 16, 16)
     for feature in (
+        output.midres.sar_com,
+        output.midres.cld_com,
+        output.midres.sar_comp,
+        output.midres.cld_comp,
+    ):
+        assert feature.shape == (1, 256, 8, 8)
+    for feature in (
         output.lowres.sar_com,
         output.lowres.cld_com,
         output.lowres.sar_comp,
         output.lowres.cld_comp,
     ):
-        assert feature.shape == (1, 256, 8, 8)
+        assert feature.shape == (1, 256, 4, 4)
     for feature in (
         output.feature,
         output.highres.sar_com,
         output.highres.cld_com,
         output.highres.sar_comp,
         output.highres.cld_comp,
+        output.midres.sar_com,
+        output.midres.cld_com,
+        output.midres.sar_comp,
+        output.midres.cld_comp,
         output.lowres.sar_com,
         output.lowres.cld_com,
         output.lowres.sar_comp,
