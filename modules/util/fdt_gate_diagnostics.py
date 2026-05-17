@@ -9,30 +9,25 @@ import torch.nn as nn
 from cr_train import is_primary
 
 from modules.model.fdt import FDT
-from modules.model.fdt.fdt import CommonGate
+from modules.model.fdt.fdt import (
+    BidirectionalDecompositionBlock,
+    DecompositionBlock,
+)
 
 
-FDTGateLevel = Literal["lowres", "midres", "highres"]
-FDTGateBranch = Literal["sar", "cloudy"]
-FDTGateStage = Literal["train", "val", "test"]
-GateStatValue = float | int | str
+FDTDiagnosticLevel = Literal["lowres", "midres", "highres"]
+FDTDiagnosticBranch = Literal["sar", "cloudy"]
+FDTDiagnosticStage = Literal["train", "val", "test"]
+DiagnosticValue = float | int | str
 
-_LEVEL_GATE_ATTRS: Mapping[
-    FDTGateLevel,
-    tuple[tuple[FDTGateBranch, str], tuple[FDTGateBranch, str]],
-] = {
-    "lowres": (
-        ("sar", "sar_low_common_gate"),
-        ("cloudy", "cld_low_common_gate"),
-    ),
-    "midres": (
-        ("sar", "sar_mid_common_gate"),
-        ("cloudy", "cld_mid_common_gate"),
-    ),
-    "highres": (
-        ("sar", "sar_high_common_gate"),
-        ("cloudy", "cld_high_common_gate"),
-    ),
+_LEVEL_DECOMP_ATTRS: Mapping[FDTDiagnosticLevel, str] = {
+    "lowres": "low_decomp",
+    "midres": "mid_decomp",
+    "highres": "high_decomp",
+}
+_BRANCH_DECOMP_ATTRS: Mapping[FDTDiagnosticBranch, str] = {
+    "sar": "sar",
+    "cloudy": "cloudy",
 }
 
 
@@ -57,46 +52,63 @@ def find_fdt_module(model: nn.Module) -> FDT | None:
     return None
 
 
-def _iter_level_gates(
+def _iter_level_decomps(
     fdt: FDT,
     *,
-    levels: Iterable[FDTGateLevel],
-) -> Iterable[tuple[FDTGateLevel, FDTGateBranch, CommonGate]]:
+    levels: Iterable[FDTDiagnosticLevel],
+) -> Iterable[tuple[FDTDiagnosticLevel, FDTDiagnosticBranch, DecompositionBlock]]:
     for level in levels:
-        if level not in _LEVEL_GATE_ATTRS:
-            raise ValueError(f"unsupported FDT gate level: {level}")
-        for branch, attr_name in _LEVEL_GATE_ATTRS[level]:
-            gate = getattr(fdt, attr_name)
-            if not isinstance(gate, CommonGate):
-                raise TypeError(f"expected CommonGate at FDT.{attr_name}")
-            yield level, branch, gate
+        if level not in _LEVEL_DECOMP_ATTRS:
+            raise ValueError(f"unsupported FDT diagnostic level: {level}")
+        pair_attr_name = _LEVEL_DECOMP_ATTRS[level]
+        pair = getattr(fdt, pair_attr_name)
+        if not isinstance(pair, BidirectionalDecompositionBlock):
+            raise TypeError(
+                f"expected BidirectionalDecompositionBlock at FDT.{pair_attr_name}"
+            )
+        for branch, branch_attr_name in _BRANCH_DECOMP_ATTRS.items():
+            decomp = getattr(pair, branch_attr_name)
+            if not isinstance(decomp, DecompositionBlock):
+                raise TypeError(
+                    f"expected DecompositionBlock at FDT.{pair_attr_name}.{branch_attr_name}"
+                )
+            yield level, branch, decomp
 
 
-def collect_fdt_gate_stats(
+def collect_fdt_relevance_stats(
     model: nn.Module,
     *,
-    levels: Iterable[FDTGateLevel] = ("highres",),
-) -> list[dict[str, GateStatValue]]:
+    levels: Iterable[FDTDiagnosticLevel] = ("highres",),
+) -> list[dict[str, DiagnosticValue]]:
     fdt = find_fdt_module(model)
     if fdt is None:
         return []
 
-    records: list[dict[str, GateStatValue]] = []
-    for level, branch, gate in _iter_level_gates(fdt, levels=tuple(levels)):
-        if gate.last_gate_stats is None:
+    records: list[dict[str, DiagnosticValue]] = []
+    for level, branch, decomp in _iter_level_decomps(fdt, levels=tuple(levels)):
+        if decomp.last_relevance_stats is None:
             continue
-        for gate_name, stats in gate.last_gate_stats.items():
-            if gate_name not in {"channel", "spatial"}:
+        for axis, stats in decomp.last_relevance_stats.items():
+            if axis not in {"channel", "spatial"}:
                 continue
             records.append(
                 {
                     "level": level,
                     "branch": branch,
-                    "gate": gate_name,
+                    "kind": "relevance",
+                    "axis": axis,
                     **stats,
                 }
             )
     return records
+
+
+def collect_fdt_gate_stats(
+    model: nn.Module,
+    *,
+    levels: Iterable[FDTDiagnosticLevel] = ("highres",),
+) -> list[dict[str, DiagnosticValue]]:
+    return collect_fdt_relevance_stats(model, levels=levels)
 
 
 def append_fdt_gate_diagnostics(
@@ -105,7 +117,7 @@ def append_fdt_gate_diagnostics(
     *,
     epoch: int,
     global_step: int,
-    stage: FDTGateStage,
+    stage: FDTDiagnosticStage,
     primary_only: bool = True,
 ) -> None:
     if primary_only and not is_primary():

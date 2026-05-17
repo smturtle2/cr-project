@@ -141,13 +141,10 @@ class HighResEncoder(nn.Module):
         return self.blocks(image)
 
 
-class CommonGate(nn.Module):
-    def __init__(self, dim: int, heads: int = 4):
+class DecompositionBlock(nn.Module):
+    def __init__(self, dim: int):
         super().__init__()
-        if dim % heads != 0:
-            raise ValueError("dim must be divisible by heads")
         self.dim = dim
-        self.heads = heads
         self.norm_eps = 1e-6
         self.max_logit_scale = math.log(6.0)
         self.channel_key = nn.Conv2d(dim, 1, kernel_size=1)
@@ -156,37 +153,42 @@ class CommonGate(nn.Module):
         self.spatial_query = nn.Conv2d(dim, dim, kernel_size=1)
         self.channel_logit_scale = nn.Parameter(torch.tensor(math.log(2.0)))
         self.spatial_logit_scale = nn.Parameter(torch.tensor(math.log(3.0)))
-        self.gate_proj = nn.Conv2d(dim * 2, dim, kernel_size=1)
-        self.last_gate_stats: dict[str, dict[str, float]] | None = None
+        self.common_fuse = nn.Conv2d(dim * 2, dim, kernel_size=1)
+        self.comp_fuse = nn.Conv2d(dim * 2, dim, kernel_size=1)
+        self.last_relevance_stats: dict[str, dict[str, float]] | None = None
 
     def _bounded_scale(self, logit_scale: torch.Tensor) -> torch.Tensor:
         return logit_scale.clamp(max=self.max_logit_scale).exp()
 
     @staticmethod
-    def _gate_stats(gate: torch.Tensor, *, scale: torch.Tensor) -> dict[str, float]:
-        gate = gate.detach().float()
+    def _relevance_stats(
+        relevance: torch.Tensor,
+        *,
+        scale: torch.Tensor,
+    ) -> dict[str, float]:
+        relevance = relevance.detach().float()
         return {
-            "mean": float(gate.mean().item()),
-            "std": float(gate.std(unbiased=False).item()),
-            "min": float(gate.min().item()),
-            "max": float(gate.max().item()),
-            "low_frac": float((gate < 0.05).float().mean().item()),
-            "high_frac": float((gate > 0.95).float().mean().item()),
+            "mean": float(relevance.mean().item()),
+            "std": float(relevance.std(unbiased=False).item()),
+            "min": float(relevance.min().item()),
+            "max": float(relevance.max().item()),
+            "low_frac": float((relevance < 0.05).float().mean().item()),
+            "high_frac": float((relevance > 0.95).float().mean().item()),
             "scale": float(scale.detach().float().item()),
         }
 
-    def _record_gate_stats(
+    def _record_relevance_stats(
         self,
         *,
         channel_relevance: torch.Tensor,
         spatial_relevance: torch.Tensor,
     ) -> None:
-        self.last_gate_stats = {
-            "channel": self._gate_stats(
+        self.last_relevance_stats = {
+            "channel": self._relevance_stats(
                 channel_relevance,
                 scale=self._bounded_scale(self.channel_logit_scale),
             ),
-            "spatial": self._gate_stats(
+            "spatial": self._relevance_stats(
                 spatial_relevance,
                 scale=self._bounded_scale(self.spatial_logit_scale),
             ),
@@ -250,25 +252,51 @@ class CommonGate(nn.Module):
         self,
         target_feat: torch.Tensor,
         other_feat: torch.Tensor,
-    ) -> torch.Tensor:
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         batch, _, height, width = target_feat.shape
 
         channel_relevance = self._channel_relevance(target_feat, other_feat)
-        channel_feature = channel_relevance.unsqueeze(2) * target_feat
+        channel_mask = channel_relevance.unsqueeze(2)
+        channel_common = channel_mask * target_feat
+        channel_comp = (1.0 - channel_mask) * target_feat
 
         spatial_relevance = self._spatial_relevance(target_feat, other_feat)
-        spatial_feature = (
+        spatial_mask = (
             spatial_relevance.transpose(1, 2)
             .contiguous()
             .view(batch, 1, height, width)
-            * target_feat
         )
-        self._record_gate_stats(
+        spatial_common = spatial_mask * target_feat
+        spatial_comp = (1.0 - spatial_mask) * target_feat
+        self._record_relevance_stats(
             channel_relevance=channel_relevance,
             spatial_relevance=spatial_relevance,
         )
 
-        return self.gate_proj(torch.cat((channel_feature, spatial_feature), dim=1))
+        common = self.common_fuse(torch.cat((spatial_common, channel_common), dim=1))
+        comp = self.comp_fuse(torch.cat((spatial_comp, channel_comp), dim=1))
+        return common, comp
+
+
+class BidirectionalDecompositionBlock(nn.Module):
+    def __init__(self, dim: int):
+        super().__init__()
+        self.sar = DecompositionBlock(dim)
+        self.cloudy = DecompositionBlock(dim)
+
+    def forward(
+        self,
+        sar_feat: torch.Tensor,
+        cld_feat: torch.Tensor,
+    ) -> FDTDecomposition:
+        sar_com, sar_comp = self.sar(sar_feat, cld_feat)
+        cld_com, cld_comp = self.cloudy(cld_feat, sar_feat)
+        return FDTDecomposition(
+            sar_com=sar_com,
+            cld_com=cld_com,
+            sar_comp=sar_comp,
+            cld_comp=cld_comp,
+        )
 
 
 class Encoder(nn.Module):
@@ -356,12 +384,9 @@ class FDT(nn.Module):
         self.sar_high_encoder = HighResEncoder(sar_channels, self.high_dim)
         self.cld_high_encoder = HighResEncoder(cloudy_channels, self.high_dim)
 
-        self.sar_low_common_gate = CommonGate(dim, heads=num_heads)
-        self.cld_low_common_gate = CommonGate(dim, heads=num_heads)
-        self.sar_mid_common_gate = CommonGate(dim, heads=num_heads)
-        self.cld_mid_common_gate = CommonGate(dim, heads=num_heads)
-        self.sar_high_common_gate = CommonGate(dim, heads=num_heads)
-        self.cld_high_common_gate = CommonGate(dim, heads=num_heads)
+        self.low_decomp = BidirectionalDecompositionBlock(dim)
+        self.mid_decomp = BidirectionalDecompositionBlock(dim)
+        self.high_decomp = BidirectionalDecompositionBlock(dim)
         self.sar_low_decomp_fuse = nn.Conv2d(dim * 2, dim, kernel_size=1)
         self.cld_low_decomp_fuse = nn.Conv2d(dim * 2, dim, kernel_size=1)
         self.sar_mid_fuse = nn.Conv2d(dim * 2, dim, kernel_size=1)
@@ -380,20 +405,6 @@ class FDT(nn.Module):
         self.cld_mid_feat_up = Upsample(dim)
 
     @staticmethod
-    def _decompose(
-        sar_feat: torch.Tensor,
-        cld_feat: torch.Tensor,
-        sar_gate: torch.Tensor,
-        cld_gate: torch.Tensor,
-    ) -> FDTDecomposition:
-        return FDTDecomposition(
-            sar_com=sar_gate * sar_feat,
-            cld_com=cld_gate * cld_feat,
-            sar_comp=(1.0 - sar_gate) * sar_feat,
-            cld_comp=(1.0 - cld_gate) * cld_feat,
-        )
-
-    @staticmethod
     def _downsample_input(image: torch.Tensor) -> torch.Tensor:
         return F.interpolate(
             image,
@@ -403,26 +414,10 @@ class FDT(nn.Module):
             antialias=True,
         )
 
-    def _decompose_level(
-        self,
-        sar_feat: torch.Tensor,
-        cld_feat: torch.Tensor,
-        sar_gate: CommonGate,
-        cld_gate: CommonGate,
-    ) -> FDTDecomposition:
-        sar_common_gate = torch.sigmoid(sar_gate(sar_feat, cld_feat))
-        cld_common_gate = torch.sigmoid(cld_gate(cld_feat, sar_feat))
-        return self._decompose(sar_feat, cld_feat, sar_common_gate, cld_common_gate)
-
     def forward(self, sar: torch.Tensor, cloudy: torch.Tensor) -> FDTOutput:
         sar_low_feat = self.sar_encoder(self._downsample_input(sar))
         cld_low_feat = self.cld_encoder(self._downsample_input(cloudy))
-        lowres = self._decompose_level(
-            sar_low_feat,
-            cld_low_feat,
-            self.sar_low_common_gate,
-            self.cld_low_common_gate,
-        )
+        lowres = self.low_decomp(sar_low_feat, cld_low_feat)
         sar_low = self.sar_low_decomp_fuse(
             torch.cat((lowres.sar_com, lowres.sar_comp), dim=1)
         )
@@ -436,12 +431,7 @@ class FDT(nn.Module):
         cld_mid_base = self.cld_encoder(cloudy)
         sar_mid_feat = self.sar_mid_fuse(torch.cat((sar_mid_base, sar_low_up), dim=1))
         cld_mid_feat = self.cld_mid_fuse(torch.cat((cld_mid_base, cld_low_up), dim=1))
-        midres = self._decompose_level(
-            sar_mid_feat,
-            cld_mid_feat,
-            self.sar_mid_common_gate,
-            self.cld_mid_common_gate,
-        )
+        midres = self.mid_decomp(sar_mid_feat, cld_mid_feat)
         sar_mid = self.sar_mid_decomp_fuse(
             torch.cat((midres.sar_com, midres.sar_comp), dim=1)
         )
@@ -455,12 +445,7 @@ class FDT(nn.Module):
         cld_high = self.cld_high_encoder(cloudy)
         sar_high_feat = self.sar_high_fuse(torch.cat((sar_high, sar_mid_up), dim=1))
         cld_high_feat = self.cld_high_fuse(torch.cat((cld_high, cld_mid_up), dim=1))
-        highres = self._decompose_level(
-            sar_high_feat,
-            cld_high_feat,
-            self.sar_high_common_gate,
-            self.cld_high_common_gate,
-        )
+        highres = self.high_decomp(sar_high_feat, cld_high_feat)
 
         com_fused = self.com_fuse(
             torch.cat((highres.sar_com, highres.cld_com), dim=1)
