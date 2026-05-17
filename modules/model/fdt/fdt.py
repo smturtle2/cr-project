@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import math
 
 import torch
 import torch.nn as nn
@@ -147,51 +148,124 @@ class CommonGate(nn.Module):
             raise ValueError("dim must be divisible by heads")
         self.dim = dim
         self.heads = heads
+        self.norm_eps = 1e-6
+        self.max_logit_scale = math.log(6.0)
         self.channel_key = nn.Conv2d(dim, 1, kernel_size=1)
         self.channel_query = nn.Conv2d(dim, dim, kernel_size=1)
         self.spatial_key = nn.Conv2d(dim, dim, kernel_size=1)
         self.spatial_query = nn.Conv2d(dim, dim, kernel_size=1)
+        self.channel_logit_scale = nn.Parameter(torch.tensor(math.log(2.0)))
+        self.spatial_logit_scale = nn.Parameter(torch.tensor(math.log(3.0)))
         self.gate_proj = nn.Conv2d(dim * 2, dim, kernel_size=1)
+        self.last_gate_stats: dict[str, dict[str, float]] | None = None
+
+    def _bounded_scale(self, logit_scale: torch.Tensor) -> torch.Tensor:
+        return logit_scale.clamp(max=self.max_logit_scale).exp()
+
+    @staticmethod
+    def _gate_stats(gate: torch.Tensor, *, scale: torch.Tensor) -> dict[str, float]:
+        gate = gate.detach().float()
+        return {
+            "mean": float(gate.mean().item()),
+            "std": float(gate.std(unbiased=False).item()),
+            "min": float(gate.min().item()),
+            "max": float(gate.max().item()),
+            "low_frac": float((gate < 0.05).float().mean().item()),
+            "high_frac": float((gate > 0.95).float().mean().item()),
+            "scale": float(scale.detach().float().item()),
+        }
+
+    def _record_gate_stats(
+        self,
+        *,
+        channel_relevance: torch.Tensor,
+        spatial_relevance: torch.Tensor,
+    ) -> None:
+        self.last_gate_stats = {
+            "channel": self._gate_stats(
+                channel_relevance,
+                scale=self._bounded_scale(self.channel_logit_scale),
+            ),
+            "spatial": self._gate_stats(
+                spatial_relevance,
+                scale=self._bounded_scale(self.spatial_logit_scale),
+            ),
+        }
+
+    def _channel_relevance(
+        self,
+        target_feat: torch.Tensor,
+        other_feat: torch.Tensor,
+    ) -> torch.Tensor:
+        batch, channels, height, width = target_feat.shape
+        num_tokens = height * width
+
+        channel_query = self.channel_query(target_feat).view(
+            batch,
+            channels,
+            num_tokens,
+        )
+        channel_key = self.channel_key(other_feat).view(batch, 1, num_tokens)
+        channel_query = F.normalize(channel_query, dim=2, eps=self.norm_eps)
+        channel_key = F.normalize(channel_key, dim=2, eps=self.norm_eps)
+
+        scale = self._bounded_scale(self.channel_logit_scale).to(
+            dtype=channel_query.dtype
+        )
+        channel_logits = torch.bmm(
+            channel_query,
+            channel_key.transpose(1, 2),
+        ) * scale
+        return torch.sigmoid(channel_logits)
+
+    def _spatial_relevance(
+        self,
+        target_feat: torch.Tensor,
+        other_feat: torch.Tensor,
+    ) -> torch.Tensor:
+        batch, channels, height, width = target_feat.shape
+        num_tokens = height * width
+
+        spatial_query = (
+            self.spatial_query(target_feat)
+            .view(batch, channels, num_tokens)
+            .transpose(1, 2)
+            .contiguous()
+        )
+        spatial_key = (
+            self.spatial_key(other_feat)
+            .view(batch, channels, num_tokens)
+            .mean(dim=2)
+        )
+        spatial_query = F.normalize(spatial_query, dim=2, eps=self.norm_eps)
+        spatial_key = F.normalize(spatial_key, dim=1, eps=self.norm_eps)
+
+        scale = self._bounded_scale(self.spatial_logit_scale).to(
+            dtype=spatial_query.dtype
+        )
+        spatial_logits = torch.bmm(spatial_query, spatial_key.unsqueeze(2)) * scale
+        return torch.sigmoid(spatial_logits)
 
     def forward(
         self,
         target_feat: torch.Tensor,
         other_feat: torch.Tensor,
     ) -> torch.Tensor:
-        batch, channels, height, width = target_feat.shape
+        batch, _, height, width = target_feat.shape
 
-        channel_query = self.channel_query(target_feat).view(
-            batch,
-            channels,
-            height * width,
-        )
-        channel_key = (
-            self.channel_key(other_feat)
-            .view(batch, 1, height * width)
-            .transpose(1, 2)
-            .contiguous()
-        )
-        channel_relevance = torch.sigmoid(torch.bmm(channel_query, channel_key))
+        channel_relevance = self._channel_relevance(target_feat, other_feat)
         channel_feature = channel_relevance.unsqueeze(2) * target_feat
 
-        spatial_query = (
-            self.spatial_query(target_feat)
-            .view(batch, channels, height * width)
-            .transpose(1, 2)
-            .contiguous()
-        )
-        spatial_key = (
-            self.spatial_key(other_feat)
-            .view(batch, channels, height * width)
-            .mean(dim=2)
-            .unsqueeze(2)
-        )
-        spatial_relevance = torch.sigmoid(torch.bmm(spatial_query, spatial_key))
+        spatial_relevance = self._spatial_relevance(target_feat, other_feat)
         spatial_feature = (
             spatial_relevance.transpose(1, 2)
             .contiguous()
             .view(batch, 1, height, width)
             * target_feat
+        )
+        self._record_gate_stats(
+            channel_relevance=channel_relevance,
+            spatial_relevance=spatial_relevance,
         )
 
         return self.gate_proj(torch.cat((channel_feature, spatial_feature), dim=1))

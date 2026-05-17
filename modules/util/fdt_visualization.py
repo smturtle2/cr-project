@@ -2,10 +2,14 @@ from __future__ import annotations
 
 from collections.abc import Callable, Mapping
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import numpy as np
 import torch
+
+from modules.model.fdt import FDTDecomposition, FDTOutput
+
+FDTLevelName = Literal["lowres", "midres", "highres"]
 
 TSNE_GROUPS = ("SAR Com", "Cloudy Com", "SAR Comp", "Cloudy Comp")
 TSNE_GROUP_COLORS = {
@@ -16,21 +20,79 @@ TSNE_GROUP_COLORS = {
 }
 
 
+def _select_fdt_level(
+    fdt_output: FDTOutput,
+    *,
+    level: FDTLevelName = "highres",
+) -> FDTDecomposition:
+    if level == "lowres":
+        return fdt_output.lowres
+    if level == "midres":
+        return fdt_output.midres
+    if level == "highres":
+        return fdt_output.highres
+    raise ValueError(f"unsupported FDT level: {level}")
+
+
 def split_fdt_output(
     model_output: Any,
+    *,
+    level: FDTLevelName = "highres",
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-    if not isinstance(model_output, tuple) or len(model_output) != 5:
-        raise TypeError(
-            "FDT_CRNet must return prediction and four decomposition tensors"
+    if isinstance(model_output, tuple) and len(model_output) == 2:
+        prediction, fdt_output = model_output
+        if not isinstance(prediction, torch.Tensor) or not isinstance(
+            fdt_output,
+            FDTOutput,
+        ):
+            raise TypeError(
+                "FDT_CRNet must return (prediction, FDTOutput) for decomposition visualization"
+            )
+        decomposition = _select_fdt_level(fdt_output, level=level)
+        return (
+            prediction,
+            decomposition.sar_com,
+            decomposition.cld_com,
+            decomposition.sar_comp,
+            decomposition.cld_comp,
         )
-    prediction, sar_com, cld_com, sar_comp, cld_comp = model_output
-    return prediction, sar_com, cld_com, sar_comp, cld_comp
+
+    if isinstance(model_output, tuple) and len(model_output) == 5:
+        prediction, sar_com, cld_com, sar_comp, cld_comp = model_output
+        return prediction, sar_com, cld_com, sar_comp, cld_comp
+
+    if isinstance(model_output, FDTOutput):
+        decomposition = _select_fdt_level(model_output, level=level)
+        return (
+            model_output.feature,
+            decomposition.sar_com,
+            decomposition.cld_com,
+            decomposition.sar_comp,
+            decomposition.cld_comp,
+        )
+
+    if isinstance(model_output, torch.Tensor):
+        raise TypeError(
+            "FDT visualization requires decomposition output, not a prediction tensor"
+        )
+
+    raise TypeError(
+        "FDT_CRNet must return (prediction, FDTOutput) or a legacy five-tensor tuple"
+    )
 
 
 def prediction_from_fdt_output(model_output: Any) -> torch.Tensor:
     if isinstance(model_output, torch.Tensor):
         return model_output
     return split_fdt_output(model_output)[0]
+
+
+def _panel_feature(feature: torch.Tensor) -> torch.Tensor:
+    if feature.ndim == 3:
+        return feature
+    if feature.ndim == 4:
+        return feature[0]
+    raise ValueError("feature must have shape CxHxW or BxCxHxW")
 
 
 def _feature_tokens(feature: torch.Tensor) -> tuple[np.ndarray, int, int]:
@@ -145,15 +207,32 @@ def build_fdt_example_panels(
         tuple[np.ndarray, np.ndarray, np.ndarray],
     ],
     normalize_map: Callable[[torch.Tensor], np.ndarray],
+    level: FDTLevelName = "highres",
 ):
-    _, sar_com, cld_com, sar_comp, cld_comp = split_fdt_output(model_output)
+    _, sar_com, cld_com, sar_comp, cld_comp = split_fdt_output(
+        model_output,
+        level=level,
+    )
+    sar_com = _panel_feature(sar_com)
+    cld_com = _panel_feature(cld_com)
+    sar_comp = _panel_feature(sar_comp)
+    cld_comp = _panel_feature(cld_comp)
     sar_feat = sar_com + sar_comp
     cld_feat = cld_com + cld_comp
     sar_feat_pca, cld_feat_pca = _pca_heatmaps(sar_feat, cld_feat)
     sar_com_pc1, cld_com_pc1 = _joint_pc1_maps(sar_com, cld_com)
-    sar_com_pca, cld_com_pca = _normalize_paired_maps(sar_com_pc1, cld_com_pc1)
-    sar_comp_pc1, cld_comp_pc1 = _joint_pc1_maps(sar_comp, cld_comp)
-    sar_comp_pca, cld_comp_pca = _normalize_paired_maps(sar_comp_pc1, cld_comp_pc1)
+    sar_com_pca, cld_com_pca = _normalize_paired_maps(
+        sar_com_pc1,
+        cld_com_pc1,
+    )
+    sar_comp_pc1, cld_comp_pc1 = _joint_pc1_maps(
+        sar_comp,
+        cld_comp,
+    )
+    sar_comp_pca, cld_comp_pca = _normalize_paired_maps(
+        sar_comp_pc1,
+        cld_comp_pc1,
+    )
     common_channel_score, common_spatial_score, common_channel_map = (
         _axis_ccc_diagnostics(sar_com, cld_com)
     )
@@ -180,11 +259,11 @@ def build_fdt_example_panels(
         ("Target RGB", target_rgb, None),
         ("SAR Mean", normalize_map(sar.mean(dim=0)), "gray"),
         (common_title, common_match, "viridis", 0.0, 1.0),
-        ("SAR Feat PCA", sar_feat_pca, "viridis"),
+        ("SAR PCA", sar_feat_pca, "viridis"),
         ("SAR Com PCA", sar_com_pca, "viridis"),
         ("SAR Comp PCA", sar_comp_pca, "viridis"),
         (comp_title, comp_leak, "magma", 0.0, 1.0),
-        ("Cloudy Feat PCA", cld_feat_pca, "viridis"),
+        ("Cloudy PCA", cld_feat_pca, "viridis"),
         ("Cloudy Com PCA", cld_com_pca, "viridis"),
         ("Cloudy Comp PCA", cld_comp_pca, "viridis"),
     )
@@ -213,10 +292,18 @@ def _append_tsne_sample_points(
     num_positions = sar_com.shape[-2] * sar_com.shape[-1]
     point_count = min(points_per_sample, num_positions)
     indices = rng.choice(num_positions, size=point_count, replace=False)
-    grouped_features["SAR Com"].append(_sample_feature_points(sar_com, indices))
-    grouped_features["Cloudy Com"].append(_sample_feature_points(cld_com, indices))
-    grouped_features["SAR Comp"].append(_sample_feature_points(sar_comp, indices))
-    grouped_features["Cloudy Comp"].append(_sample_feature_points(cld_comp, indices))
+    grouped_features["SAR Com"].append(
+        _sample_feature_points(sar_com, indices)
+    )
+    grouped_features["Cloudy Com"].append(
+        _sample_feature_points(cld_com, indices)
+    )
+    grouped_features["SAR Comp"].append(
+        _sample_feature_points(sar_comp, indices)
+    )
+    grouped_features["Cloudy Comp"].append(
+        _sample_feature_points(cld_comp, indices)
+    )
 
 
 def _cap_group_points(
@@ -244,6 +331,7 @@ def _collect_tsne_features(
     max_points_per_group: int,
     random_seed: int,
     show_progress: bool,
+    level: FDTLevelName,
 ) -> dict[str, np.ndarray]:
     rng = np.random.default_rng(random_seed)
     grouped_features: dict[str, list[np.ndarray]] = {name: [] for name in TSNE_GROUPS}
@@ -282,7 +370,7 @@ def _collect_tsne_features(
                     cld_com,
                     sar_comp,
                     cld_comp,
-                ) = split_fdt_output(model_output)
+                ) = split_fdt_output(model_output, level=level)
                 batch_size = sar_com.shape[0]
                 for batch_index in range(batch_size):
                     if samples_seen >= sample_count:
@@ -521,6 +609,7 @@ def save_fdt_tsne_scatter(
     scatter_size: float = 3,
     scatter_alpha: float = 0.12,
     show_progress: bool = True,
+    level: FDTLevelName = "highres",
 ) -> Path | None:
     if not is_primary():
         return None
@@ -532,6 +621,7 @@ def save_fdt_tsne_scatter(
         max_points_per_group=max_points_per_group,
         random_seed=random_seed,
         show_progress=show_progress,
+        level=level,
     )
     return _save_tsne_scatter_figure(
         grouped_features,
@@ -570,6 +660,7 @@ def save_fdt_tsne_for_splits(
     scatter_size: float = 3,
     scatter_alpha: float = 0.12,
     show_progress: bool = True,
+    level: FDTLevelName = "highres",
 ) -> None:
     if not dataloaders_by_split:
         return
@@ -587,4 +678,5 @@ def save_fdt_tsne_for_splits(
             scatter_size=scatter_size,
             scatter_alpha=scatter_alpha,
             show_progress=show_progress,
+            level=level,
         )
