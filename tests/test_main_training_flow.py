@@ -55,11 +55,8 @@ class FakeTrainer:
         max_val_samples,
         max_test_samples,
         output_dir,
-        cache_dir,
-        cache_src,
-        b2_staging_dir,
-        b2_staging_max_blocks,
-        b2_download_workers,
+        streaming,
+        dataset_dir,
         batch_size,
         accum_steps,
         epochs,
@@ -86,10 +83,8 @@ class FakeTrainer:
         self.max_train_samples = max_train_samples
         self.max_val_samples = max_val_samples
         self.max_test_samples = max_test_samples
-        self.cache_src = cache_src
-        self.b2_staging_dir = b2_staging_dir
-        self.b2_staging_max_blocks = b2_staging_max_blocks
-        self.b2_download_workers = b2_download_workers
+        self.streaming = bool(streaming)
+        self.dataset_root = Path(dataset_dir) if dataset_dir is not None else self.output_dir / "dataset"
         self.multiprocessing_context = multiprocessing_context
         self.train_crop_size = train_crop_size
         self.train_random_flip = train_random_flip
@@ -97,7 +92,6 @@ class FakeTrainer:
         self.grad_clip_norm = grad_clip_norm
         self.mixed_precision = mixed_precision
         self.num_workers = 0 if num_workers == "auto" else int(num_workers)
-        self.cache_root = Path(cache_dir) if cache_dir is not None else self.output_dir / "cache"
         self.include_metadata = True
         self.pin_memory = False
         self.persistent_workers = False
@@ -405,7 +399,6 @@ class MainTrainingFlowTest(unittest.TestCase):
             mock.patch.object(main, "build_scheduler_monitor", return_value="val.metrics.mae"),
             mock.patch.object(main, "seed_everything"),
             mock.patch.object(main, "print_hf_auth_status"),
-            mock.patch.object(main, "prepare_b2_environment") as prepare_b2_environment,
             mock.patch.object(main.torch.cuda, "is_available", return_value=False),
         ):
             trainer = main.build_trainer(
@@ -413,10 +406,8 @@ class MainTrainingFlowTest(unittest.TestCase):
                 accum_steps=4,
                 scheduler_timing="after_optimizer_step",
                 grad_clip_norm=None,
-                cache_src="B2",
-                b2_staging_dir=Path("/tmp/b2-staging"),
-                b2_staging_max_blocks=96,
-                b2_download_workers=12,
+                streaming=False,
+                dataset_dir=Path("/tmp/dataset"),
             )
 
         self.assertIs(trainer.scheduler, scheduler)
@@ -425,11 +416,8 @@ class MainTrainingFlowTest(unittest.TestCase):
         self.assertEqual(trainer.scheduler_monitor, "val.metrics.mae")
         self.assertIsNone(trainer.grad_clip_norm)
         self.assertEqual(trainer.mixed_precision, "bf16")
-        self.assertEqual(trainer.cache_src, "B2")
-        self.assertEqual(trainer.b2_staging_dir, Path("/tmp/b2-staging"))
-        self.assertEqual(trainer.b2_staging_max_blocks, 96)
-        self.assertEqual(trainer.b2_download_workers, 12)
-        prepare_b2_environment.assert_called_once_with("B2")
+        self.assertFalse(trainer.streaming)
+        self.assertEqual(trainer.dataset_root, Path("/tmp/dataset"))
 
     def test_main_preserves_sample_limits(self) -> None:
         records = [
@@ -629,7 +617,8 @@ class BuildLoaderTest(unittest.TestCase):
     def _make_trainer(self) -> mock.Mock:
         trainer = mock.Mock()
         trainer.seed = 7
-        trainer.cache_root = Path("/tmp/cache-root")
+        trainer.streaming = True
+        trainer.dataset_root = Path("/tmp/dataset-root")
         trainer.batch_size = 4
         trainer.num_workers = 2
         trainer.include_metadata = True
@@ -641,18 +630,13 @@ class BuildLoaderTest(unittest.TestCase):
         trainer.train_crop_size = 128
         trainer.train_random_flip = True
         trainer.train_random_rot90 = True
-        trainer.cache_src = "local"
-        trainer.b2_staging_dir = None
-        trainer.b2_staging_max_blocks = 80
-        trainer.b2_download_workers = None
         return trainer
 
-    def test_build_loader_warms_cache_before_prepare_split(self) -> None:
+    def test_build_loader_prepares_streaming_split(self) -> None:
         trainer = self._make_trainer()
         prepared = object()
 
         with (
-            mock.patch.object(main, "ensure_split_cache") as ensure_split_cache,
             mock.patch.object(main, "prepare_split", return_value=prepared) as prepare_split,
             mock.patch.object(main, "build_dataloader", return_value="loader") as build_dataloader,
         ):
@@ -665,13 +649,9 @@ class BuildLoaderTest(unittest.TestCase):
             )
 
         self.assertEqual(result, "loader")
-        ensure_split_cache.assert_called_once()
-        self.assertNotIn("streaming", prepare_split.call_args.kwargs)
+        self.assertTrue(prepare_split.call_args.kwargs["streaming"])
+        self.assertIsNone(prepare_split.call_args.kwargs["dataset_root"])
         self.assertEqual(prepare_split.call_args.kwargs["max_samples"], None)
-        self.assertEqual(prepare_split.call_args.kwargs["cache_src"], "local")
-        self.assertIsNone(prepare_split.call_args.kwargs["b2_staging_dir"])
-        self.assertEqual(prepare_split.call_args.kwargs["b2_staging_max_blocks"], 80)
-        self.assertIsNone(prepare_split.call_args.kwargs["b2_download_workers"])
         self.assertEqual(build_dataloader.call_args.kwargs["crop_size"], None)
         self.assertEqual(build_dataloader.call_args.kwargs["crop_mode"], "none")
 
@@ -680,7 +660,6 @@ class BuildLoaderTest(unittest.TestCase):
         prepared = object()
 
         with (
-            mock.patch.object(main, "ensure_split_cache") as ensure_split_cache,
             mock.patch.object(main, "prepare_split", return_value=prepared) as prepare_split,
             mock.patch.object(main, "build_dataloader", return_value="loader"),
         ):
@@ -692,21 +671,16 @@ class BuildLoaderTest(unittest.TestCase):
                 epoch_index=1,
             )
 
-        ensure_split_cache.assert_called_once()
-        self.assertNotIn("streaming", prepare_split.call_args.kwargs)
+        self.assertTrue(prepare_split.call_args.kwargs["streaming"])
         self.assertEqual(prepare_split.call_args.kwargs["max_samples"], 256)
 
-    def test_build_loader_uses_b2_cache_without_local_warmup(self) -> None:
+    def test_build_loader_uses_local_dataset_dir_when_not_streaming(self) -> None:
         trainer = self._make_trainer()
-        trainer.cache_src = "B2"
-        trainer.b2_staging_dir = Path("/tmp/staging")
-        trainer.b2_staging_max_blocks = 48
-        trainer.b2_download_workers = 6
+        trainer.streaming = False
+        trainer.dataset_root = Path("/tmp/dataset-root")
         prepared = object()
 
         with (
-            mock.patch.object(main, "prepare_b2_environment") as prepare_b2_environment,
-            mock.patch.object(main, "ensure_split_cache") as ensure_split_cache,
             mock.patch.object(main, "prepare_split", return_value=prepared) as prepare_split,
             mock.patch.object(main, "build_dataloader", return_value="loader"),
         ):
@@ -719,12 +693,8 @@ class BuildLoaderTest(unittest.TestCase):
             )
 
         self.assertEqual(result, "loader")
-        prepare_b2_environment.assert_called_once_with("B2")
-        ensure_split_cache.assert_not_called()
-        self.assertEqual(prepare_split.call_args.kwargs["cache_src"], "B2")
-        self.assertEqual(prepare_split.call_args.kwargs["b2_staging_dir"], Path("/tmp/staging"))
-        self.assertEqual(prepare_split.call_args.kwargs["b2_staging_max_blocks"], 48)
-        self.assertEqual(prepare_split.call_args.kwargs["b2_download_workers"], 6)
+        self.assertFalse(prepare_split.call_args.kwargs["streaming"])
+        self.assertEqual(prepare_split.call_args.kwargs["dataset_root"], Path("/tmp/dataset-root"))
 
 
 if __name__ == "__main__":
