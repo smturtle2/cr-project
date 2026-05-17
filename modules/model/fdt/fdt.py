@@ -37,13 +37,13 @@ class _Residual3x3Block(nn.Module):
 class ResizeConvUp(nn.Module):
     def __init__(self, in_channels: int, blocks: int = 2):
         super().__init__()
-        if in_channels % 4 != 0:
-            raise ValueError("in_channels must be divisible by 4")
+        if in_channels % 2 != 0:
+            raise ValueError("in_channels must be divisible by 2")
         if blocks < 0:
             raise ValueError("blocks must be non-negative")
 
         self.in_channels = in_channels
-        self.out_channels = in_channels // 4
+        self.out_channels = in_channels // 2
         self.blocks = blocks
         self.residuals = nn.Sequential(
             *[_Residual3x3Block(in_channels) for _ in range(blocks)]
@@ -162,8 +162,8 @@ class FDT(nn.Module):
         super().__init__()
         if dim % num_heads != 0:
             raise ValueError("dim must be divisible by num_heads")
-        if dim % 4 != 0:
-            raise ValueError("dim must be divisible by 4")
+        if dim % 2 != 0:
+            raise ValueError("dim must be divisible by 2")
         if num_layers <= 0:
             raise ValueError("num_layers must be greater than zero")
 
@@ -173,7 +173,7 @@ class FDT(nn.Module):
         self.num_layers = num_layers
         self.heads = num_heads
         self.num_heads = num_heads
-        self.up_dim = dim // 4
+        self.up_dim = dim // 2
         self.common_dim = dim // 2
 
         self.sar_encoder = Encoder(sar_channels, dim, num_layers, num_heads)
@@ -199,7 +199,7 @@ class FDT(nn.Module):
         cld_comp = cld_feat - cld_com
 
         com_fused = self.com_fuse(torch.cat((sar_com, cld_com), dim=1))
-        output = torch.cat((com_fused, sar_comp, cld_comp), dim=1)
+        output = torch.cat((com_fused, sar_comp), dim=1)
         return (
             output,
             sar_com,

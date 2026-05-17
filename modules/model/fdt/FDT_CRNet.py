@@ -107,7 +107,7 @@ class FDT_CRNet_Side(nn.Module):
             sar_comp,
             cld_comp,
         ) = self.fdt(sar, cloudy)
-        prediction = cloudy + self.crnet(main_feature, fdt_feature)
+        prediction = self.crnet(main_feature, fdt_feature)
         if self.return_decomposition:
             return prediction, sar_com, cld_com, sar_comp, cld_comp
         return prediction
