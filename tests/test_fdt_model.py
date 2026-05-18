@@ -18,7 +18,7 @@ def test_fdt_imports_and_runs_forward() -> None:
     assert len(outputs) == 5
     assert outputs[0].shape == (1, 256, 16, 16)
     for output in outputs[1:]:
-        assert output.shape == (1, 128, 16, 16)
+        assert output.shape == (1, 64, 16, 16)
     for output in outputs:
         assert output.dtype == cloudy.dtype
         assert bool(torch.isfinite(output).all().item())
@@ -44,7 +44,8 @@ def test_fdt_decomposes_sar_and_cloudy_features() -> None:
     assert torch.allclose(sar_comp, sar_feat - sar_com)
     assert torch.allclose(cld_comp, cld_feat - cld_com)
     assert torch.allclose(fdt_feature[:, :128], com_fused)
-    assert torch.allclose(fdt_feature[:, 128:], sar_comp)
+    assert torch.allclose(fdt_feature[:, 128:192], sar_comp)
+    assert torch.allclose(fdt_feature[:, 192:], cld_comp)
 
 
 def test_multi_head_attention_accepts_distinct_value_source() -> None:
@@ -73,7 +74,7 @@ def test_resize_conv_up_returns_expected_feature_shape() -> None:
     with torch.no_grad():
         actual = up(feature)
 
-    assert actual.shape == (2, 128, 16, 16)
+    assert actual.shape == (2, 64, 16, 16)
     assert actual.dtype == feature.dtype
     assert bool(torch.isfinite(actual).all().item())
 
