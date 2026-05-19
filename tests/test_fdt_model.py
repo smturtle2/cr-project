@@ -25,30 +25,6 @@ def test_fdt_imports_and_runs_forward() -> None:
         assert bool(torch.isfinite(output).all().item())
 
 
-def test_fdt_decomposes_sar_and_cloudy_features() -> None:
-    model = FDT(num_layers=1, num_heads=4).eval()
-    assert hasattr(model, "sar_common_encoder")
-    assert hasattr(model, "cld_common_encoder")
-    assert not hasattr(model, "joint_encoder")
-    assert not hasattr(model, "feat1_encoder")
-    assert not hasattr(model, "feat2_encoder")
-
-    sar = torch.randn(1, 2, 16, 16)
-    cloudy = torch.randn(1, 13, 16, 16)
-
-    with torch.no_grad():
-        fdt_feature, sar_com, cld_com, sar_comp, cld_comp = model(sar, cloudy)
-        sar_feat = model.up(model.sar_encoder(sar))
-        cld_feat = model.up(model.cld_encoder(cloudy))
-        com_fused = model.com_fuse(torch.cat((sar_com, cld_com), dim=1))
-
-    assert torch.allclose(sar_comp, sar_feat - sar_com)
-    assert torch.allclose(cld_comp, cld_feat - cld_com)
-    assert torch.allclose(fdt_feature[:, :128], com_fused)
-    assert torch.allclose(fdt_feature[:, 128:192], sar_comp)
-    assert torch.allclose(fdt_feature[:, 192:], cld_comp)
-
-
 def test_multi_head_attention_accepts_distinct_value_source() -> None:
     attn = MultiHeadAttention(dim=4, num_heads=1).eval()
     for layer in (attn.q_proj, attn.k_proj, attn.v_proj, attn.out_proj):

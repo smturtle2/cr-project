@@ -3,7 +3,32 @@ from __future__ import annotations
 import torch
 import torch.nn as nn
 
-from ..fdt.fdt import CommonEncoder, FDT, ResizeConvUp
+from ..fdt.fdt import FDT, ResizeConvUp
+from ..fdt.fdt import CommonEncoder as FeatureEncoder
+
+
+class JointEncoder(FeatureEncoder):
+    def __init__(
+        self,
+        dim: int,
+        num_layers: int,
+        heads: int,
+    ):
+        super().__init__(dim, num_layers, heads)
+        self.proj = nn.Sequential(
+            nn.Conv2d(dim * 2, dim, kernel_size=1),
+            nn.GELU(),
+            nn.Conv2d(
+                dim,
+                dim,
+                kernel_size=3,
+                padding=1,
+                padding_mode="replicate",
+            ),
+        )
+
+    def forward(self, first: torch.Tensor, second: torch.Tensor) -> torch.Tensor:
+        return super().forward(self.proj(torch.cat((first, second), dim=1)))
 
 
 class ResizeConvUpHalf(ResizeConvUp):
@@ -37,10 +62,17 @@ class FDTMask(FDT):
         self.common_dim = dim // 2
         self.com_fuse = nn.Conv2d(self.up_dim * 2, self.common_dim, kernel_size=1)
         self.up = ResizeConvUpHalf(dim)
+        self.joint_encoder = JointEncoder(dim, num_layers, num_heads)
+        self.sar_feat_encoder = FeatureEncoder(dim, num_layers, num_heads)
+        self.cld_feat_encoder = FeatureEncoder(dim, num_layers, num_heads)
 
     def forward(self, sar: torch.Tensor, cloudy: torch.Tensor):
-        sar_feat_l = self.sar_encoder(sar)
-        cld_feat_l = self.cld_encoder(cloudy)
+        sar_base_l = self.sar_encoder(sar)
+        cld_base_l = self.cld_encoder(cloudy)
+        joint_l = self.joint_encoder(sar_base_l, cld_base_l)
+
+        sar_feat_l = self.sar_feat_encoder(sar_base_l + joint_l)
+        cld_feat_l = self.cld_feat_encoder(cld_base_l + joint_l)
 
         sar_com_l = self.sar_common_encoder(sar_feat_l)
         cld_com_l = self.cld_common_encoder(cld_feat_l)
@@ -63,7 +95,7 @@ class FDTMask(FDT):
         )
 
 
-class MaskEncoder(CommonEncoder):
+class MaskEncoder(FeatureEncoder):
     def __init__(
         self,
         dim: int,
