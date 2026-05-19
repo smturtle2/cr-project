@@ -21,11 +21,12 @@ class MAE(nn.Module):
     #       가장 직관적인 오차 지표.
     #
     # 수식: MAE = (1/N) * Σ|pred - target|
+    # 데이터는 /2000 스케일이므로 /10000 기준 지표로 환산한다.
 
     name = "mae"
 
     def forward(self, outputs: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
-        return torch.mean(torch.abs(outputs - target))
+        return torch.mean(torch.abs(outputs - target)) * (2000.0 / 10000.0)
 
 
 class PSNR(nn.Module):
