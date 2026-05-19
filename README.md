@@ -25,13 +25,13 @@ cp tmp_main_base.py tmp_main.py
 uv run python tmp_main.py
 ```
 
-multi-GPU 서버에서는 저장소 루트의 스크립트가 보이는 GPU 개수를 자동으로 잡아
-`torchrun` 또는 단일 프로세스 실행을 선택합니다.
+multi-GPU 서버에서는 저장소 루트의 스크립트에 GPU 선택을 명시합니다.
+여러 GPU가 보이는 상태에서 `./train.sh`만 실행하면 GPU 목록과 도움말을 출력하고 종료합니다.
 
 ```bash
-./train.sh
-NPROC_PER_NODE=2 ./train.sh
-TRAIN_TARGET=other_runner.py ./train.sh
+./train.sh --gpu 0
+./train.sh --multi-gpu
+TRAIN_TARGET=other_runner.py ./train.sh --gpu 0
 ```
 
 - `tmp_main_base.py` 는 저장소에 남는 템플릿 파일입니다
