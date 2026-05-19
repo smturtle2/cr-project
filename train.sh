@@ -59,6 +59,15 @@ print(torch.cuda.device_count() if torch.cuda.is_available() else 0)
 PY
 }
 
+count_system_cuda_devices() {
+  if command -v nvidia-smi >/dev/null 2>&1; then
+    nvidia-smi -L | wc -l | tr -d ' '
+    return
+  fi
+
+  count_visible_cuda_devices
+}
+
 multi_gpu=0
 gpu_provided=0
 gpu_id=""
@@ -124,6 +133,12 @@ if (( gpu_provided )); then
   export CUDA_VISIBLE_DEVICES="${gpu_id}"
 fi
 
+system_cuda_devices="$(count_system_cuda_devices)"
+if [[ ! "${system_cuda_devices}" =~ ^[0-9]+$ ]]; then
+  echo "system CUDA device count must be a non-negative integer, got: ${system_cuda_devices}" >&2
+  exit 1
+fi
+
 visible_cuda_devices="$(count_visible_cuda_devices)"
 if [[ ! "${visible_cuda_devices}" =~ ^[0-9]+$ ]]; then
   echo "visible CUDA device count must be a non-negative integer, got: ${visible_cuda_devices}" >&2
@@ -149,8 +164,8 @@ if (( multi_gpu )); then
   exec uv run torchrun --standalone --nproc-per-node="${nproc_per_node}" "${target}" "${target_args[@]}"
 fi
 
-if (( visible_cuda_devices > 1 )); then
-  echo "Multiple GPUs are visible. Choose one GPU explicitly or pass --multi-gpu." >&2
+if (( ! gpu_provided && system_cuda_devices > 1 )); then
+  echo "Multiple GPUs are available. Choose one GPU explicitly or pass --multi-gpu." >&2
   echo >&2
   echo "Detected GPUs:" >&2
   show_gpu_list >&2
