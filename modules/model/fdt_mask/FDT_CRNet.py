@@ -60,10 +60,9 @@ class FDT_CRNet_Mask(FDT_CRNet_Direct):
             cld_com,
             sar_comp,
             cld_comp,
-            cld_comp_l,
         ) = self.fdt(sar, cloudy)
         candidate = self.crnet(fdt_feature)
-        mask = self.mask_encoder(cld_comp_l)
+        mask = self.mask_encoder(cld_comp)
         prediction = (1.0 - mask) * cloudy + mask * candidate
         if self.return_decomposition:
             return prediction, sar_com, cld_com, sar_comp, cld_comp

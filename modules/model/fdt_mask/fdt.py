@@ -44,7 +44,6 @@ class FDTMask(FDT):
 
         sar_com_l = self.sar_common_encoder(sar_feat_l)
         cld_com_l = self.cld_common_encoder(cld_feat_l)
-        cld_comp_l = cld_feat_l - cld_com_l
 
         sar_feat = self.up(sar_feat_l)
         cld_feat = self.up(cld_feat_l)
@@ -61,7 +60,6 @@ class FDTMask(FDT):
             cld_com,
             sar_comp,
             cld_comp,
-            cld_comp_l,
         )
 
 
@@ -74,10 +72,22 @@ class MaskEncoder(CommonEncoder):
         heads: int,
     ):
         super().__init__(dim, num_layers, heads)
+        self.down = nn.Sequential(
+            nn.Conv2d(
+                dim // 2,
+                dim,
+                kernel_size=3,
+                stride=2,
+                padding=1,
+                padding_mode="replicate",
+            ),
+            nn.GELU(),
+        )
         self.up = ResizeConvUpHalf(dim)
         self.out = nn.Conv2d(self.up.out_channels, out_channels, kernel_size=1)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        feature = super().forward(x)
+        feature = self.down(x)
+        feature = super().forward(feature)
         feature = self.up(feature)
         return torch.sigmoid(self.out(feature))

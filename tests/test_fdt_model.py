@@ -4,6 +4,7 @@ import torch
 import torch.nn as nn
 
 from modules.model.fdt import FDT, FDT_CRNet_Direct, FDT_CRNet_Side, ResizeConvUp
+from modules.model.fdt_mask import FDTMask, FDT_CRNet_Mask, MaskEncoder
 from modules.model.module.attention import MultiHeadAttention
 
 
@@ -79,8 +80,49 @@ def test_resize_conv_up_returns_expected_feature_shape() -> None:
     assert bool(torch.isfinite(actual).all().item())
 
 
+def test_fdt_mask_returns_full_resolution_cloudy_component_only() -> None:
+    model = FDTMask(num_layers=1, num_heads=4).eval()
+    sar = torch.randn(1, 2, 16, 16)
+    cloudy = torch.randn(1, 13, 16, 16)
+
+    with torch.no_grad():
+        outputs = model(sar, cloudy)
+
+    assert len(outputs) == 5
+    assert outputs[0].shape == (1, 256, 16, 16)
+    for output in outputs[1:]:
+        assert output.shape == (1, 128, 16, 16)
+        assert bool(torch.isfinite(output).all().item())
+
+
+def test_mask_encoder_downsamples_full_resolution_cloudy_component() -> None:
+    encoder = MaskEncoder(dim=256, out_channels=13, num_layers=1, heads=4).eval()
+    cld_comp = torch.randn(2, 128, 16, 16)
+
+    with torch.no_grad():
+        mask = encoder(cld_comp)
+
+    assert mask.shape == (2, 13, 16, 16)
+    assert mask.dtype == cld_comp.dtype
+    assert bool(torch.isfinite(mask).all().item())
+    assert float(mask.min()) >= 0.0
+    assert float(mask.max()) <= 1.0
+
+
 def test_fdt_crnet_direct_imports_and_runs_forward() -> None:
     model = FDT_CRNet_Direct(fdt_layers=1, cr_layers=1).eval()
+    sar = torch.randn(1, 2, 16, 16)
+    cloudy = torch.randn(1, 13, 16, 16)
+
+    with torch.no_grad():
+        prediction = model(sar, cloudy)
+
+    assert prediction.shape == cloudy.shape
+    assert prediction.dtype == cloudy.dtype
+
+
+def test_fdt_crnet_mask_imports_and_runs_forward() -> None:
+    model = FDT_CRNet_Mask(fdt_layers=1, cr_layers=1).eval()
     sar = torch.randn(1, 2, 16, 16)
     cloudy = torch.randn(1, 13, 16, 16)
 
