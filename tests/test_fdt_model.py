@@ -5,9 +5,9 @@ import torch.nn as nn
 
 from modules.model.fdt import FDT, FDT_CRNet_Direct, FDT_CRNet_Side, ResizeConvUp
 from modules.model.fdt_cca import (
+    CCA_AttnAdapter,
     CCA_CRNet,
-    CCAFiLM,
-    FDTCCA,
+    FDT_CCA,
     FDT_CRNet_CCA,
 )
 from modules.model.module.attention import MultiHeadAttention
@@ -62,7 +62,7 @@ def test_resize_conv_up_returns_expected_feature_shape() -> None:
 
 
 def test_fdt_cca_returns_full_resolution_cloudy_component_only() -> None:
-    model = FDTCCA(num_layers=1, num_heads=4).eval()
+    model = FDT_CCA(num_layers=1, num_heads=4).eval()
     sar = torch.randn(1, 2, 16, 16)
     cloudy = torch.randn(1, 13, 16, 16)
 
@@ -76,13 +76,18 @@ def test_fdt_cca_returns_full_resolution_cloudy_component_only() -> None:
         assert bool(torch.isfinite(output).all().item())
 
 
-def test_cca_film_starts_as_identity() -> None:
-    film = CCAFiLM(comp_channels=128, feature_channels=256).eval()
+def test_cca_attn_adapter_starts_as_identity() -> None:
+    adapter = CCA_AttnAdapter(
+        comp_channels=128,
+        feature_channels=256,
+        num_layers=1,
+        heads=4,
+    ).eval()
     feature = torch.randn(2, 256, 16, 16)
     cld_comp = torch.randn(2, 128, 16, 16)
 
     with torch.no_grad():
-        actual = film(feature, cld_comp)
+        actual = adapter(feature, cld_comp)
 
     assert torch.allclose(actual, feature)
 
@@ -99,7 +104,7 @@ def test_cca_crnet_runs_without_attention_layer() -> None:
     assert prediction.dtype == feature.dtype
 
 
-def test_cca_crnet_runs_with_film_injection() -> None:
+def test_cca_crnet_runs_with_adapter_injection() -> None:
     model = CCA_CRNet(out_channels=13, num_layers=4).eval()
     feature = torch.randn(1, 256, 16, 16)
     cld_comp = torch.randn(1, 128, 16, 16)

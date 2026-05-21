@@ -42,7 +42,7 @@ class ResizeConvUpHalf(ResizeConvUp):
         )
 
 
-class FDTCCA(FDT):
+class FDT_CCA(FDT):
     def __init__(
         self,
         sar_channels=2,

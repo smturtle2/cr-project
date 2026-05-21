@@ -6,7 +6,7 @@ import torch.nn as nn
 from ..fdt.ACA_CRNet import init_net
 from ..fdt.FDT_CRNet import DefaultConAttn
 from .cca_crnet import CCA_CRNet
-from .fdt import FDTCCA
+from .fdt import FDT_CCA
 
 
 class FDT_CRNet_CCA(nn.Module):
@@ -30,7 +30,7 @@ class FDT_CRNet_CCA(nn.Module):
 
         super().__init__()
         self.return_decomposition = return_decomposition
-        self.fdt = FDTCCA(
+        self.fdt = FDT_CCA(
             sar_channels=sar_channels,
             cloudy_channels=cloudy_channels,
             dim=dim,
@@ -43,6 +43,8 @@ class FDT_CRNet_CCA(nn.Module):
             num_layers=cr_layers,
             feature_sizes=dim,
             comp_channels=dim // 2,
+            cca_layers=fdt_layers,
+            num_heads=num_heads,
             ca=ca,
             ca_kwargs=ca_kwargs,
         )
@@ -57,7 +59,7 @@ class FDT_CRNet_CCA(nn.Module):
             sar_comp,
             cld_comp,
         ) = self.fdt(sar, cloudy)
-        prediction = self.crnet(fdt_feature, cld_comp)
+        prediction = cloudy + self.crnet(fdt_feature, cld_comp)
         if self.return_decomposition:
             return prediction, sar_com, cld_com, sar_comp, cld_comp
         return prediction
