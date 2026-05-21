@@ -7,6 +7,23 @@ from ..fdt.fdt import FDT, ResizeConvUp
 from ..fdt.fdt import CommonEncoder as FeatureEncoder
 
 
+class RMSNorm2d(nn.Module):
+    def __init__(
+        self,
+        channels: int,
+        eps: float = 1e-8,
+        init_weight: float = 1.0,
+    ):
+        super().__init__()
+        self.eps = eps
+        self.weight = nn.Parameter(torch.full((1, channels, 1, 1), init_weight))
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        rms = x.float().square().mean(dim=1, keepdim=True)
+        scale = torch.rsqrt(rms + self.eps).to(dtype=x.dtype)
+        return x * scale * self.weight.to(dtype=x.dtype)
+
+
 class JointEncoder(FeatureEncoder):
     def __init__(
         self,
@@ -63,6 +80,8 @@ class FDT_CCA(FDT):
         self.com_fuse = nn.Conv2d(self.up_dim * 2, self.common_dim, kernel_size=1)
         self.up = ResizeConvUpHalf(dim)
         self.joint_encoder = JointEncoder(dim, num_layers, num_heads)
+        self.sar_joint_norm = RMSNorm2d(dim, init_weight=0.1)
+        self.cld_joint_norm = RMSNorm2d(dim, init_weight=0.1)
         self.sar_feat_encoder = FeatureEncoder(dim, num_layers, num_heads)
         self.cld_feat_encoder = FeatureEncoder(dim, num_layers, num_heads)
 
@@ -71,8 +90,12 @@ class FDT_CCA(FDT):
         cld_base_l = self.cld_encoder(cloudy)
         joint_l = self.joint_encoder(sar_base_l, cld_base_l)
 
-        sar_feat_l = self.sar_feat_encoder(sar_base_l + joint_l)
-        cld_feat_l = self.cld_feat_encoder(cld_base_l + joint_l)
+        sar_feat_l = self.sar_feat_encoder(
+            sar_base_l + self.sar_joint_norm(joint_l)
+        )
+        cld_feat_l = self.cld_feat_encoder(
+            cld_base_l + self.cld_joint_norm(joint_l)
+        )
 
         sar_com_l = self.sar_common_encoder(sar_feat_l)
         cld_com_l = self.cld_common_encoder(cld_feat_l)
