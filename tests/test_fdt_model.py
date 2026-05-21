@@ -4,7 +4,12 @@ import torch
 import torch.nn as nn
 
 from modules.model.fdt import FDT, FDT_CRNet_Direct, FDT_CRNet_Side, ResizeConvUp
-from modules.model.fdt_mask import FDTMask, FDT_CRNet_Mask, MaskEncoder
+from modules.model.fdt_cca import (
+    CCA_CRNet,
+    CCAFiLM,
+    FDTCCA,
+    FDT_CRNet_CCA,
+)
 from modules.model.module.attention import MultiHeadAttention
 
 
@@ -56,8 +61,8 @@ def test_resize_conv_up_returns_expected_feature_shape() -> None:
     assert bool(torch.isfinite(actual).all().item())
 
 
-def test_fdt_mask_returns_full_resolution_cloudy_component_only() -> None:
-    model = FDTMask(num_layers=1, num_heads=4).eval()
+def test_fdt_cca_returns_full_resolution_cloudy_component_only() -> None:
+    model = FDTCCA(num_layers=1, num_heads=4).eval()
     sar = torch.randn(1, 2, 16, 16)
     cloudy = torch.randn(1, 13, 16, 16)
 
@@ -71,18 +76,39 @@ def test_fdt_mask_returns_full_resolution_cloudy_component_only() -> None:
         assert bool(torch.isfinite(output).all().item())
 
 
-def test_mask_encoder_downsamples_full_resolution_cloudy_component() -> None:
-    encoder = MaskEncoder(dim=256, out_channels=13, num_layers=1, heads=4).eval()
+def test_cca_film_starts_as_identity() -> None:
+    film = CCAFiLM(comp_channels=128, feature_channels=256).eval()
+    feature = torch.randn(2, 256, 16, 16)
     cld_comp = torch.randn(2, 128, 16, 16)
 
     with torch.no_grad():
-        mask = encoder(cld_comp)
+        actual = film(feature, cld_comp)
 
-    assert mask.shape == (2, 13, 16, 16)
-    assert mask.dtype == cld_comp.dtype
-    assert bool(torch.isfinite(mask).all().item())
-    assert float(mask.min()) >= 0.0
-    assert float(mask.max()) <= 1.0
+    assert torch.allclose(actual, feature)
+
+
+def test_cca_crnet_runs_without_attention_layer() -> None:
+    model = CCA_CRNet(out_channels=13, num_layers=0).eval()
+    feature = torch.randn(1, 256, 16, 16)
+    cld_comp = torch.randn(1, 128, 16, 16)
+
+    with torch.no_grad():
+        prediction = model(feature, cld_comp)
+
+    assert prediction.shape == (1, 13, 16, 16)
+    assert prediction.dtype == feature.dtype
+
+
+def test_cca_crnet_runs_with_film_injection() -> None:
+    model = CCA_CRNet(out_channels=13, num_layers=4).eval()
+    feature = torch.randn(1, 256, 16, 16)
+    cld_comp = torch.randn(1, 128, 16, 16)
+
+    with torch.no_grad():
+        prediction = model(feature, cld_comp)
+
+    assert prediction.shape == (1, 13, 16, 16)
+    assert prediction.dtype == feature.dtype
 
 
 def test_fdt_crnet_direct_imports_and_runs_forward() -> None:
@@ -97,8 +123,8 @@ def test_fdt_crnet_direct_imports_and_runs_forward() -> None:
     assert prediction.dtype == cloudy.dtype
 
 
-def test_fdt_crnet_mask_imports_and_runs_forward() -> None:
-    model = FDT_CRNet_Mask(fdt_layers=1, cr_layers=1).eval()
+def test_fdt_crnet_cca_imports_and_runs_forward() -> None:
+    model = FDT_CRNet_CCA(fdt_layers=1, cr_layers=1).eval()
     sar = torch.randn(1, 2, 16, 16)
     cloudy = torch.randn(1, 13, 16, 16)
 

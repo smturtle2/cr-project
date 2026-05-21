@@ -42,7 +42,7 @@ class ResizeConvUpHalf(ResizeConvUp):
         )
 
 
-class FDTMask(FDT):
+class FDTCCA(FDT):
     def __init__(
         self,
         sar_channels=2,
@@ -93,33 +93,3 @@ class FDTMask(FDT):
             sar_comp,
             cld_comp,
         )
-
-
-class MaskEncoder(FeatureEncoder):
-    def __init__(
-        self,
-        dim: int,
-        out_channels: int,
-        num_layers: int,
-        heads: int,
-    ):
-        super().__init__(dim, num_layers, heads)
-        self.down = nn.Sequential(
-            nn.Conv2d(
-                dim // 2,
-                dim,
-                kernel_size=3,
-                stride=2,
-                padding=1,
-                padding_mode="replicate",
-            ),
-            nn.GELU(),
-        )
-        self.up = ResizeConvUpHalf(dim)
-        self.out = nn.Conv2d(self.up.out_channels, out_channels, kernel_size=1)
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        feature = self.down(x)
-        feature = super().forward(feature)
-        feature = self.up(feature)
-        return torch.sigmoid(self.out(feature))
