@@ -8,23 +8,6 @@ from ..fdt.fdt import Residual3x3Block, ResizeConvUp
 from ..fdt.fdt import CommonEncoder as FeatureEncoder
 
 
-class RMSNorm2d(nn.Module):
-    def __init__(
-        self,
-        channels: int,
-        eps: float = 1e-8,
-        init_weight: float = 1.0,
-    ):
-        super().__init__()
-        self.eps = eps
-        self.weight = nn.Parameter(torch.full((1, channels, 1, 1), init_weight))
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        rms = x.float().square().mean(dim=1, keepdim=True)
-        scale = torch.rsqrt(rms + self.eps).to(dtype=x.dtype)
-        return x * scale * self.weight.to(dtype=x.dtype)
-
-
 class JointEncoder(FeatureEncoder):
     def __init__(
         self,
@@ -45,7 +28,26 @@ class JointEncoder(FeatureEncoder):
         return super().forward(self.proj(joint))
 
 
-class LevelBlock(nn.Module):
+class FeatureBlock(nn.Module):
+    def __init__(
+        self,
+        dim: int,
+        num_layers: int,
+        heads: int,
+    ):
+        super().__init__()
+        self.sar_feat_encoder = FeatureEncoder(dim, num_layers, heads)
+        self.cld_feat_encoder = FeatureEncoder(dim, num_layers, heads)
+
+    def forward(
+        self,
+        sar: torch.Tensor,
+        cld: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        return self.sar_feat_encoder(sar), self.cld_feat_encoder(cld)
+
+
+class CommonBlock(nn.Module):
     def __init__(
         self,
         dim: int,
@@ -54,8 +56,6 @@ class LevelBlock(nn.Module):
     ):
         super().__init__()
         self.joint_encoder = JointEncoder(dim, num_layers, heads)
-        self.sar_joint_norm = RMSNorm2d(dim, init_weight=0.1)
-        self.cld_joint_norm = RMSNorm2d(dim, init_weight=0.1)
         self.sar_feat_encoder = FeatureEncoder(dim, num_layers, heads)
         self.cld_feat_encoder = FeatureEncoder(dim, num_layers, heads)
 
@@ -65,9 +65,7 @@ class LevelBlock(nn.Module):
         cld: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         joint = self.joint_encoder(sar, cld)
-        sar = self.sar_feat_encoder(sar + self.sar_joint_norm(joint))
-        cld = self.cld_feat_encoder(cld + self.cld_joint_norm(joint))
-        return sar, cld
+        return self.sar_feat_encoder(joint), self.cld_feat_encoder(joint)
 
 
 def _validate_extractor_dims(
@@ -143,7 +141,7 @@ class ResizeProjectUp(nn.Module):
         return self.refine(x)
 
 
-class DualModalExtractor(nn.Module):
+class Extractor(nn.Module):
     def __init__(
         self,
         sar_channels: int,
@@ -151,6 +149,7 @@ class DualModalExtractor(nn.Module):
         dims: tuple[int, ...] | list[int] = (128, 256, 512),
         num_layers: int = 2,
         heads: int = 4,
+        block_cls: type[nn.Module] = FeatureBlock,
     ):
         super().__init__()
         if num_layers <= 0:
@@ -159,6 +158,7 @@ class DualModalExtractor(nn.Module):
         dims = _validate_extractor_dims(dims, heads)
         self.dims = dims
         self.num_levels = len(dims)
+        self.block_cls = block_cls
 
         self.sar_stem = _conv_block(sar_channels, dims[0])
         self.cld_stem = _conv_block(cloudy_channels, dims[0])
@@ -174,8 +174,8 @@ class DualModalExtractor(nn.Module):
                 for i in range(len(dims) - 1)
             ]
         )
-        self.encoder_joints = nn.ModuleList(
-            [LevelBlock(dim, num_layers, heads) for dim in dims[1:]]
+        self.encoder_blocks = nn.ModuleList(
+            [block_cls(dim, num_layers, heads) for dim in dims[1:]]
         )
         self.sar_ups = nn.ModuleList(
             [
@@ -189,9 +189,9 @@ class DualModalExtractor(nn.Module):
                 for i in range(len(dims) - 1, 0, -1)
             ]
         )
-        self.decoder_joints = nn.ModuleList(
+        self.decoder_blocks = nn.ModuleList(
             [
-                LevelBlock(dims[i], num_layers, heads)
+                block_cls(dims[i], num_layers, heads)
                 for i in range(len(dims) - 2, 0, -1)
             ]
         )
@@ -212,21 +212,21 @@ class DualModalExtractor(nn.Module):
         encoder_steps = zip(
             self.sar_downs,
             self.cld_downs,
-            self.encoder_joints,
+            self.encoder_blocks,
         )
-        for index, (sar_down, cld_down, joint) in enumerate(encoder_steps):
+        for index, (sar_down, cld_down, block) in enumerate(encoder_steps):
             sar = sar_down(sar)
             cld = cld_down(cld)
-            sar, cld = joint(sar, cld)
+            sar, cld = block(sar, cld)
             if index != last_down_index:
                 sar_levels.append(sar)
                 cld_levels.append(cld)
 
-        for level, sar_up, cld_up, joint in zip(
+        for level, sar_up, cld_up, block in zip(
             range(self.num_levels - 2, 0, -1),
             self.sar_ups[:-1],
             self.cld_ups[:-1],
-            self.decoder_joints,
+            self.decoder_blocks,
         ):
             sar = (
                 sar_up(sar, size=sar_levels[level].shape[-2:])
@@ -236,7 +236,7 @@ class DualModalExtractor(nn.Module):
                 cld_up(cld, size=cld_levels[level].shape[-2:])
                 + cld_levels[level]
             )
-            sar, cld = joint(sar, cld)
+            sar, cld = block(sar, cld)
 
         sar = (
             self.sar_ups[-1](sar, size=sar_levels[0].shape[-2:])
@@ -289,19 +289,21 @@ class FDT_CCA(nn.Module):
         self.extractor_dims = extractor_dims
         self.up_dim = extractor_dims[0]
         self.common_dim = extractor_dims[0]
-        self.feature_extractor = DualModalExtractor(
+        self.feature_extractor = Extractor(
             sar_channels,
             cloudy_channels,
             dims=extractor_dims,
             num_layers=num_layers,
             heads=num_heads,
+            block_cls=FeatureBlock,
         )
-        self.common_extractor = DualModalExtractor(
+        self.common_extractor = Extractor(
             self.up_dim,
             self.up_dim,
             dims=extractor_dims,
             num_layers=num_layers,
             heads=num_heads,
+            block_cls=CommonBlock,
         )
         self.com_fuse = nn.Conv2d(self.up_dim * 2, self.common_dim, kernel_size=1)
 

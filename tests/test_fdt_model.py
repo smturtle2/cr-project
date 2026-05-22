@@ -8,9 +8,11 @@ from modules.model.fdt import FDT, FDT_CRNet_Direct, FDT_CRNet_Side, ResizeConvU
 from modules.model.fdt_cca import (
     CCA_AttnAdapter,
     CCA_CRNet,
-    DualModalExtractor,
+    CommonBlock,
+    Extractor,
     FDT_CCA,
     FDT_CRNet_CCA,
+    FeatureBlock,
 )
 from modules.model.module.attention import MultiHeadAttention
 
@@ -78,13 +80,14 @@ def test_fdt_cca_returns_full_resolution_cloudy_component_only() -> None:
         assert bool(torch.isfinite(output).all().item())
 
 
-def test_dual_modal_extractor_returns_full_resolution_features() -> None:
-    extractor = DualModalExtractor(
+def test_extractor_returns_full_resolution_features() -> None:
+    extractor = Extractor(
         2,
         13,
         dims=(128, 256, 512),
         num_layers=1,
         heads=4,
+        block_cls=FeatureBlock,
     ).eval()
     sar = torch.randn(1, 2, 16, 16)
     cloudy = torch.randn(1, 13, 16, 16)
@@ -100,13 +103,14 @@ def test_dual_modal_extractor_returns_full_resolution_features() -> None:
     assert bool(torch.isfinite(cld_feat).all().item())
 
 
-def test_dual_modal_extractor_accepts_feature_inputs_for_common() -> None:
-    extractor = DualModalExtractor(
+def test_extractor_accepts_feature_inputs_for_common() -> None:
+    extractor = Extractor(
         128,
         128,
         dims=(128, 256, 512),
         num_layers=1,
         heads=4,
+        block_cls=CommonBlock,
     ).eval()
     sar_feat = torch.randn(1, 128, 16, 16)
     cld_feat = torch.randn(1, 128, 16, 16)
