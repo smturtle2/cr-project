@@ -45,7 +45,7 @@ class JointEncoder(FeatureEncoder):
         return super().forward(self.proj(joint))
 
 
-class JointLevelBlock(nn.Module):
+class LevelBlock(nn.Module):
     def __init__(
         self,
         dim: int,
@@ -175,7 +175,7 @@ class DualModalExtractor(nn.Module):
             ]
         )
         self.encoder_joints = nn.ModuleList(
-            [JointLevelBlock(dim, num_layers, heads) for dim in dims[1:]]
+            [LevelBlock(dim, num_layers, heads) for dim in dims[1:]]
         )
         self.sar_ups = nn.ModuleList(
             [
@@ -191,7 +191,7 @@ class DualModalExtractor(nn.Module):
         )
         self.decoder_joints = nn.ModuleList(
             [
-                JointLevelBlock(dims[i], num_layers, heads)
+                LevelBlock(dims[i], num_layers, heads)
                 for i in range(len(dims) - 2, 0, -1)
             ]
         )
