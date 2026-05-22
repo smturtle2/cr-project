@@ -109,8 +109,9 @@ class ConAttn(nn.Module):
 
     def forward(self, x):
         """Apply output-domain background contrast attention."""
-        q_features = self.query(x)
-        v_features = self.value(x)
+        attention_input = x.contiguous()
+        q_features = self.query(attention_input)
+        v_features = self.value(attention_input)
 
         batch, query_channels, height, width = q_features.shape
         value_channels = v_features.shape[1]

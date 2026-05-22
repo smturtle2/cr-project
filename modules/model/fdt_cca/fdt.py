@@ -41,7 +41,8 @@ class JointEncoder(FeatureEncoder):
         )
 
     def forward(self, first: torch.Tensor, second: torch.Tensor) -> torch.Tensor:
-        return super().forward(self.proj(torch.cat((first, second), dim=1)))
+        joint = torch.cat((first, second), dim=1).contiguous()
+        return super().forward(self.proj(joint))
 
 
 class JointLevelBlock(nn.Module):
