@@ -24,26 +24,32 @@ class FDT_CRNet_CCA(nn.Module):
         ca=DefaultConAttn,
         ca_kwargs=None,
         return_decomposition=False,
+        extractor_dims=None,
+        cca_layers=None,
     ):
         if out_channels != cloudy_channels:
             raise ValueError("out_channels must match cloudy_channels")
 
         super().__init__()
         self.return_decomposition = return_decomposition
+        if cca_layers is None:
+            cca_layers = fdt_layers
         self.fdt = FDT_CCA(
             sar_channels=sar_channels,
             cloudy_channels=cloudy_channels,
             dim=dim,
             num_heads=num_heads,
             num_layers=fdt_layers,
+            extractor_dims=extractor_dims,
         )
+        self.component_channels = self.fdt.extractor_dims[0]
         crnet = CCA_CRNet(
             out_channels=out_channels,
             alpha=alpha,
             num_layers=cr_layers,
-            feature_sizes=dim,
-            comp_channels=dim // 2,
-            cca_layers=fdt_layers,
+            feature_sizes=self.fdt.dim,
+            comp_channels=self.component_channels,
+            cca_layers=cca_layers,
             num_heads=num_heads,
             ca=ca,
             ca_kwargs=ca_kwargs,
