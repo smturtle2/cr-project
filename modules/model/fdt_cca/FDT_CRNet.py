@@ -24,7 +24,7 @@ class FDT_CRNet_CCA(nn.Module):
         ca=DefaultConAttn,
         ca_kwargs=None,
         return_decomposition=False,
-        extractor_dims=None,
+        extractor_dims=(128, 256, 512),
         cca_layers=None,
     ):
         if out_channels != cloudy_channels:

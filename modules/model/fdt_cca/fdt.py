@@ -267,7 +267,7 @@ class FDT_CCA(nn.Module):
         dim=256,
         num_layers=2,
         num_heads=4,
-        extractor_dims: tuple[int, ...] | list[int] | None = None,
+        extractor_dims: tuple[int, ...] | list[int] = (128, 256, 512),
     ):
         super().__init__()
         if dim % num_heads != 0:
@@ -275,8 +275,6 @@ class FDT_CCA(nn.Module):
         if num_layers <= 0:
             raise ValueError("num_layers must be greater than zero")
 
-        if extractor_dims is None:
-            extractor_dims = (dim // 2, dim, dim * 2)
         extractor_dims = _validate_extractor_dims(extractor_dims, num_heads)
         if extractor_dims[0] * 2 != dim:
             raise ValueError("extractor_dims[0] * 2 must match dim")
