@@ -126,8 +126,9 @@ class ConAttn(nn.Module):
         k = k_tokens.view(batch, num_tokens, self.num_heads, query_head_dim).transpose(1, 2).contiguous()
         v = v_tokens.view(batch, num_tokens, self.num_heads, value_head_dim).transpose(1, 2).contiguous()
 
-        weight = self.linear_weight(q_features).flatten(2).transpose(1, 2).contiguous()
-        bias = self.bias(q_features).flatten(2).transpose(1, 2).contiguous()
+        gate_features = q_features.contiguous()
+        weight = self.linear_weight(gate_features).flatten(2).transpose(1, 2).contiguous()
+        bias = self.bias(gate_features).flatten(2).transpose(1, 2).contiguous()
         weight = weight[:, None, :, :]
         bias = bias[:, None, :, :]
 
