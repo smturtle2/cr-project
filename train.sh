@@ -4,6 +4,16 @@ set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")"
 
 target="${TRAIN_TARGET:-tmp_main.py}"
+uv_bin="${UV:-uv}"
+
+if ! command -v "${uv_bin}" >/dev/null 2>&1; then
+  if [[ -x "${HOME}/.local/bin/uv" ]]; then
+    uv_bin="${HOME}/.local/bin/uv"
+  else
+    echo "uv is required but was not found on PATH or at ${HOME}/.local/bin/uv" >&2
+    exit 1
+  fi
+fi
 
 show_gpu_list() {
   if command -v nvidia-smi >/dev/null 2>&1; then
@@ -18,16 +28,16 @@ show_usage() {
   cat <<'EOF'
 Usage:
   ./train.sh [--gpu ID] [target args...]
-  ./train.sh --multi-gpu [target args...]
+  ./train.sh --gpus IDS [target args...]
 
 Options:
   --gpu ID       Run on a single GPU ID, for example: ./train.sh --gpu 0
-  --multi-gpu   Enable multi-GPU training with torchrun.
+  --gpus IDS     Run torchrun on selected comma-separated GPU IDs, for example: ./train.sh --gpus 5,6
   -h, --help    Show this help.
 
 Examples:
   ./train.sh --gpu 0
-  ./train.sh --multi-gpu
+  ./train.sh --gpus 5,6
   TRAIN_TARGET=other_runner.py ./train.sh --gpu 0
 EOF
 }
@@ -38,7 +48,7 @@ count_visible_cuda_devices() {
       echo 0
       return
     fi
-    python - <<'PY'
+    "${uv_bin}" run python - <<'PY'
 import os
 
 devices = [item.strip() for item in os.environ["CUDA_VISIBLE_DEVICES"].split(",")]
@@ -52,7 +62,7 @@ PY
     return
   fi
 
-  uv run python - <<'PY'
+  "${uv_bin}" run python - <<'PY'
 import torch
 
 print(torch.cuda.device_count() if torch.cuda.is_available() else 0)
@@ -68,9 +78,16 @@ count_system_cuda_devices() {
   count_visible_cuda_devices
 }
 
-multi_gpu=0
+count_csv_items() {
+  local value="$1"
+  local commas="${value//[^,]/}"
+  echo $((${#commas} + 1))
+}
+
 gpu_provided=0
+gpu_list_provided=0
 gpu_id=""
+gpu_list=""
 target_args=()
 
 set_gpu_id() {
@@ -82,15 +99,20 @@ set_gpu_id() {
   gpu_id="$1"
 }
 
+set_gpu_list() {
+  if (( gpu_list_provided )); then
+    echo "--gpus can only be provided once." >&2
+    exit 1
+  fi
+  gpu_list_provided=1
+  gpu_list="$1"
+}
+
 while (($#)); do
   case "$1" in
     -h|--help)
       show_usage
       exit 0
-      ;;
-    --multi-gpu)
-      multi_gpu=1
-      shift
       ;;
     --gpu)
       if (($# < 2)); then
@@ -105,6 +127,19 @@ while (($#)); do
       set_gpu_id "${1#--gpu=}"
       shift
       ;;
+    --gpus)
+      if (($# < 2)); then
+        echo "--gpus requires comma-separated GPU IDs." >&2
+        show_usage >&2
+        exit 1
+      fi
+      set_gpu_list "$2"
+      shift 2
+      ;;
+    --gpus=*)
+      set_gpu_list "${1#--gpus=}"
+      shift
+      ;;
     --)
       shift
       target_args+=("$@")
@@ -117,8 +152,8 @@ while (($#)); do
   esac
 done
 
-if (( gpu_provided && multi_gpu )); then
-  echo "--gpu selects one GPU and cannot be combined with --multi-gpu." >&2
+if (( gpu_provided && gpu_list_provided )); then
+  echo "--gpu and --gpus cannot be combined." >&2
   show_usage >&2
   exit 1
 fi
@@ -129,8 +164,45 @@ if (( gpu_provided )) && [[ ! "${gpu_id}" =~ ^[0-9]+$ ]]; then
   exit 1
 fi
 
+if (( gpu_list_provided )) && [[ ! "${gpu_list}" =~ ^[0-9]+(,[0-9]+)*$ ]]; then
+  echo "--gpus must be comma-separated non-negative integer GPU IDs, got: ${gpu_list}" >&2
+  show_usage >&2
+  exit 1
+fi
+
 if (( gpu_provided )); then
   export CUDA_VISIBLE_DEVICES="${gpu_id}"
+fi
+
+if (( gpu_list_provided )); then
+  export CUDA_VISIBLE_DEVICES="${gpu_list}"
+fi
+
+if (( gpu_list_provided )); then
+  nproc_per_node="$(count_csv_items "${gpu_list}")"
+  if [[ ! "${nproc_per_node}" =~ ^[0-9]+$ ]]; then
+    echo "GPU count must be a non-negative integer, got: ${nproc_per_node}" >&2
+    exit 1
+  fi
+  if (( nproc_per_node < 1 )); then
+    echo "--gpus requires at least one GPU ID." >&2
+    exit 1
+  fi
+  if [[ ! -f "${target}" ]]; then
+    echo "train target not found: ${target}" >&2
+    echo "set TRAIN_TARGET or create tmp_main.py from tmp_main_base.py" >&2
+    exit 1
+  fi
+  exec "${uv_bin}" run torchrun --standalone --nproc-per-node="${nproc_per_node}" "${target}" "${target_args[@]}"
+fi
+
+if (( gpu_provided )); then
+  if [[ ! -f "${target}" ]]; then
+    echo "train target not found: ${target}" >&2
+    echo "set TRAIN_TARGET or create tmp_main.py from tmp_main_base.py" >&2
+    exit 1
+  fi
+  exec "${uv_bin}" run python "${target}" "${target_args[@]}"
 fi
 
 system_cuda_devices="$(count_system_cuda_devices)"
@@ -139,33 +211,8 @@ if [[ ! "${system_cuda_devices}" =~ ^[0-9]+$ ]]; then
   exit 1
 fi
 
-visible_cuda_devices="$(count_visible_cuda_devices)"
-if [[ ! "${visible_cuda_devices}" =~ ^[0-9]+$ ]]; then
-  echo "visible CUDA device count must be a non-negative integer, got: ${visible_cuda_devices}" >&2
-  exit 1
-fi
-
-nproc_per_node="${NPROC_PER_NODE:-${visible_cuda_devices}}"
-if [[ ! "${nproc_per_node}" =~ ^[0-9]+$ ]]; then
-  echo "NPROC_PER_NODE must be a non-negative integer, got: ${nproc_per_node}" >&2
-  exit 1
-fi
-
-if (( multi_gpu )); then
-  if (( nproc_per_node < 1 )); then
-    echo "--multi-gpu requires at least one visible CUDA device." >&2
-    exit 1
-  fi
-  if [[ ! -f "${target}" ]]; then
-    echo "train target not found: ${target}" >&2
-    echo "set TRAIN_TARGET or create tmp_main.py from tmp_main_base.py" >&2
-    exit 1
-  fi
-  exec uv run torchrun --standalone --nproc-per-node="${nproc_per_node}" "${target}" "${target_args[@]}"
-fi
-
 if (( ! gpu_provided && system_cuda_devices > 1 )); then
-  echo "Multiple GPUs are available. Choose one GPU explicitly or pass --multi-gpu." >&2
+  echo "Multiple GPUs are available. Choose one GPU with --gpu or selected GPUs with --gpus." >&2
   echo >&2
   echo "Detected GPUs:" >&2
   show_gpu_list >&2
@@ -180,4 +227,4 @@ if [[ ! -f "${target}" ]]; then
   exit 1
 fi
 
-exec uv run python "${target}" "${target_args[@]}"
+exec "${uv_bin}" run python "${target}" "${target_args[@]}"
