@@ -146,6 +146,9 @@ def main() -> None:
             num_workers="auto",
             scheduler_timing="after_validation",
             output_dir=Path("artifacts"),
+            # resume=Path("artifacts/epoch-0001.pt")처럼 지정하면 공용 main.py가
+            # 기존 metrics.jsonl을 checkpoint epoch까지 복원해 history plot을 이어 그린다.
+            resume=None,
             save_every_n_epochs=0,
             run_test=True,
             num_examples=5,

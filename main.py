@@ -350,6 +350,18 @@ def load_history_from_metrics_jsonl(path: str | Path) -> list[dict[str, int | fl
     return history
 
 
+def load_resume_history(output_dir: Path, *, current_epoch: int) -> list[dict[str, int | float]]:
+    metrics_path = output_dir / "metrics.jsonl"
+    if current_epoch <= 0 or not metrics_path.exists():
+        return []
+
+    return [
+        row
+        for row in load_history_from_metrics_jsonl(metrics_path)
+        if int(row["epoch"]) <= current_epoch
+    ]
+
+
 def split_history_metric_key(key: str) -> tuple[Literal["train", "val", "test"], str] | None:
     for stage in ("train", "val", "test"):
         prefix = f"{stage}_"
@@ -1164,11 +1176,12 @@ def load_training_state(
     output_dir: Path,
     resume: Path | None,
     selector: BestEpochSelector,
-) -> BestState | None:
+) -> tuple[BestState | None, list[dict[str, int | float]]]:
     best_state = load_best_state(output_dir, selector=selector) if resume is not None else None
     if resume is not None:
         trainer.load_checkpoint(resume)
-    return best_state
+        return best_state, load_resume_history(output_dir, current_epoch=trainer.current_epoch)
+    return best_state, []
 
 
 def handle_training_epoch(
@@ -1221,8 +1234,9 @@ def run_training_loop(
     example_mode: Literal["best", "after_test"],
     example_config: ExampleSaveConfig,
     save_every_n_epochs: int,
+    initial_history: Sequence[Mapping[str, int | float]] = (),
 ) -> tuple[list[dict[str, int | float]], set[int]]:
-    history: list[dict[str, int | float]] = []
+    history = [dict(row) for row in initial_history]
     saved_example_epochs: set[int] = set()
     current_best_state = best_state
 
@@ -1335,7 +1349,7 @@ def main(
             mixed_precision=mixed_precision,
         )
         best_selector = build_best_epoch_selector()
-        best_state = load_training_state(
+        best_state, history = load_training_state(
             trainer,
             output_dir=output_dir,
             resume=resume,
@@ -1349,6 +1363,7 @@ def main(
             example_mode=example_mode,
             example_config=example_config,
             save_every_n_epochs=save_every_n_epochs,
+            initial_history=history,
         )
         finalize_after_training(
             trainer,

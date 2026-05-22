@@ -204,6 +204,38 @@ class HistoryRecordTest(unittest.TestCase):
             ],
         )
 
+    def test_load_resume_history_filters_records_after_checkpoint_epoch(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            output_dir = Path(tmp_dir)
+            path = output_dir / "metrics.jsonl"
+            path.write_text(
+                "\n".join(
+                    [
+                        json.dumps({"kind": "train_epoch", "epoch": 1, "loss": 1.2, "metrics": {}}),
+                        json.dumps({"kind": "validation", "epoch": 1, "loss": 0.5, "metrics": {"mae": 0.6}}),
+                        json.dumps({"kind": "train_epoch", "epoch": 2, "loss": 1.0, "metrics": {}}),
+                        json.dumps({"kind": "validation", "epoch": 2, "loss": 0.4, "metrics": {"mae": 0.5}}),
+                    ]
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            history = main.load_resume_history(output_dir, current_epoch=1)
+
+        self.assertEqual(
+            history,
+            [
+                {
+                    "epoch": 1,
+                    "global_step": 1,
+                    "train_loss": 1.2,
+                    "val_loss": 0.5,
+                    "val_mae": 0.6,
+                }
+            ],
+        )
+
     def test_save_history_plot_writes_loss_lr_then_metric_plots(self) -> None:
         history = [
             {
@@ -524,6 +556,17 @@ class MainTrainingFlowTest(unittest.TestCase):
             output_dir = Path(tmp_dir)
             resume_path = output_dir / "resume.pt"
             resume_path.write_text("checkpoint:1\n", encoding="utf-8")
+            (output_dir / "metrics.jsonl").write_text(
+                "\n".join(
+                    [
+                        json.dumps({"kind": "train_epoch", "epoch": 1, "loss": 1.0, "metrics": {}}),
+                        json.dumps({"kind": "validation", "epoch": 1, "loss": 0.6, "metrics": {"mae": 0.3}}),
+                        json.dumps({"kind": "train_epoch", "epoch": 3, "loss": 0.7, "metrics": {}}),
+                    ]
+                )
+                + "\n",
+                encoding="utf-8",
+            )
 
             result = self._run_main(
                 output_dir=output_dir,
@@ -536,6 +579,10 @@ class MainTrainingFlowTest(unittest.TestCase):
 
             self.assertEqual(FakeTrainer.loaded_checkpoint_paths, [resume_path])
             self.assertEqual(result["trainer"].current_epoch, 2)
+            history = result["history_plot"].call_args.args[0]
+            self.assertEqual([row["epoch"] for row in history], [1, 2])
+            self.assertEqual(history[0]["val_mae"], 0.3)
+            self.assertEqual(history[1]["val_loss"], 0.5)
 
     def _run_main(
         self,
