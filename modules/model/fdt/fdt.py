@@ -7,7 +7,7 @@ import torch.nn.functional as F
 from ..module.attention import TransformerLayer
 
 
-class _Residual3x3Block(nn.Module):
+class Residual3x3Block(nn.Module):
     def __init__(self, channels: int):
         super().__init__()
         self.net = nn.Sequential(
@@ -34,6 +34,9 @@ class _Residual3x3Block(nn.Module):
         return x + self.net(x)
 
 
+_Residual3x3Block = Residual3x3Block
+
+
 class ResizeConvUp(nn.Module):
     def __init__(self, in_channels: int, blocks: int = 2):
         super().__init__()
@@ -46,7 +49,7 @@ class ResizeConvUp(nn.Module):
         self.out_channels = in_channels // 4
         self.blocks = blocks
         self.residuals = nn.Sequential(
-            *[_Residual3x3Block(in_channels) for _ in range(blocks)]
+            *[Residual3x3Block(in_channels) for _ in range(blocks)]
         )
         self.refine = nn.Conv2d(
             in_channels,

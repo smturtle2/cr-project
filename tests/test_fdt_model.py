@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import torch
 import torch.nn as nn
+import pytest
 
 from modules.model.fdt import FDT, FDT_CRNet_Direct, FDT_CRNet_Side, ResizeConvUp
 from modules.model.fdt_cca import (
     CCA_AttnAdapter,
     CCA_CRNet,
+    DualModalExtractor,
     FDT_CCA,
     FDT_CRNet_CCA,
 )
@@ -74,6 +76,95 @@ def test_fdt_cca_returns_full_resolution_cloudy_component_only() -> None:
     for output in outputs[1:]:
         assert output.shape == (1, 128, 16, 16)
         assert bool(torch.isfinite(output).all().item())
+
+
+def test_dual_modal_extractor_returns_full_resolution_features() -> None:
+    extractor = DualModalExtractor(
+        2,
+        13,
+        dims=(128, 256, 512),
+        num_layers=1,
+        heads=4,
+    ).eval()
+    sar = torch.randn(1, 2, 16, 16)
+    cloudy = torch.randn(1, 13, 16, 16)
+
+    with torch.no_grad():
+        sar_feat, cld_feat = extractor(sar, cloudy)
+
+    assert sar_feat.shape == (1, 128, 16, 16)
+    assert cld_feat.shape == (1, 128, 16, 16)
+    assert sar_feat.dtype == sar.dtype
+    assert cld_feat.dtype == cloudy.dtype
+    assert bool(torch.isfinite(sar_feat).all().item())
+    assert bool(torch.isfinite(cld_feat).all().item())
+
+
+def test_dual_modal_extractor_accepts_feature_inputs_for_common() -> None:
+    extractor = DualModalExtractor(
+        128,
+        128,
+        dims=(128, 256, 512),
+        num_layers=1,
+        heads=4,
+    ).eval()
+    sar_feat = torch.randn(1, 128, 16, 16)
+    cld_feat = torch.randn(1, 128, 16, 16)
+
+    with torch.no_grad():
+        sar_com, cld_com = extractor(sar_feat, cld_feat)
+
+    assert sar_com.shape == sar_feat.shape
+    assert cld_com.shape == cld_feat.shape
+    assert bool(torch.isfinite(sar_com).all().item())
+    assert bool(torch.isfinite(cld_com).all().item())
+
+
+def test_fdt_cca_accepts_two_level_extractor() -> None:
+    model = FDT_CCA(
+        dim=256,
+        num_layers=1,
+        num_heads=4,
+        extractor_dims=(128, 256),
+    ).eval()
+    sar = torch.randn(1, 2, 16, 16)
+    cloudy = torch.randn(1, 13, 16, 16)
+
+    with torch.no_grad():
+        outputs = model(sar, cloudy)
+
+    assert outputs[0].shape == (1, 256, 16, 16)
+    for output in outputs[1:]:
+        assert output.shape == (1, 128, 16, 16)
+
+
+def test_fdt_cca_accepts_four_level_extractor() -> None:
+    model = FDT_CCA(
+        dim=64,
+        num_layers=1,
+        num_heads=4,
+        extractor_dims=(32, 64, 128, 256),
+    ).eval()
+    sar = torch.randn(1, 2, 16, 16)
+    cloudy = torch.randn(1, 13, 16, 16)
+
+    with torch.no_grad():
+        outputs = model(sar, cloudy)
+
+    assert outputs[0].shape == (1, 64, 16, 16)
+    for output in outputs[1:]:
+        assert output.shape == (1, 32, 16, 16)
+
+
+def test_fdt_cca_rejects_invalid_extractor_config() -> None:
+    with pytest.raises(ValueError, match="extractor_dims\\[0\\] \\* 2"):
+        FDT_CCA(dim=256, extractor_dims=(64, 128))
+
+    with pytest.raises(ValueError, match="at least two levels"):
+        FDT_CCA(dim=256, extractor_dims=(128,))
+
+    with pytest.raises(ValueError, match="divisible by heads"):
+        FDT_CCA(dim=256, extractor_dims=(128, 258))
 
 
 def test_cca_attn_adapter_starts_as_identity() -> None:
