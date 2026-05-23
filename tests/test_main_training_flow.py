@@ -719,6 +719,33 @@ class MainTrainingFlowTest(unittest.TestCase):
         self.assertEqual(tuple(sorted(first or ())), first)
         self.assertNotEqual(first, tuple(range(10)))
 
+    def test_full_split_examples_use_prepared_population_for_sampling(self) -> None:
+        trainer = mock.Mock()
+        trainer.seed = 42
+        dataloader = mock.Mock()
+        dataloader._cr_prepared_num_examples = 100
+
+        with (
+            tempfile.TemporaryDirectory() as tmp_dir,
+            mock.patch.object(main, "build_loader", return_value=dataloader) as build_loader,
+            mock.patch.object(main, "_render_restoration_examples", return_value=[]) as render,
+        ):
+            main.save_restoration_examples(
+                trainer,
+                split="validation",
+                max_samples=None,
+                epoch=1,
+                output_dir=Path(tmp_dir),
+                num_examples=10,
+            )
+
+        build_loader.assert_called_once()
+        self.assertIsNone(build_loader.call_args.kwargs["max_samples"])
+        sample_indices = render.call_args.kwargs["sample_indices"]
+        self.assertEqual(len(sample_indices), 10)
+        self.assertEqual(tuple(sorted(sample_indices)), sample_indices)
+        self.assertNotEqual(sample_indices, tuple(range(10)))
+
     def test_render_examples_uses_selected_sample_indices(self) -> None:
         trainer = mock.Mock()
         trainer.model = nn.Linear(1, 1)
@@ -892,11 +919,12 @@ class BuildLoaderTest(unittest.TestCase):
 
     def test_build_loader_prepares_streaming_split(self) -> None:
         trainer = self._make_trainer()
-        prepared = object()
+        prepared = mock.Mock(num_examples=7176)
+        loader = mock.Mock()
 
         with (
             mock.patch.object(main, "prepare_split", return_value=prepared) as prepare_split,
-            mock.patch.object(main, "build_dataloader", return_value="loader") as build_dataloader,
+            mock.patch.object(main, "build_dataloader", return_value=loader) as build_dataloader,
         ):
             result = main.build_loader(
                 trainer,
@@ -906,7 +934,8 @@ class BuildLoaderTest(unittest.TestCase):
                 epoch_index=3,
             )
 
-        self.assertEqual(result, "loader")
+        self.assertEqual(result, loader)
+        self.assertEqual(loader._cr_prepared_num_examples, 7176)
         self.assertTrue(prepare_split.call_args.kwargs["streaming"])
         self.assertIsNone(prepare_split.call_args.kwargs["dataset_root"])
         self.assertEqual(prepare_split.call_args.kwargs["max_samples"], None)
@@ -915,11 +944,12 @@ class BuildLoaderTest(unittest.TestCase):
 
     def test_build_loader_passes_training_options(self) -> None:
         trainer = self._make_trainer()
-        prepared = object()
+        prepared = mock.Mock(num_examples=107143)
+        loader = mock.Mock()
 
         with (
             mock.patch.object(main, "prepare_split", return_value=prepared) as prepare_split,
-            mock.patch.object(main, "build_dataloader", return_value="loader"),
+            mock.patch.object(main, "build_dataloader", return_value=loader),
         ):
             main.build_loader(
                 trainer,
@@ -931,16 +961,18 @@ class BuildLoaderTest(unittest.TestCase):
 
         self.assertTrue(prepare_split.call_args.kwargs["streaming"])
         self.assertEqual(prepare_split.call_args.kwargs["max_samples"], 256)
+        self.assertEqual(loader._cr_prepared_num_examples, 107143)
 
     def test_build_loader_uses_local_dataset_dir_when_not_streaming(self) -> None:
         trainer = self._make_trainer()
         trainer.streaming = False
         trainer.dataset_root = Path("/tmp/dataset-root")
-        prepared = object()
+        prepared = mock.Mock(num_examples=3588)
+        loader = mock.Mock()
 
         with (
             mock.patch.object(main, "prepare_split", return_value=prepared) as prepare_split,
-            mock.patch.object(main, "build_dataloader", return_value="loader"),
+            mock.patch.object(main, "build_dataloader", return_value=loader),
         ):
             result = main.build_loader(
                 trainer,
@@ -950,7 +982,8 @@ class BuildLoaderTest(unittest.TestCase):
                 epoch_index=2,
             )
 
-        self.assertEqual(result, "loader")
+        self.assertEqual(result, loader)
+        self.assertEqual(loader._cr_prepared_num_examples, 3588)
         self.assertFalse(prepare_split.call_args.kwargs["streaming"])
         self.assertEqual(prepare_split.call_args.kwargs["dataset_root"], Path("/tmp/dataset-root"))
 

@@ -1029,9 +1029,9 @@ def _resolve_example_request(
         epoch_index=max(epoch - 1, 0),
         distributed_data=distributed_data,
     )
-    population_size = None
-    if max_samples is not None:
-        population_size = int(getattr(dataloader, "_cr_prepared_num_examples", max_samples))
+    population_size = getattr(dataloader, "_cr_prepared_num_examples", max_samples)
+    if population_size is not None:
+        population_size = int(population_size)
     return dataloader, split, population_size
 
 
@@ -1135,7 +1135,7 @@ EXAMPLE_SPLIT_SEED_OFFSETS = {
 
 
 def select_example_sample_indices(
-    max_samples: int | None,
+    population_size: int | None,
     *,
     num_examples: int,
     seed: int,
@@ -1143,18 +1143,18 @@ def select_example_sample_indices(
     epoch: int,
 ) -> tuple[int, ...] | None:
     del epoch
-    if max_samples is None:
+    if population_size is None:
         return None
-    if max_samples <= 0 or num_examples <= 0:
+    if population_size <= 0 or num_examples <= 0:
         return ()
 
-    sample_count = min(max_samples, num_examples)
-    if sample_count == max_samples:
-        return tuple(range(max_samples))
+    sample_count = min(population_size, num_examples)
+    if sample_count == population_size:
+        return tuple(range(population_size))
 
     split_offset = EXAMPLE_SPLIT_SEED_OFFSETS.get(split, 0)
     rng = np.random.default_rng(seed + split_offset * 10_007)
-    indices = rng.choice(max_samples, size=sample_count, replace=False)
+    indices = rng.choice(population_size, size=sample_count, replace=False)
     return tuple(sorted(int(index) for index in indices))
 
 
