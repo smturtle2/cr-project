@@ -3,9 +3,10 @@ from __future__ import annotations
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from sympy.physics.units import Pa
 
-from ..fdt.fdt import Residual3x3Block, ResizeConvUp
 from ..fdt.fdt import CommonEncoder as FeatureEncoder
+from ..fdt.fdt import Residual3x3Block, ResizeConvUp
 
 
 class JointEncoder(FeatureEncoder):
@@ -28,7 +29,7 @@ class JointEncoder(FeatureEncoder):
         return super().forward(self.proj(joint))
 
 
-class FeatureBlock(nn.Module):
+class ParallelBlock(nn.Module):
     def __init__(
         self,
         dim: int,
@@ -47,7 +48,7 @@ class FeatureBlock(nn.Module):
         return self.sar_feat_encoder(sar), self.cld_feat_encoder(cld)
 
 
-class CommonBlock(nn.Module):
+class JointBlock(nn.Module):
     def __init__(
         self,
         dim: int,
@@ -126,19 +127,117 @@ class ResizeProjectUp(nn.Module):
         )
         self.refine = Residual3x3Block(out_channels)
 
-    def forward(
-        self,
-        x: torch.Tensor,
-        size: tuple[int, int],
-    ) -> torch.Tensor:
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
         x = F.interpolate(
             x,
-            size=size,
+            scale_factor=2,
             mode="bilinear",
             align_corners=False,
         )
         x = self.proj(x)
         return self.refine(x)
+
+
+class DownLevels(nn.Module):
+    def __init__(
+        self,
+        sar_channels: int,
+        cloudy_channels: int,
+        dims: tuple[int, ...],
+    ):
+        super().__init__()
+        self.sar_stem = _conv_block(sar_channels, dims[0])
+        self.cld_stem = _conv_block(cloudy_channels, dims[0])
+        self.sar_downs = nn.ModuleList(
+            [_conv_block(dims[i], dims[i + 1], stride=2) for i in range(len(dims) - 1)]
+        )
+        self.cld_downs = nn.ModuleList(
+            [_conv_block(dims[i], dims[i + 1], stride=2) for i in range(len(dims) - 1)]
+        )
+
+    def forward(
+        self,
+        sar: torch.Tensor,
+        cld: torch.Tensor,
+    ) -> tuple[list[torch.Tensor], list[torch.Tensor]]:
+        sar = self.sar_stem(sar)
+        cld = self.cld_stem(cld)
+        sars = [sar]
+        clds = [cld]
+
+        for sar_down, cld_down in zip(self.sar_downs, self.cld_downs):
+            sar = sar_down(sar)
+            cld = cld_down(cld)
+            sars.append(sar)
+            clds.append(cld)
+        return sars, clds
+
+
+class UpLevels(nn.Module):
+    def __init__(
+        self,
+        dims: tuple[int, ...],
+        num_layers: int,
+        heads: int,
+        block_cls: type[nn.Module],
+    ):
+        super().__init__()
+        self.blocks = nn.ModuleList(
+            [block_cls(dim, num_layers, heads) for dim in reversed(dims[1:])]
+        )
+        self.sar_ups = nn.ModuleList(
+            [ResizeProjectUp(dims[i], dims[i - 1]) for i in range(len(dims) - 1, 0, -1)]
+        )
+        self.cld_ups = nn.ModuleList(
+            [ResizeProjectUp(dims[i], dims[i - 1]) for i in range(len(dims) - 1, 0, -1)]
+        )
+        self.sar_recons = nn.ModuleList(
+            [ResizeProjectUp(dims[i + 1], dims[i]) for i in range(len(dims) - 1)]
+        )
+        self.cld_recons = nn.ModuleList(
+            [ResizeProjectUp(dims[i + 1], dims[i]) for i in range(len(dims) - 1)]
+        )
+
+    def forward(
+        self,
+        sars: list[torch.Tensor],
+        clds: list[torch.Tensor],
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        sar_residuals = [
+            current - recon(next_level)
+            for current, next_level, recon in zip(
+                sars[:-1],
+                sars[1:],
+                self.sar_recons,
+            )
+        ]
+        cld_residuals = [
+            current - recon(next_level)
+            for current, next_level, recon in zip(
+                clds[:-1],
+                clds[1:],
+                self.cld_recons,
+            )
+        ]
+        sar, cld = self.blocks[0](sars[-1], clds[-1])
+
+        for level, sar_up, cld_up, block in zip(
+            range(len(sars) - 2, 0, -1),
+            self.sar_ups[:-1],
+            self.cld_ups[:-1],
+            self.blocks[1:],
+        ):
+            sar_residual = sar_residuals[level]
+            cld_residual = cld_residuals[level]
+            sar = sar_up(sar) + sar_residual
+            cld = cld_up(cld) + cld_residual
+            sar, cld = block(sar, cld)
+
+        sar_residual = sar_residuals[0]
+        cld_residual = cld_residuals[0]
+        sar = self.sar_ups[-1](sar) + sar_residual
+        cld = self.cld_ups[-1](cld) + cld_residual
+        return sar, cld
 
 
 class Extractor(nn.Module):
@@ -149,7 +248,7 @@ class Extractor(nn.Module):
         dims: tuple[int, ...] | list[int] = (128, 256, 512),
         num_layers: int = 2,
         heads: int = 4,
-        block_cls: type[nn.Module] = FeatureBlock,
+        block_cls: type[nn.Module] = ParallelBlock,
     ):
         super().__init__()
         if num_layers <= 0:
@@ -160,41 +259,8 @@ class Extractor(nn.Module):
         self.num_levels = len(dims)
         self.block_cls = block_cls
 
-        self.sar_stem = _conv_block(sar_channels, dims[0])
-        self.cld_stem = _conv_block(cloudy_channels, dims[0])
-        self.sar_downs = nn.ModuleList(
-            [
-                _conv_block(dims[i], dims[i + 1], stride=2)
-                for i in range(len(dims) - 1)
-            ]
-        )
-        self.cld_downs = nn.ModuleList(
-            [
-                _conv_block(dims[i], dims[i + 1], stride=2)
-                for i in range(len(dims) - 1)
-            ]
-        )
-        self.encoder_blocks = nn.ModuleList(
-            [block_cls(dim, num_layers, heads) for dim in dims[1:]]
-        )
-        self.sar_ups = nn.ModuleList(
-            [
-                ResizeProjectUp(dims[i], dims[i - 1])
-                for i in range(len(dims) - 1, 0, -1)
-            ]
-        )
-        self.cld_ups = nn.ModuleList(
-            [
-                ResizeProjectUp(dims[i], dims[i - 1])
-                for i in range(len(dims) - 1, 0, -1)
-            ]
-        )
-        self.decoder_blocks = nn.ModuleList(
-            [
-                block_cls(dims[i], num_layers, heads)
-                for i in range(len(dims) - 2, 0, -1)
-            ]
-        )
+        self.down = DownLevels(sar_channels, cloudy_channels, dims)
+        self.up = UpLevels(dims, num_layers, heads, block_cls)
         self.sar_out = _conv_block(dims[0], dims[0])
         self.cld_out = _conv_block(dims[0], dims[0])
 
@@ -203,49 +269,8 @@ class Extractor(nn.Module):
         sar: torch.Tensor,
         cld: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        sar = self.sar_stem(sar)
-        cld = self.cld_stem(cld)
-        sar_levels = [sar]
-        cld_levels = [cld]
-
-        last_down_index = len(self.sar_downs) - 1
-        encoder_steps = zip(
-            self.sar_downs,
-            self.cld_downs,
-            self.encoder_blocks,
-        )
-        for index, (sar_down, cld_down, block) in enumerate(encoder_steps):
-            sar = sar_down(sar)
-            cld = cld_down(cld)
-            sar, cld = block(sar, cld)
-            if index != last_down_index:
-                sar_levels.append(sar)
-                cld_levels.append(cld)
-
-        for level, sar_up, cld_up, block in zip(
-            range(self.num_levels - 2, 0, -1),
-            self.sar_ups[:-1],
-            self.cld_ups[:-1],
-            self.decoder_blocks,
-        ):
-            sar = (
-                sar_up(sar, size=sar_levels[level].shape[-2:])
-                + sar_levels[level]
-            )
-            cld = (
-                cld_up(cld, size=cld_levels[level].shape[-2:])
-                + cld_levels[level]
-            )
-            sar, cld = block(sar, cld)
-
-        sar = (
-            self.sar_ups[-1](sar, size=sar_levels[0].shape[-2:])
-            + sar_levels[0]
-        )
-        cld = (
-            self.cld_ups[-1](cld, size=cld_levels[0].shape[-2:])
-            + cld_levels[0]
-        )
+        sars, clds = self.down(sar, cld)
+        sar, cld = self.up(sars, clds)
         return self.sar_out(sar), self.cld_out(cld)
 
 
@@ -295,7 +320,7 @@ class FDT_CCA(nn.Module):
             dims=extractor_dims,
             num_layers=num_layers,
             heads=num_heads,
-            block_cls=FeatureBlock,
+            block_cls=JointBlock,
         )
         self.common_extractor = Extractor(
             self.up_dim,
@@ -303,7 +328,7 @@ class FDT_CCA(nn.Module):
             dims=extractor_dims,
             num_layers=num_layers,
             heads=num_heads,
-            block_cls=CommonBlock,
+            block_cls=ParallelBlock,
         )
         self.com_fuse = nn.Conv2d(self.up_dim * 2, self.common_dim, kernel_size=1)
 

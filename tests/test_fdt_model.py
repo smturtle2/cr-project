@@ -8,13 +8,63 @@ from modules.model.fdt import FDT, FDT_CRNet_Direct, FDT_CRNet_Side, ResizeConvU
 from modules.model.fdt_cca import (
     CCA_AttnAdapter,
     CCA_CRNet,
-    CommonBlock,
     Extractor,
     FDT_CCA,
     FDT_CRNet_CCA,
-    FeatureBlock,
+    JointBlock,
+    ParallelBlock,
 )
 from modules.model.module.attention import MultiHeadAttention
+
+
+class RecordingBlock(nn.Module):
+    init_dims: list[int] = []
+    call_shapes: list[tuple[int, tuple[int, int]]] = []
+
+    def __init__(self, dim: int, num_layers: int, heads: int):
+        super().__init__()
+        self.init_dims.append(dim)
+
+    def forward(
+        self,
+        sar: torch.Tensor,
+        cld: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        self.call_shapes.append((sar.shape[1], tuple(sar.shape[-2:])))
+        return sar, cld
+
+    @classmethod
+    def reset(cls) -> None:
+        cls.init_dims = []
+        cls.call_shapes = []
+
+
+class ZeroRecon(nn.Module):
+    recon_shapes: list[tuple[int, tuple[int, int], tuple[int, int]]] = []
+
+    def __init__(
+        self,
+        out_channels: int,
+        scale_factor: int = 2,
+        record: bool = False,
+    ):
+        super().__init__()
+        self.out_channels = out_channels
+        self.scale_factor = scale_factor
+        self.record = record
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        height = x.shape[-2] * self.scale_factor
+        width = x.shape[-1] * self.scale_factor
+        if self.record:
+            self.recon_shapes.append(
+                (x.shape[1], tuple(x.shape[-2:]), (height, width))
+            )
+        return x.new_zeros((x.shape[0], self.out_channels, height, width))
+
+    @classmethod
+    def reset(cls) -> None:
+        cls.recon_shapes = []
 
 
 def test_fdt_imports_and_runs_forward() -> None:
@@ -87,7 +137,7 @@ def test_extractor_returns_full_resolution_features() -> None:
         dims=(128, 256, 512),
         num_layers=1,
         heads=4,
-        block_cls=FeatureBlock,
+        block_cls=ParallelBlock,
     ).eval()
     sar = torch.randn(1, 2, 16, 16)
     cloudy = torch.randn(1, 13, 16, 16)
@@ -110,7 +160,7 @@ def test_extractor_accepts_feature_inputs_for_common() -> None:
         dims=(128, 256, 512),
         num_layers=1,
         heads=4,
-        block_cls=CommonBlock,
+        block_cls=JointBlock,
     ).eval()
     sar_feat = torch.randn(1, 128, 16, 16)
     cld_feat = torch.randn(1, 128, 16, 16)
@@ -122,6 +172,49 @@ def test_extractor_accepts_feature_inputs_for_common() -> None:
     assert cld_com.shape == cld_feat.shape
     assert bool(torch.isfinite(sar_com).all().item())
     assert bool(torch.isfinite(cld_com).all().item())
+
+
+def test_extractor_applies_blocks_only_on_top_down_levels() -> None:
+    RecordingBlock.reset()
+    extractor = Extractor(
+        2,
+        13,
+        dims=(8, 16, 32),
+        num_layers=1,
+        heads=4,
+        block_cls=RecordingBlock,
+    ).eval()
+
+    with torch.no_grad():
+        extractor(torch.randn(1, 2, 16, 16), torch.randn(1, 13, 16, 16))
+
+    assert RecordingBlock.init_dims == [32, 16]
+    assert RecordingBlock.call_shapes == [(32, (4, 4)), (16, (8, 8))]
+
+
+def test_extractor_uses_reconstruction_residual_skips() -> None:
+    RecordingBlock.reset()
+    ZeroRecon.reset()
+    extractor = Extractor(
+        2,
+        13,
+        dims=(8, 16, 32),
+        num_layers=1,
+        heads=4,
+        block_cls=RecordingBlock,
+    ).eval()
+    extractor.up.sar_recons = nn.ModuleList(
+        [ZeroRecon(8, record=True), ZeroRecon(16, record=True)]
+    )
+    extractor.up.cld_recons = nn.ModuleList([ZeroRecon(8), ZeroRecon(16)])
+
+    with torch.no_grad():
+        extractor(torch.randn(1, 2, 16, 16), torch.randn(1, 13, 16, 16))
+
+    assert ZeroRecon.recon_shapes == [
+        (16, (8, 8), (16, 16)),
+        (32, (4, 4), (8, 8)),
+    ]
 
 
 def test_fdt_cca_accepts_two_level_extractor() -> None:
