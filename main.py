@@ -6,16 +6,20 @@ import os
 import random
 import time
 from collections.abc import Callable, Mapping, Sequence
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
 
+import cr_train.data.dataset as cr_train_dataset
 import numpy as np
 import torch
 import torch.distributed as dist
 from huggingface_hub import get_token
 from torch import nn
+from torch.nn.parallel import DistributedDataParallel
 from torch.optim.lr_scheduler import LRScheduler
+from tqdm.auto import tqdm
 
 from cr_train import Trainer, cleanup_distributed, is_primary, setup_distributed_from_env
 from cr_train.data import DATASET_ID, build_dataloader
@@ -617,24 +621,26 @@ def build_loader(
     max_samples: int | None,
     training: bool,
     epoch_index: int,
+    distributed_data: bool = True,
 ):
     # 예시 이미지를 만들거나 임시 러너에서 배치 shape를 확인할 때만 별도 loader가 필요하다.
     # 최신 cr-train은 streaming=True면 HF block streaming, False면 dataset_dir 로컬 블록을 쓴다.
     streaming = bool(getattr(trainer, "streaming", True))
 
-    prepared = prepare_split(
-        split=split,
-        dataset_name=DATASET_ID,
-        revision=None,
-        max_samples=max_samples,
-        seed=trainer.seed,
-        epoch=epoch_index,
-        training=training,
-        dataset_root=None if streaming else getattr(trainer, "dataset_root", None),
-        streaming=streaming,
-    )
+    with _example_data_context(distributed_data=distributed_data):
+        prepared = prepare_split(
+            split=split,
+            dataset_name=DATASET_ID,
+            revision=None,
+            max_samples=max_samples,
+            seed=trainer.seed,
+            epoch=epoch_index,
+            training=training,
+            dataset_root=None if streaming else getattr(trainer, "dataset_root", None),
+            streaming=streaming,
+        )
 
-    return build_dataloader(
+    dataloader = build_dataloader(
         prepared,
         batch_size=trainer.batch_size,
         num_workers=trainer.num_workers,
@@ -652,6 +658,36 @@ def build_loader(
         random_flip=trainer.train_random_flip if training else False,
         random_rot90=trainer.train_random_rot90 if training else False,
     )
+    setattr(dataloader, "_cr_prepared_num_examples", prepared.num_examples)
+    return dataloader
+
+
+@contextmanager
+def _example_data_context(*, distributed_data: bool):
+    if distributed_data:
+        yield
+        return
+
+    original_get_world_size = cr_train_dataset.get_world_size
+    original_get_rank = cr_train_dataset.get_rank
+    cr_train_dataset.get_world_size = lambda: 1
+    cr_train_dataset.get_rank = lambda: 0
+    try:
+        yield
+    finally:
+        cr_train_dataset.get_world_size = original_get_world_size
+        cr_train_dataset.get_rank = original_get_rank
+
+
+@contextmanager
+def _single_process_example_model(trainer: Trainer):
+    original_model = trainer.model
+    if isinstance(original_model, DistributedDataParallel):
+        trainer.model = original_model.module
+    try:
+        yield
+    finally:
+        trainer.model = original_model
 
 
 def normalize_example_splits(example_splits: Sequence[str] | str | None) -> list[str]:
@@ -881,6 +917,14 @@ def _render_restoration_examples(
     saved_paths: list[Path] = []
     sample_index = 0
     iterator = iter(dataloader)
+    progress = tqdm(
+        total=target_examples,
+        desc=f"examples {split_label}",
+        unit="img",
+        dynamic_ncols=True,
+        leave=False,
+        disable=not is_primary(),
+    )
     try:
         with torch.no_grad():
             while len(saved_paths) < target_examples:
@@ -934,15 +978,17 @@ def _render_restoration_examples(
                             panels=panels,
                         )
                     )
+                    progress.update(1)
 
                     if len(saved_paths) == target_examples:
                         break
     finally:
         # iterator를 빨리 정리해 두면 worker가 떠 있는 상태로 오래 남지 않는다.
+        progress.close()
         del iterator
         trainer.model.train(was_training)
 
-    print(f"saved examples: {output_dir}")
+    tqdm.write(f"saved examples: {output_dir} ({len(saved_paths)}/{target_examples})")
     return saved_paths
 
 
@@ -961,7 +1007,8 @@ def _resolve_example_request(
     max_samples: int | None,
     epoch: int | None,
     stage: str | None,
-) -> tuple[Any, str]:
+    distributed_data: bool,
+) -> tuple[Any, str, int | None]:
     split_label = stage
     if split is not None:
         split_label = _validate_example_split(split)
@@ -969,21 +1016,23 @@ def _resolve_example_request(
     if dataloader is not None:
         if split_label is None:
             raise TypeError("save_restoration_examples() requires either split or stage when dataloader is provided")
-        return dataloader, str(split_label)
+        return dataloader, str(split_label), None
 
     if split is None or epoch is None:
         raise TypeError("save_restoration_examples() requires split and epoch when dataloader is not provided")
 
-    return (
-        build_loader(
-            trainer,
-            split=split,
-            max_samples=max_samples,
-            training=False,
-            epoch_index=max(epoch - 1, 0),
-        ),
-        split,
+    dataloader = build_loader(
+        trainer,
+        split=split,
+        max_samples=max_samples,
+        training=False,
+        epoch_index=max(epoch - 1, 0),
+        distributed_data=distributed_data,
     )
+    population_size = None
+    if max_samples is not None:
+        population_size = int(getattr(dataloader, "_cr_prepared_num_examples", max_samples))
+    return dataloader, split, population_size
 
 
 def save_restoration_examples(
@@ -997,23 +1046,25 @@ def save_restoration_examples(
     epoch: int | None = None,
     stage: str | None = None,
     sample_indices: Sequence[int] | None = None,
+    distributed_data: bool = True,
 ) -> list[Path]:
     # 공용 러너에서는 split/epoch만 넘기면 loader 생성부터 저장까지 한 번에 처리한다.
     # dataloader 직접 주입은 외부 preview 호환을 위한 fallback이다.
     if num_examples <= 0:
         return []
 
-    dataloader, split_label = _resolve_example_request(
+    dataloader, split_label, population_size = _resolve_example_request(
         trainer,
         dataloader,
         split=split,
         max_samples=max_samples,
         epoch=epoch,
         stage=stage,
+        distributed_data=distributed_data,
     )
     if sample_indices is None and split is not None and epoch is not None:
         sample_indices = select_example_sample_indices(
-            max_samples,
+            population_size,
             num_examples=num_examples,
             seed=trainer.seed,
             split=split,
@@ -1038,6 +1089,7 @@ def save_examples_for_splits(
     epoch: int,
     output_dir: Path,
     num_examples: int,
+    distributed_data: bool = True,
 ) -> dict[str, list[Path]]:
     if num_examples <= 0 or not splits:
         return {}
@@ -1051,6 +1103,7 @@ def save_examples_for_splits(
             epoch=epoch,
             output_dir=output_dir / split,
             num_examples=num_examples,
+            distributed_data=distributed_data,
         )
     return saved_paths_by_split
 
@@ -1100,7 +1153,16 @@ def select_example_sample_indices(
 
     split_offset = EXAMPLE_SPLIT_SEED_OFFSETS.get(split, 0)
     rng = np.random.default_rng(seed + epoch * 1_000_003 + split_offset * 10_007)
-    indices = rng.choice(max_samples, size=sample_count, replace=False)
+    boundaries = np.linspace(0, max_samples, num=sample_count + 1, dtype=np.int64)
+    indices = [
+        int(rng.integers(start, stop))
+        for start, stop in zip(boundaries[:-1], boundaries[1:], strict=True)
+        if stop > start
+    ]
+    if len(indices) < sample_count:
+        remaining = sorted(set(range(max_samples)) - set(indices))
+        extra = rng.choice(remaining, size=sample_count - len(indices), replace=False)
+        indices.extend(int(index) for index in extra)
     return tuple(sorted(int(index) for index in indices))
 
 
@@ -1177,14 +1239,16 @@ def _save_distributed_epoch_examples(
     failed_marker.unlink(missing_ok=True)
 
     try:
-        saved_paths_by_split = save_examples_for_splits(
-            trainer,
-            splits=example_config.splits,
-            max_samples_by_split=example_config.max_samples_by_split,
-            epoch=epoch,
-            output_dir=examples_epoch_dir(output_dir, epoch=epoch),
-            num_examples=example_config.num_examples,
-        )
+        with _single_process_example_model(trainer):
+            saved_paths_by_split = save_examples_for_splits(
+                trainer,
+                splits=example_config.splits,
+                max_samples_by_split=example_config.max_samples_by_split,
+                epoch=epoch,
+                output_dir=examples_epoch_dir(output_dir, epoch=epoch),
+                num_examples=example_config.num_examples,
+                distributed_data=False,
+            )
     except Exception as exc:
         failed_marker.write_text(f"{type(exc).__name__}: {exc}\n", encoding="utf-8")
         raise
