@@ -53,8 +53,9 @@ def _joint_pc1_maps(
 
     merged = np.concatenate([first_tokens, second_tokens], axis=0)
     centered = merged - merged.mean(axis=0, keepdims=True)
-    _, _, components = np.linalg.svd(centered, full_matrices=False)
-    component = components[0]
+    covariance = centered.T @ centered
+    eigenvalues, eigenvectors = np.linalg.eigh(covariance)
+    component = eigenvectors[:, int(np.argmax(eigenvalues))]
     if component.sum() < 0:
         component = -component
     projected = centered @ component
