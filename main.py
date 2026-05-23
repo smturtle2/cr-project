@@ -10,6 +10,7 @@ from typing import Any, Literal
 
 import numpy as np
 import torch
+import torch.distributed as dist
 from huggingface_hub import get_token
 from torch import nn
 from torch.optim.lr_scheduler import LRScheduler
@@ -858,6 +859,7 @@ def _render_restoration_examples(
     output_dir: Path,
     num_examples: int,
     split_label: str,
+    sample_indices: Sequence[int] | None = None,
 ) -> list[Path]:
     # 학습이 끝난 뒤 실제 복원 품질을 빠르게 확인할 수 있도록
     # cloudy / prediction / target / SAR / error를 한 장에 묶어서 저장한다.
@@ -868,11 +870,18 @@ def _render_restoration_examples(
     was_training = trainer.model.training
     trainer.model.eval()
 
+    target_examples = num_examples
+    sample_index_set: set[int] | None = None
+    if sample_indices is not None:
+        sample_index_set = set(sample_indices)
+        target_examples = min(num_examples, len(sample_index_set))
+
     saved_paths: list[Path] = []
+    sample_index = 0
     iterator = iter(dataloader)
     try:
         with torch.no_grad():
-            while len(saved_paths) < num_examples:
+            while len(saved_paths) < target_examples:
                 try:
                     batch = next(iterator)
                 except StopIteration:
@@ -882,6 +891,16 @@ def _render_restoration_examples(
                 cloudy = batch["cloudy"]
                 target = batch["target"]
                 metadata = batch.get("meta", {})
+                batch_size = int(target.shape[0])
+                selected_indices: list[int] = []
+                for index in range(batch_size):
+                    if sample_index_set is None or sample_index in sample_index_set:
+                        selected_indices.append(index)
+                    sample_index += 1
+
+                if not selected_indices:
+                    continue
+
                 model_output = build_example_output(trainer, batch)
                 prediction = build_example_prediction(model_output)
                 if not isinstance(prediction, torch.Tensor):
@@ -889,7 +908,7 @@ def _render_restoration_examples(
                 prediction = prediction.detach().cpu()
                 model_output = _detach_example_output(model_output)
 
-                for index in range(prediction.shape[0]):
+                for index in selected_indices:
                     example_index = len(saved_paths) + 1
                     panels = build_example_panels(
                         cloudy=cloudy[index],
@@ -914,7 +933,7 @@ def _render_restoration_examples(
                         )
                     )
 
-                    if len(saved_paths) == num_examples:
+                    if len(saved_paths) == target_examples:
                         break
     finally:
         # iterator를 빨리 정리해 두면 worker가 떠 있는 상태로 오래 남지 않는다.
@@ -975,6 +994,7 @@ def save_restoration_examples(
     max_samples: int | None = None,
     epoch: int | None = None,
     stage: str | None = None,
+    sample_indices: Sequence[int] | None = None,
 ) -> list[Path]:
     # 공용 러너에서는 split/epoch만 넘기면 loader 생성부터 저장까지 한 번에 처리한다.
     # dataloader 직접 주입은 외부 preview 호환을 위한 fallback이다.
@@ -989,6 +1009,14 @@ def save_restoration_examples(
         epoch=epoch,
         stage=stage,
     )
+    if sample_indices is None and split is not None and epoch is not None:
+        sample_indices = select_example_sample_indices(
+            max_samples,
+            num_examples=num_examples,
+            seed=trainer.seed,
+            split=split,
+            epoch=epoch,
+        )
 
     return _render_restoration_examples(
         trainer=trainer,
@@ -996,6 +1024,7 @@ def save_restoration_examples(
         output_dir=output_dir,
         num_examples=num_examples,
         split_label=str(split_label),
+        sample_indices=sample_indices,
     )
 
 
@@ -1043,6 +1072,36 @@ def build_example_save_config(
     )
 
 
+EXAMPLE_SPLIT_SEED_OFFSETS = {
+    "train": 11,
+    "validation": 23,
+    "test": 37,
+}
+
+
+def select_example_sample_indices(
+    max_samples: int | None,
+    *,
+    num_examples: int,
+    seed: int,
+    split: str,
+    epoch: int,
+) -> tuple[int, ...] | None:
+    if max_samples is None:
+        return None
+    if max_samples <= 0 or num_examples <= 0:
+        return ()
+
+    sample_count = min(max_samples, num_examples)
+    if sample_count == max_samples:
+        return tuple(range(max_samples))
+
+    split_offset = EXAMPLE_SPLIT_SEED_OFFSETS.get(split, 0)
+    rng = np.random.default_rng(seed + epoch * 1_000_003 + split_offset * 10_007)
+    indices = rng.choice(max_samples, size=sample_count, replace=False)
+    return tuple(sorted(int(index) for index in indices))
+
+
 def examples_epoch_dir(output_dir: Path, *, epoch: int) -> Path:
     return output_dir / "examples" / f"epoch_{epoch:03d}"
 
@@ -1055,6 +1114,10 @@ def should_save_periodic_examples(epoch: int, *, save_every_n_epochs: int) -> bo
     return epoch % save_every_n_epochs == 0
 
 
+def is_distributed_run() -> bool:
+    return dist.is_available() and dist.is_initialized()
+
+
 def maybe_save_epoch_examples(
     trainer: Trainer,
     *,
@@ -1063,6 +1126,8 @@ def maybe_save_epoch_examples(
     example_config: ExampleSaveConfig,
     saved_epochs: set[int],
 ) -> dict[str, list[Path]]:
+    if is_distributed_run():
+        return {}
     if not is_primary():
         return {}
     if epoch in saved_epochs or example_config.num_examples <= 0 or not example_config.splits:
@@ -1078,6 +1143,40 @@ def maybe_save_epoch_examples(
     )
     saved_epochs.add(epoch)
     return saved_paths_by_split
+
+
+def save_deferred_examples_after_distributed_cleanup(
+    trainer: Trainer,
+    *,
+    output_dir: Path,
+    best_selector: BestEpochSelector,
+    example_mode: Literal["best", "after_test"],
+    example_config: ExampleSaveConfig,
+) -> dict[str, list[Path]]:
+    if example_config.num_examples <= 0 or not example_config.splits:
+        return {}
+
+    if example_mode == "best":
+        best_state = load_best_state(output_dir, selector=best_selector)
+        if best_state is None:
+            return {}
+        checkpoint_path = best_checkpoint_path(output_dir)
+        if not checkpoint_path.exists():
+            return {}
+        trainer.load_checkpoint(checkpoint_path)
+        epoch = best_state.epoch
+    else:
+        epoch = max(trainer.current_epoch, 1)
+
+    print(f"saving examples after distributed cleanup: epoch={epoch}")
+    return save_examples_for_splits(
+        trainer,
+        splits=example_config.splits,
+        max_samples_by_split=example_config.max_samples_by_split,
+        epoch=epoch,
+        output_dir=examples_epoch_dir(output_dir, epoch=epoch),
+        num_examples=example_config.num_examples,
+    )
 
 
 def should_save_examples_for_epoch(
@@ -1313,6 +1412,10 @@ def main(
     # main은 "모델/옵티마이저 조립 -> Trainer 실행 -> 결과물 저장"만 담당한다.
     # Trainer가 이미 해 주는 일은 최대한 그대로 맡기고, 여기서는 프로젝트 전용 후처리만 남긴다.
     # Trainer 생성은 build_trainer()로 모으고, main은 실행 순서와 산출물 정책만 관리한다.
+    trainer: Trainer | None = None
+    best_selector: BestEpochSelector | None = None
+    example_config: ExampleSaveConfig | None = None
+    run_deferred_examples = False
     try:
         output_dir, resume = validate_main_args(
             output_dir=output_dir,
@@ -1374,8 +1477,23 @@ def main(
             example_config=example_config,
             saved_example_epochs=saved_example_epochs,
         )
+        run_deferred_examples = is_distributed_run() and is_primary()
     finally:
         cleanup_distributed()
+
+    if (
+        run_deferred_examples
+        and trainer is not None
+        and best_selector is not None
+        and example_config is not None
+    ):
+        save_deferred_examples_after_distributed_cleanup(
+            trainer,
+            output_dir=output_dir,
+            best_selector=best_selector,
+            example_mode=example_mode,
+            example_config=example_config,
+        )
 
 
 if __name__ == "__main__":

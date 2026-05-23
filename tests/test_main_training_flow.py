@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import copy
 import json
+import os
+import subprocess
 import tempfile
 import unittest
 from collections.abc import Sequence
@@ -546,6 +548,175 @@ class MainTrainingFlowTest(unittest.TestCase):
             self.assertFalse((output_dir / "epoch-0001.pt").exists())
             self.assertFalse((output_dir / "epoch-0003.pt").exists())
 
+    def test_distributed_epoch_examples_are_skipped_during_training(self) -> None:
+        example_config = main.ExampleSaveConfig(
+            splits=("test",),
+            max_samples_by_split={"test": 16},
+            num_examples=2,
+        )
+        saved_epochs: set[int] = set()
+
+        with (
+            tempfile.TemporaryDirectory() as tmp_dir,
+            mock.patch.object(main, "is_primary", return_value=False),
+            mock.patch.object(main.dist, "is_available", return_value=True),
+            mock.patch.object(main.dist, "is_initialized", return_value=True),
+            mock.patch.object(main, "save_examples_for_splits") as save_examples,
+        ):
+            result = main.maybe_save_epoch_examples(
+                mock.Mock(),
+                output_dir=Path(tmp_dir),
+                epoch=1,
+                example_config=example_config,
+                saved_epochs=saved_epochs,
+            )
+
+        self.assertEqual(result, {})
+        self.assertEqual(saved_epochs, set())
+        save_examples.assert_not_called()
+
+    def test_deferred_distributed_examples_load_best_checkpoint(self) -> None:
+        selector = main.build_best_epoch_selector()
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            output_dir = Path(tmp_dir)
+            trainer = mock.Mock()
+            best_path = output_dir / "best.pt"
+            best_path.write_text("checkpoint:2\n", encoding="utf-8")
+            main.save_best_state(
+                output_dir,
+                epoch=2,
+                score=0.4,
+                selector=selector,
+                checkpoint_path=best_path,
+            )
+            example_config = main.ExampleSaveConfig(
+                splits=("validation", "test"),
+                max_samples_by_split={"validation": 32, "test": 64},
+                num_examples=3,
+            )
+
+            with mock.patch.object(main, "save_examples_for_splits", return_value={"test": []}) as save_examples:
+                result = main.save_deferred_examples_after_distributed_cleanup(
+                    trainer,
+                    output_dir=output_dir,
+                    best_selector=selector,
+                    example_mode="best",
+                    example_config=example_config,
+                )
+
+        self.assertEqual(result, {"test": []})
+        trainer.load_checkpoint.assert_called_once_with(best_path)
+        self.assertEqual(save_examples.call_args.kwargs["splits"], ("validation", "test"))
+        self.assertEqual(save_examples.call_args.kwargs["epoch"], 2)
+        self.assertEqual(
+            save_examples.call_args.kwargs["output_dir"],
+            output_dir / "examples" / "epoch_002",
+        )
+
+    def test_main_runs_deferred_examples_after_cleanup(self) -> None:
+        records = [
+            make_epoch_record(epoch=1, train_loss=1.0, val_loss=0.4),
+        ]
+        events: list[str] = []
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            output_dir = Path(tmp_dir)
+            model = nn.Linear(1, 1)
+            with (
+                mock.patch.object(main, "Trainer", FakeTrainer),
+                mock.patch.object(main, "build_model", return_value=model),
+                mock.patch.object(main, "build_optimizer", side_effect=lambda current_model: torch.optim.SGD(current_model.parameters(), lr=0.1)),
+                mock.patch.object(main, "build_loss", return_value=lambda prediction, batch: torch.tensor(0.0)),
+                mock.patch.object(main, "build_metrics", return_value={}),
+                mock.patch.object(main, "build_scheduler", return_value=None),
+                mock.patch.object(main, "build_scheduler_monitor", return_value=None),
+                mock.patch.object(main, "is_distributed_run", return_value=True),
+                mock.patch.object(main, "is_primary", return_value=True),
+                mock.patch.object(main, "save_restoration_examples") as save_examples,
+                mock.patch.object(main, "save_history_plot"),
+                mock.patch.object(main, "seed_everything"),
+                mock.patch.object(main, "print_hf_auth_status"),
+                mock.patch.object(main.torch.cuda, "is_available", return_value=False),
+                mock.patch.object(main, "cleanup_distributed", side_effect=lambda: events.append("cleanup")),
+                mock.patch.object(
+                    main,
+                    "save_deferred_examples_after_distributed_cleanup",
+                    side_effect=lambda *args, **kwargs: events.append("deferred") or {},
+                ) as deferred_examples,
+            ):
+                FakeTrainer.step_records = copy.deepcopy(records)
+                main.main(
+                    output_dir=output_dir,
+                    max_epochs=1,
+                    example_mode="best",
+                    run_test=False,
+                    num_examples=2,
+                )
+
+        save_examples.assert_not_called()
+        deferred_examples.assert_called_once()
+        self.assertEqual(events, ["cleanup", "deferred"])
+
+    def test_example_sample_indices_are_deterministic_and_non_prefix(self) -> None:
+        first = main.select_example_sample_indices(
+            100,
+            num_examples=10,
+            seed=42,
+            split="validation",
+            epoch=1,
+        )
+        second = main.select_example_sample_indices(
+            100,
+            num_examples=10,
+            seed=42,
+            split="validation",
+            epoch=1,
+        )
+
+        self.assertEqual(first, second)
+        self.assertEqual(len(first or ()), 10)
+        self.assertEqual(tuple(sorted(first or ())), first)
+        self.assertNotEqual(first, tuple(range(10)))
+
+    def test_render_examples_uses_selected_sample_indices(self) -> None:
+        trainer = mock.Mock()
+        trainer.model = nn.Linear(1, 1)
+        trainer.predict.side_effect = lambda batch: batch["cloudy"]
+        batch = {
+            "sar": torch.zeros(6, 2, 2, 2),
+            "cloudy": torch.zeros(6, 13, 2, 2),
+            "target": torch.ones(6, 13, 2, 2),
+            "meta": {
+                "season": ["s0", "s1", "s2", "s3", "s4", "s5"],
+                "scene": ["0", "1", "2", "3", "4", "5"],
+                "patch": ["p0", "p1", "p2", "p3", "p4", "p5"],
+            },
+        }
+
+        def save_figure(*, output_dir, split_label, example_index, title, panels):
+            del split_label, title, panels
+            return output_dir / f"example_{example_index}.png"
+
+        with (
+            tempfile.TemporaryDirectory() as tmp_dir,
+            mock.patch.object(main, "build_example_panels", return_value=(("panel", torch.zeros(2, 2), None),)),
+            mock.patch.object(main, "_save_example_figure", side_effect=save_figure) as save_mock,
+        ):
+            paths = main._render_restoration_examples(
+                trainer,
+                [batch],
+                output_dir=Path(tmp_dir),
+                num_examples=2,
+                split_label="validation",
+                sample_indices=(1, 4),
+            )
+
+        self.assertEqual(len(paths), 2)
+        titles = [call.kwargs["title"] for call in save_mock.call_args_list]
+        self.assertIn("scene_1/patch_p1", titles[0])
+        self.assertIn("scene_4/patch_p4", titles[1])
+
     def test_resume_uses_trainer_load_checkpoint(self) -> None:
         records = [
             make_epoch_record(epoch=1, train_loss=1.0, val_loss=0.6),
@@ -742,6 +913,82 @@ class BuildLoaderTest(unittest.TestCase):
         self.assertEqual(result, "loader")
         self.assertFalse(prepare_split.call_args.kwargs["streaming"])
         self.assertEqual(prepare_split.call_args.kwargs["dataset_root"], Path("/tmp/dataset-root"))
+
+
+class TrainScriptTest(unittest.TestCase):
+    def test_multi_gpu_defaults_nccl_p2p_disable(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            tmp_path = Path(tmp_dir)
+            target = tmp_path / "target.py"
+            target.write_text("print('target')\n", encoding="utf-8")
+            capture = tmp_path / "capture.txt"
+            fake_uv = tmp_path / "uv"
+            fake_uv.write_text(
+                "\n".join(
+                    [
+                        "#!/usr/bin/env bash",
+                        "echo \"NCCL_P2P_DISABLE=${NCCL_P2P_DISABLE-}\" > \"${TRAIN_SH_CAPTURE}\"",
+                        "printf 'args=%s\\n' \"$*\" >> \"${TRAIN_SH_CAPTURE}\"",
+                    ]
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            fake_uv.chmod(0o755)
+            env = {
+                **os.environ,
+                "UV": str(fake_uv),
+                "TRAIN_TARGET": str(target),
+                "TRAIN_SH_CAPTURE": str(capture),
+            }
+            env.pop("NCCL_P2P_DISABLE", None)
+
+            subprocess.run(
+                ["bash", "train.sh", "--gpus", "5,6"],
+                cwd=Path(__file__).resolve().parents[1],
+                env=env,
+                check=True,
+            )
+
+            output = capture.read_text(encoding="utf-8")
+        self.assertIn("NCCL_P2P_DISABLE=1", output)
+        self.assertIn("--nproc-per-node=2", output)
+
+    def test_multi_gpu_respects_existing_nccl_p2p_disable(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            tmp_path = Path(tmp_dir)
+            target = tmp_path / "target.py"
+            target.write_text("print('target')\n", encoding="utf-8")
+            capture = tmp_path / "capture.txt"
+            fake_uv = tmp_path / "uv"
+            fake_uv.write_text(
+                "\n".join(
+                    [
+                        "#!/usr/bin/env bash",
+                        "echo \"NCCL_P2P_DISABLE=${NCCL_P2P_DISABLE-}\" > \"${TRAIN_SH_CAPTURE}\"",
+                    ]
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            fake_uv.chmod(0o755)
+            env = {
+                **os.environ,
+                "UV": str(fake_uv),
+                "TRAIN_TARGET": str(target),
+                "TRAIN_SH_CAPTURE": str(capture),
+                "NCCL_P2P_DISABLE": "0",
+            }
+
+            subprocess.run(
+                ["bash", "train.sh", "--gpus", "5,6"],
+                cwd=Path(__file__).resolve().parents[1],
+                env=env,
+                check=True,
+            )
+
+            output = capture.read_text(encoding="utf-8")
+        self.assertIn("NCCL_P2P_DISABLE=0", output)
 
 
 if __name__ == "__main__":

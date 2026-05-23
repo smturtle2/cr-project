@@ -126,7 +126,7 @@ start_tmux_training() {
   session_name="$(next_tmux_session_name)"
   printf -v child_command 'TRAIN_TMUX_CHILD=1 TRAIN_TARGET=%q' "${target}"
 
-  for env_name in UV CUDA_VISIBLE_DEVICES HF_TOKEN; do
+  for env_name in UV CUDA_VISIBLE_DEVICES HF_TOKEN NCCL_P2P_DISABLE; do
     if [[ -v "${env_name}" ]]; then
       printf -v quoted ' %s=%q' "${env_name}" "${!env_name}"
       child_command+="${quoted}"
@@ -302,6 +302,7 @@ if (( gpu_list_provided )); then
     echo "set TRAIN_TARGET or create tmp_main.py from tmp_main_base.py" >&2
     exit 1
   fi
+  export NCCL_P2P_DISABLE="${NCCL_P2P_DISABLE:-1}"
   exec "${uv_bin}" run torchrun --standalone --nproc-per-node="${nproc_per_node}" "${target}" "${target_args[@]}"
 fi
 
