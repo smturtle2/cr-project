@@ -1142,6 +1142,7 @@ def select_example_sample_indices(
     split: str,
     epoch: int,
 ) -> tuple[int, ...] | None:
+    del epoch
     if max_samples is None:
         return None
     if max_samples <= 0 or num_examples <= 0:
@@ -1152,7 +1153,7 @@ def select_example_sample_indices(
         return tuple(range(max_samples))
 
     split_offset = EXAMPLE_SPLIT_SEED_OFFSETS.get(split, 0)
-    rng = np.random.default_rng(seed + epoch * 1_000_003 + split_offset * 10_007)
+    rng = np.random.default_rng(seed + split_offset * 10_007)
     boundaries = np.linspace(0, max_samples, num=sample_count + 1, dtype=np.int64)
     indices = [
         int(rng.integers(start, stop))
