@@ -1154,16 +1154,7 @@ def select_example_sample_indices(
 
     split_offset = EXAMPLE_SPLIT_SEED_OFFSETS.get(split, 0)
     rng = np.random.default_rng(seed + split_offset * 10_007)
-    boundaries = np.linspace(0, max_samples, num=sample_count + 1, dtype=np.int64)
-    indices = [
-        int(rng.integers(start, stop))
-        for start, stop in zip(boundaries[:-1], boundaries[1:], strict=True)
-        if stop > start
-    ]
-    if len(indices) < sample_count:
-        remaining = sorted(set(range(max_samples)) - set(indices))
-        extra = rng.choice(remaining, size=sample_count - len(indices), replace=False)
-        indices.extend(int(index) for index in extra)
+    indices = rng.choice(max_samples, size=sample_count, replace=False)
     return tuple(sorted(int(index) for index in indices))
 
 
