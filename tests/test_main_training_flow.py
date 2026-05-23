@@ -548,7 +548,36 @@ class MainTrainingFlowTest(unittest.TestCase):
             self.assertFalse((output_dir / "epoch-0001.pt").exists())
             self.assertFalse((output_dir / "epoch-0003.pt").exists())
 
-    def test_distributed_epoch_examples_are_skipped_during_training(self) -> None:
+    def test_distributed_epoch_examples_are_saved_on_primary_with_sync_marker(self) -> None:
+        example_config = main.ExampleSaveConfig(
+            splits=("test",),
+            max_samples_by_split={"test": 16},
+            num_examples=2,
+        )
+        saved_epochs: set[int] = set()
+
+        with (
+            tempfile.TemporaryDirectory() as tmp_dir,
+            mock.patch.object(main, "is_primary", return_value=True),
+            mock.patch.object(main.dist, "is_available", return_value=True),
+            mock.patch.object(main.dist, "is_initialized", return_value=True),
+            mock.patch.object(main, "save_examples_for_splits", return_value={"test": []}) as save_examples,
+        ):
+            output_dir = Path(tmp_dir)
+            result = main.maybe_save_epoch_examples(
+                mock.Mock(),
+                output_dir=output_dir,
+                epoch=1,
+                example_config=example_config,
+                saved_epochs=saved_epochs,
+            )
+            self.assertTrue((main.distributed_example_sync_dir(output_dir, epoch=1) / "complete").exists())
+
+        self.assertEqual(result, {"test": []})
+        self.assertEqual(saved_epochs, {1})
+        save_examples.assert_called_once()
+
+    def test_distributed_epoch_examples_wait_on_non_primary(self) -> None:
         example_config = main.ExampleSaveConfig(
             splits=("test",),
             max_samples_by_split={"test": 16},
@@ -561,19 +590,26 @@ class MainTrainingFlowTest(unittest.TestCase):
             mock.patch.object(main, "is_primary", return_value=False),
             mock.patch.object(main.dist, "is_available", return_value=True),
             mock.patch.object(main.dist, "is_initialized", return_value=True),
+            mock.patch.object(main, "_wait_for_distributed_example_completion") as wait_for_examples,
             mock.patch.object(main, "save_examples_for_splits") as save_examples,
         ):
+            output_dir = Path(tmp_dir)
             result = main.maybe_save_epoch_examples(
                 mock.Mock(),
-                output_dir=Path(tmp_dir),
+                output_dir=output_dir,
                 epoch=1,
                 example_config=example_config,
                 saved_epochs=saved_epochs,
             )
 
         self.assertEqual(result, {})
-        self.assertEqual(saved_epochs, set())
+        self.assertEqual(saved_epochs, {1})
         save_examples.assert_not_called()
+        wait_for_examples.assert_called_once()
+        self.assertEqual(
+            wait_for_examples.call_args.args[0],
+            main.distributed_example_sync_dir(output_dir, epoch=1),
+        )
 
     def test_deferred_distributed_examples_load_best_checkpoint(self) -> None:
         selector = main.build_best_epoch_selector()
@@ -614,7 +650,7 @@ class MainTrainingFlowTest(unittest.TestCase):
             output_dir / "examples" / "epoch_002",
         )
 
-    def test_main_runs_deferred_examples_after_cleanup(self) -> None:
+    def test_main_saves_distributed_best_examples_before_cleanup(self) -> None:
         records = [
             make_epoch_record(epoch=1, train_loss=1.0, val_loss=0.4),
         ]
@@ -633,7 +669,11 @@ class MainTrainingFlowTest(unittest.TestCase):
                 mock.patch.object(main, "build_scheduler_monitor", return_value=None),
                 mock.patch.object(main, "is_distributed_run", return_value=True),
                 mock.patch.object(main, "is_primary", return_value=True),
-                mock.patch.object(main, "save_restoration_examples") as save_examples,
+                mock.patch.object(
+                    main,
+                    "save_examples_for_splits",
+                    side_effect=lambda *args, **kwargs: events.append("examples") or {},
+                ) as save_examples,
                 mock.patch.object(main, "save_history_plot"),
                 mock.patch.object(main, "seed_everything"),
                 mock.patch.object(main, "print_hf_auth_status"),
@@ -654,9 +694,9 @@ class MainTrainingFlowTest(unittest.TestCase):
                     num_examples=2,
                 )
 
-        save_examples.assert_not_called()
-        deferred_examples.assert_called_once()
-        self.assertEqual(events, ["cleanup", "deferred"])
+        save_examples.assert_called_once()
+        deferred_examples.assert_not_called()
+        self.assertEqual(events, ["examples", "cleanup"])
 
     def test_example_sample_indices_are_deterministic_and_non_prefix(self) -> None:
         first = main.select_example_sample_indices(

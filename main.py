@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import json
 import math
+import os
 import random
+import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -1118,6 +1120,80 @@ def is_distributed_run() -> bool:
     return dist.is_available() and dist.is_initialized()
 
 
+_DISTRIBUTED_EXAMPLE_POLL_SECONDS = 1.0
+_DISTRIBUTED_EXAMPLE_WAIT_TIMEOUT_SECONDS = 24 * 60 * 60
+
+
+def _distributed_example_run_key() -> str:
+    master_addr = os.environ.get("MASTER_ADDR", "")
+    master_port = os.environ.get("MASTER_PORT", "")
+    local_world_size = os.environ.get("LOCAL_WORLD_SIZE")
+    world_size = os.environ.get("WORLD_SIZE")
+    parts = [part for part in (master_addr, master_port) if part]
+    if local_world_size == world_size or not parts:
+        parts.append(f"parent-{os.getppid()}")
+    run_key = "-".join(parts)
+    return "".join(char if char.isalnum() or char in "._-" else "_" for char in run_key)
+
+
+def distributed_example_sync_dir(output_dir: Path, *, epoch: int) -> Path:
+    return output_dir / ".example_sync" / _distributed_example_run_key() / f"epoch-{epoch:04d}"
+
+
+def _wait_for_distributed_example_completion(sync_dir: Path) -> None:
+    complete_marker = sync_dir / "complete"
+    failed_marker = sync_dir / "failed"
+    deadline = time.time() + _DISTRIBUTED_EXAMPLE_WAIT_TIMEOUT_SECONDS
+
+    while True:
+        if complete_marker.exists():
+            return
+        if failed_marker.exists():
+            message = failed_marker.read_text(encoding="utf-8").strip()
+            raise RuntimeError(f"distributed example generation failed on primary rank: {message}")
+        if time.time() >= deadline:
+            raise TimeoutError(f"timed out waiting for distributed examples: {sync_dir}")
+        time.sleep(_DISTRIBUTED_EXAMPLE_POLL_SECONDS)
+
+
+def _save_distributed_epoch_examples(
+    trainer: Trainer,
+    *,
+    output_dir: Path,
+    epoch: int,
+    example_config: ExampleSaveConfig,
+    saved_epochs: set[int],
+) -> dict[str, list[Path]]:
+    sync_dir = distributed_example_sync_dir(output_dir, epoch=epoch)
+    if not is_primary():
+        _wait_for_distributed_example_completion(sync_dir)
+        saved_epochs.add(epoch)
+        return {}
+
+    sync_dir.mkdir(parents=True, exist_ok=True)
+    complete_marker = sync_dir / "complete"
+    failed_marker = sync_dir / "failed"
+    complete_marker.unlink(missing_ok=True)
+    failed_marker.unlink(missing_ok=True)
+
+    try:
+        saved_paths_by_split = save_examples_for_splits(
+            trainer,
+            splits=example_config.splits,
+            max_samples_by_split=example_config.max_samples_by_split,
+            epoch=epoch,
+            output_dir=examples_epoch_dir(output_dir, epoch=epoch),
+            num_examples=example_config.num_examples,
+        )
+    except Exception as exc:
+        failed_marker.write_text(f"{type(exc).__name__}: {exc}\n", encoding="utf-8")
+        raise
+
+    complete_marker.write_text("ok\n", encoding="utf-8")
+    saved_epochs.add(epoch)
+    return saved_paths_by_split
+
+
 def maybe_save_epoch_examples(
     trainer: Trainer,
     *,
@@ -1126,11 +1202,17 @@ def maybe_save_epoch_examples(
     example_config: ExampleSaveConfig,
     saved_epochs: set[int],
 ) -> dict[str, list[Path]]:
-    if is_distributed_run():
-        return {}
-    if not is_primary():
-        return {}
     if epoch in saved_epochs or example_config.num_examples <= 0 or not example_config.splits:
+        return {}
+    if is_distributed_run():
+        return _save_distributed_epoch_examples(
+            trainer,
+            output_dir=output_dir,
+            epoch=epoch,
+            example_config=example_config,
+            saved_epochs=saved_epochs,
+        )
+    if not is_primary():
         return {}
 
     saved_paths_by_split = save_examples_for_splits(
@@ -1206,8 +1288,9 @@ def maybe_update_best_state(
         mode=selector.mode,
     ):
         return best_state, False
+    improved_best_state = BestState(epoch=epoch, score=score)
     if not is_primary():
-        return BestState(epoch=epoch, score=score), False
+        return improved_best_state, True
 
     checkpoint_path = trainer.save_checkpoint(best_checkpoint_path(output_dir))
     updated_best_state = save_best_state(
@@ -1412,10 +1495,6 @@ def main(
     # main은 "모델/옵티마이저 조립 -> Trainer 실행 -> 결과물 저장"만 담당한다.
     # Trainer가 이미 해 주는 일은 최대한 그대로 맡기고, 여기서는 프로젝트 전용 후처리만 남긴다.
     # Trainer 생성은 build_trainer()로 모으고, main은 실행 순서와 산출물 정책만 관리한다.
-    trainer: Trainer | None = None
-    best_selector: BestEpochSelector | None = None
-    example_config: ExampleSaveConfig | None = None
-    run_deferred_examples = False
     try:
         output_dir, resume = validate_main_args(
             output_dir=output_dir,
@@ -1477,23 +1556,8 @@ def main(
             example_config=example_config,
             saved_example_epochs=saved_example_epochs,
         )
-        run_deferred_examples = is_distributed_run() and is_primary()
     finally:
         cleanup_distributed()
-
-    if (
-        run_deferred_examples
-        and trainer is not None
-        and best_selector is not None
-        and example_config is not None
-    ):
-        save_deferred_examples_after_distributed_cleanup(
-            trainer,
-            output_dir=output_dir,
-            best_selector=best_selector,
-            example_mode=example_mode,
-            example_config=example_config,
-        )
 
 
 if __name__ == "__main__":
