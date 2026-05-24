@@ -8,12 +8,12 @@ from ..fdt.fdt import Residual3x3Block
 
 
 class CCAMask(nn.Module):
-    def __init__(self, comp_channels: int):
+    def __init__(self, comp_channels: int, mask_channels: int):
         super().__init__()
         self.net = nn.Sequential(
             Residual3x3Block(comp_channels),
             Residual3x3Block(comp_channels),
-            nn.Conv2d(comp_channels, 1, kernel_size=1),
+            nn.Conv2d(comp_channels, mask_channels, kernel_size=1),
             nn.Sigmoid(),
         )
 
@@ -60,7 +60,7 @@ class CCA_CRNet(ACA_CRNet):
             stride=1,
             padding=1,
         )
-        self.cca = CCAMask(comp_channels)
+        self.cca = CCAMask(comp_channels, out_channels)
 
     def forward(
         self,

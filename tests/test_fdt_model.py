@@ -344,14 +344,14 @@ def test_fdt_cca_rejects_invalid_extractor_config() -> None:
         FDT_CCA(dim=256, extractor_dims=(128, 258))
 
 
-def test_cca_mask_returns_single_channel_intervention_mask() -> None:
-    cca = CCAMask(comp_channels=128).eval()
+def test_cca_mask_returns_per_band_intervention_mask() -> None:
+    cca = CCAMask(comp_channels=128, mask_channels=13).eval()
     cld_comp = torch.randn(2, 128, 16, 16)
 
     with torch.no_grad():
         mask = cca(cld_comp)
 
-    assert mask.shape == (2, 1, 16, 16)
+    assert mask.shape == (2, 13, 16, 16)
     assert torch.all(mask >= 0.0)
     assert torch.all(mask <= 1.0)
 
