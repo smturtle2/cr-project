@@ -722,12 +722,17 @@ class MainTrainingFlowTest(unittest.TestCase):
     def test_full_split_examples_use_prepared_population_for_sampling(self) -> None:
         trainer = mock.Mock()
         trainer.seed = 42
-        dataloader = mock.Mock()
-        dataloader._cr_prepared_num_examples = 100
+        sample_indices = (3, 11, 18, 24, 32, 45, 51, 67, 80, 99)
+        example_loader = [mock.Mock()]
 
         with (
             tempfile.TemporaryDirectory() as tmp_dir,
-            mock.patch.object(main, "build_loader", return_value=dataloader) as build_loader,
+            mock.patch.object(main, "build_loader") as build_loader,
+            mock.patch.object(
+                main,
+                "build_example_loader",
+                return_value=(example_loader, 100, sample_indices),
+            ) as build_example_loader,
             mock.patch.object(main, "_render_restoration_examples", return_value=[]) as render,
         ):
             main.save_restoration_examples(
@@ -739,12 +744,59 @@ class MainTrainingFlowTest(unittest.TestCase):
                 num_examples=10,
             )
 
-        build_loader.assert_called_once()
-        self.assertIsNone(build_loader.call_args.kwargs["max_samples"])
-        sample_indices = render.call_args.kwargs["sample_indices"]
-        self.assertEqual(len(sample_indices), 10)
-        self.assertEqual(tuple(sorted(sample_indices)), sample_indices)
-        self.assertNotEqual(sample_indices, tuple(range(10)))
+        build_loader.assert_not_called()
+        build_example_loader.assert_called_once()
+        self.assertIsNone(build_example_loader.call_args.kwargs["max_samples"])
+        self.assertEqual(build_example_loader.call_args.kwargs["num_examples"], 10)
+        self.assertEqual(render.call_args.kwargs["dataloader"], example_loader)
+        self.assertIsNone(render.call_args.kwargs["sample_indices"])
+
+    def test_example_loader_reads_only_selected_blocks(self) -> None:
+        trainer = mock.Mock()
+        trainer.seed = 42
+        trainer.streaming = True
+        trainer.batch_size = 4
+        trainer.include_metadata = True
+        blocks = [
+            {"cache_key": "b0", "path": "b0.crpack", "row_count": 4},
+            {"cache_key": "b1", "path": "b1.crpack", "row_count": 4},
+            {"cache_key": "b2", "path": "b2.crpack", "row_count": 4},
+        ]
+        catalog = {"blocks": blocks}
+        sample_plan = mock.Mock()
+        sample_plan.selected_blocks.tolist.return_value = [0, 1, 2]
+        sample_plan.effective_rows = 12
+        rows_by_key = {
+            "b0": [{"id": index} for index in range(4)],
+            "b1": [{"id": index + 4} for index in range(4)],
+            "b2": [{"id": index + 8} for index in range(4)],
+        }
+        reader = mock.Mock()
+        reader.load_block.side_effect = lambda cache_key: rows_by_key[cache_key]
+        collate = mock.Mock(side_effect=lambda rows: {"ids": [row["id"] for row in rows]})
+
+        with (
+            mock.patch.object(main, "load_hf_v2_manifest"),
+            mock.patch.object(main, "load_hf_v2_split_catalog", return_value=catalog),
+            mock.patch.object(main, "plan_sample", return_value=sample_plan),
+            mock.patch.object(main, "HFV2StagedBlockReader", return_value=reader),
+            mock.patch.object(main, "build_collate_fn", return_value=collate),
+        ):
+            batches, population_size, sample_indices = main.build_example_loader(
+                trainer,
+                split="validation",
+                max_samples=None,
+                epoch=1,
+                num_examples=2,
+                sample_indices=(1, 9),
+            )
+
+        prepared_blocks = reader.prepare_blocks.call_args.args[0]
+        self.assertEqual([block["cache_key"] for block in prepared_blocks], ["b0", "b2"])
+        self.assertEqual([call.args[0] for call in reader.load_block.call_args_list], ["b0", "b2"])
+        self.assertEqual(population_size, 12)
+        self.assertEqual(sample_indices, (1, 9))
+        self.assertEqual(batches, [{"ids": [1, 9]}])
 
     def test_render_examples_uses_selected_sample_indices(self) -> None:
         trainer = mock.Mock()

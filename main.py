@@ -23,7 +23,15 @@ from tqdm.auto import tqdm
 
 from cr_train import Trainer, cleanup_distributed, is_primary, setup_distributed_from_env
 from cr_train.data import DATASET_ID, build_dataloader
-from cr_train.data.dataset import prepare_split
+from cr_train.data.dataset import build_collate_fn, prepare_split
+from cr_train.data.hf_v2 import (
+    HFV2LocalBlockReader,
+    HFV2StagedBlockReader,
+    ensure_hf_v2_local_blocks,
+    load_hf_v2_manifest,
+    load_hf_v2_split_catalog,
+)
+from cr_train.data.planning import plan_sample
 
 
 # Sentinel-2 13채널 중 사람이 보기 쉬운 RGB 조합(B4, B3, B2) 인덱스다.
@@ -679,6 +687,194 @@ def _example_data_context(*, distributed_data: bool):
         cr_train_dataset.get_rank = original_get_rank
 
 
+def _example_dataset_root(trainer: Trainer, *, streaming: bool) -> Path | None:
+    if streaming:
+        return None
+    dataset_root = getattr(trainer, "dataset_root", None)
+    if dataset_root is None:
+        raise ValueError("trainer.dataset_root must be set when streaming=False")
+    return Path(dataset_root)
+
+
+def _select_example_blocks(
+    *,
+    split: str,
+    max_samples: int | None,
+    seed: int,
+    streaming: bool,
+    dataset_root: Path | None,
+) -> tuple[list[dict[str, Any]], int, dict[str, Any]]:
+    load_hf_v2_manifest(dataset_root=dataset_root, streaming=streaming)
+    catalog = load_hf_v2_split_catalog(
+        split=split,
+        dataset_root=dataset_root,
+        streaming=streaming,
+    )
+    sample_plan = plan_sample(catalog, seed, max_samples, split=split)
+    catalog_blocks = list(catalog.get("blocks", []))
+    selected_blocks = [
+        catalog_blocks[int(index)]
+        for index in sample_plan.selected_blocks.tolist()
+    ]
+    return selected_blocks, int(sample_plan.effective_rows), catalog
+
+
+def _normalize_example_sample_indices(
+    sample_indices: Sequence[int],
+    *,
+    num_examples: int,
+    population_size: int,
+) -> tuple[int, ...]:
+    normalized = sorted(
+        {
+            int(index)
+            for index in sample_indices
+            if 0 <= int(index) < population_size
+        }
+    )
+    return tuple(normalized[:num_examples])
+
+
+def _group_example_indices_by_block(
+    blocks: Sequence[dict[str, Any]],
+    sample_indices: Sequence[int],
+) -> list[tuple[dict[str, Any], tuple[int, ...]]]:
+    groups: list[tuple[dict[str, Any], tuple[int, ...]]] = []
+    index_pos = 0
+    row_offset = 0
+    indices = tuple(sample_indices)
+
+    for block in blocks:
+        row_count = int(block["row_count"])
+        block_stop = row_offset + row_count
+        block_indices: list[int] = []
+        while index_pos < len(indices) and indices[index_pos] < block_stop:
+            index = indices[index_pos]
+            if index >= row_offset:
+                block_indices.append(index - row_offset)
+            index_pos += 1
+        if block_indices:
+            groups.append((block, tuple(block_indices)))
+        row_offset = block_stop
+
+        if index_pos >= len(indices):
+            break
+
+    return groups
+
+
+def _load_example_rows_from_blocks(
+    *,
+    split: str,
+    grouped_indices: Sequence[tuple[dict[str, Any], tuple[int, ...]]],
+    streaming: bool,
+    dataset_root: Path | None,
+    catalog: dict[str, Any],
+) -> list[dict[str, Any]]:
+    if not grouped_indices:
+        return []
+
+    selected_blocks = tuple(block for block, _indices in grouped_indices)
+    if streaming:
+        reader = HFV2StagedBlockReader(split=split)
+        reader.prepare_blocks(selected_blocks, worker_count=1)
+    else:
+        if dataset_root is None:
+            raise ValueError("dataset_root must be provided when streaming=False")
+        ensure_hf_v2_local_blocks(
+            dataset_root=dataset_root,
+            split=split,
+            catalog=catalog,
+            selected_blocks=selected_blocks,
+            requested_rows=sum(len(indices) for _block, indices in grouped_indices),
+            effective_rows=sum(len(indices) for _block, indices in grouped_indices),
+            required_blocks=len(selected_blocks),
+            planner_mode="example_rows",
+            execution_block_count=len(selected_blocks),
+            full_split=False,
+        )
+        reader = HFV2LocalBlockReader(
+            dataset_root=dataset_root,
+            block_path_by_key={str(block["cache_key"]): str(block["path"]) for block in selected_blocks},
+            row_count_by_key={str(block["cache_key"]): int(block["row_count"]) for block in selected_blocks},
+        )
+
+    rows: list[dict[str, Any]] = []
+    try:
+        for block, row_indices in grouped_indices:
+            cache_key = str(block["cache_key"])
+            block_rows = reader.load_block(cache_key)
+            try:
+                rows.extend(block_rows[index] for index in row_indices)
+            finally:
+                release_block = getattr(reader, "release_block", None)
+                if release_block is not None:
+                    release_block(cache_key)
+    finally:
+        close = getattr(reader, "close", None)
+        if close is not None:
+            close()
+    return rows
+
+
+def build_example_loader(
+    trainer: Trainer,
+    *,
+    split: str,
+    max_samples: int | None,
+    epoch: int,
+    num_examples: int,
+    sample_indices: Sequence[int] | None = None,
+    distributed_data: bool = True,
+) -> tuple[list[Batch], int, tuple[int, ...]]:
+    streaming = bool(getattr(trainer, "streaming", True))
+    dataset_root = _example_dataset_root(trainer, streaming=streaming)
+    with _example_data_context(distributed_data=distributed_data):
+        blocks, population_size, catalog = _select_example_blocks(
+            split=split,
+            max_samples=max_samples,
+            seed=trainer.seed,
+            streaming=streaming,
+            dataset_root=dataset_root,
+        )
+
+    if sample_indices is None:
+        sample_indices = select_example_sample_indices(
+            population_size,
+            num_examples=num_examples,
+            seed=trainer.seed,
+            split=split,
+            epoch=epoch,
+        ) or ()
+    sample_indices = _normalize_example_sample_indices(
+        sample_indices,
+        num_examples=num_examples,
+        population_size=population_size,
+    )
+    grouped_indices = _group_example_indices_by_block(blocks, sample_indices)
+    rows = _load_example_rows_from_blocks(
+        split=split,
+        grouped_indices=grouped_indices,
+        streaming=streaming,
+        dataset_root=dataset_root,
+        catalog=catalog,
+    )
+
+    collate = build_collate_fn(
+        include_metadata=getattr(trainer, "include_metadata", True),
+        crop_size=None,
+        crop_mode="none",
+        random_flip=False,
+        random_rot90=False,
+    )
+    batch_size = max(1, int(getattr(trainer, "batch_size", num_examples)))
+    batches = [
+        collate(rows[index:index + batch_size])
+        for index in range(0, len(rows), batch_size)
+    ]
+    return batches, population_size, sample_indices
+
+
 @contextmanager
 def _single_process_example_model(trainer: Trainer):
     original_model = trainer.model
@@ -1048,10 +1244,30 @@ def save_restoration_examples(
     sample_indices: Sequence[int] | None = None,
     distributed_data: bool = True,
 ) -> list[Path]:
-    # 공용 러너에서는 split/epoch만 넘기면 loader 생성부터 저장까지 한 번에 처리한다.
-    # dataloader 직접 주입은 외부 preview 호환을 위한 fallback이다.
     if num_examples <= 0:
         return []
+
+    if dataloader is None:
+        if split is None or epoch is None:
+            raise TypeError("save_restoration_examples() requires split and epoch when dataloader is not provided")
+        split_label = _validate_example_split(split)
+        example_loader, _population_size, sample_indices = build_example_loader(
+            trainer,
+            split=split_label,
+            max_samples=max_samples,
+            epoch=epoch,
+            num_examples=num_examples,
+            sample_indices=sample_indices,
+            distributed_data=distributed_data,
+        )
+        return _render_restoration_examples(
+            trainer=trainer,
+            dataloader=example_loader,
+            output_dir=output_dir,
+            num_examples=min(num_examples, len(sample_indices)),
+            split_label=split_label,
+            sample_indices=None,
+        )
 
     dataloader, split_label, population_size = _resolve_example_request(
         trainer,
