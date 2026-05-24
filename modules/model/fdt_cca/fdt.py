@@ -335,14 +335,6 @@ class FDT_CCA(nn.Module):
             heads=num_heads,
             block_cls=JointBlock,
         )
-        self.feature_refine = Extractor(
-            self.up_dim,
-            self.up_dim,
-            dims=extractor_dims,
-            num_layers=num_layers,
-            heads=num_heads,
-            block_cls=ParallelBlock,
-        )
         self.common_extractor = Extractor(
             self.up_dim,
             self.up_dim,
@@ -356,7 +348,6 @@ class FDT_CCA(nn.Module):
     def forward(self, sar: torch.Tensor, cloudy: torch.Tensor):
         # feature extraction
         sar_feat, cld_feat = self.feature_extractor(sar, cloudy)
-        sar_feat, cld_feat = self.feature_refine(sar_feat, cld_feat)
         # common and complementary extraction
         sar_com, cld_com = self.common_extractor(sar_feat, cld_feat)
         sar_comp = sar_feat - sar_com
