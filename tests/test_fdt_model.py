@@ -68,8 +68,10 @@ class FixedJoint(nn.Module):
     def __init__(self, joint: torch.Tensor):
         super().__init__()
         self.register_buffer("joint", joint)
+        self.input: torch.Tensor | None = None
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        self.input = x.detach().clone()
         return self.joint.expand(x.shape[0], -1, x.shape[-2], x.shape[-1])
 
 
@@ -198,9 +200,18 @@ def test_fdt_cca_adds_joint_extractor_residual_before_common_extractors() -> Non
     with torch.no_grad():
         model(torch.randn(1, 2, 1, 1), torch.randn(1, 13, 1, 1))
 
-    joint_norm = joint * torch.rsqrt(joint.square().mean(dim=1, keepdim=True) + 1e-8)
-    assert torch.allclose(model.sar_common_extractor.input, sar_feat + joint_norm)
-    assert torch.allclose(model.cld_common_extractor.input, cld_feat + joint_norm)
+    sar_norm = sar_feat * torch.rsqrt(
+        sar_feat.square().mean(dim=1, keepdim=True) + 1e-8
+    )
+    cld_norm = cld_feat * torch.rsqrt(
+        cld_feat.square().mean(dim=1, keepdim=True) + 1e-8
+    )
+    assert torch.allclose(
+        model.joint_extractor.input,
+        torch.cat((sar_norm, cld_norm), dim=1),
+    )
+    assert torch.allclose(model.sar_common_extractor.input, sar_feat + joint)
+    assert torch.allclose(model.cld_common_extractor.input, cld_feat + joint)
 
 
 def test_extractor_applies_blocks_only_on_top_down_levels() -> None:

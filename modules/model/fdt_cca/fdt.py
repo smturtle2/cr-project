@@ -254,10 +254,14 @@ class FDT_CCA(nn.Module):
         sar_feat = self.sar_extractor(sar)
         cld_feat = self.cld_extractor(cloudy)
 
-        # joint feature extraction and normalization
-        joint = self.joint_extractor(torch.cat((sar_feat, cld_feat), dim=1))
-        sar_feat = sar_feat + self.sar_joint_norm(joint)
-        cld_feat = cld_feat + self.cld_joint_norm(joint)
+        # joint feature extraction
+        joint_input = torch.cat(
+            (self.sar_joint_norm(sar_feat), self.cld_joint_norm(cld_feat)),
+            dim=1,
+        )
+        joint = self.joint_extractor(joint_input)
+        sar_feat = sar_feat + joint
+        cld_feat = cld_feat + joint
 
         # common and complementary extraction
         sar_com = self.sar_common_extractor(sar_feat)
