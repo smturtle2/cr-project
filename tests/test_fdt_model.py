@@ -6,7 +6,7 @@ import pytest
 
 from modules.model.fdt import FDT, FDT_CRNet_Direct, FDT_CRNet_Side, ResizeConvUp
 from modules.model.fdt_cca import (
-    CCA_AttnAdapter,
+    CCAMask,
     CCA_CRNet,
     Extractor,
     FDT_CCA,
@@ -83,6 +83,50 @@ class InputCapture(nn.Module):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         self.input = x.detach().clone()
         return x
+
+
+class FixedMask(nn.Module):
+    def __init__(self, value: float):
+        super().__init__()
+        self.value = value
+
+    def forward(self, cld_comp: torch.Tensor) -> torch.Tensor:
+        return cld_comp.new_full(
+            (cld_comp.shape[0], 1, cld_comp.shape[-2], cld_comp.shape[-1]),
+            self.value,
+        )
+
+
+class ConstantImage(nn.Module):
+    def __init__(self, out_channels: int, value: float):
+        super().__init__()
+        self.out_channels = out_channels
+        self.value = value
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return x.new_full(
+            (x.shape[0], self.out_channels, x.shape[-2], x.shape[-1]),
+            self.value,
+        )
+
+
+class AddFeatureDelta(nn.Module):
+    def __init__(self, value: float):
+        super().__init__()
+        self.value = value
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return x + x.new_full(x.shape, self.value)
+
+
+class CaptureReturnImage(ConstantImage):
+    def __init__(self, out_channels: int, value: float):
+        super().__init__(out_channels, value)
+        self.input: torch.Tensor | None = None
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        self.input = x.detach().clone()
+        return super().forward(x)
 
 
 def test_fdt_imports_and_runs_forward() -> None:
@@ -300,41 +344,62 @@ def test_fdt_cca_rejects_invalid_extractor_config() -> None:
         FDT_CCA(dim=256, extractor_dims=(128, 258))
 
 
-def test_cca_attn_adapter_starts_as_identity() -> None:
-    adapter = CCA_AttnAdapter(
-        comp_channels=128,
-        feature_channels=256,
-        num_layers=1,
-        heads=4,
-    ).eval()
-    feature = torch.randn(2, 256, 16, 16)
+def test_cca_mask_returns_single_channel_intervention_mask() -> None:
+    cca = CCAMask(comp_channels=128).eval()
     cld_comp = torch.randn(2, 128, 16, 16)
 
     with torch.no_grad():
-        actual = adapter(feature, cld_comp)
+        mask = cca(cld_comp)
 
-    assert torch.allclose(actual, feature)
+    assert mask.shape == (2, 1, 16, 16)
+    assert torch.all(mask >= 0.0)
+    assert torch.all(mask <= 1.0)
 
 
 def test_cca_crnet_runs_without_attention_layer() -> None:
     model = CCA_CRNet(out_channels=13, num_layers=0).eval()
     feature = torch.randn(1, 256, 16, 16)
     cld_comp = torch.randn(1, 128, 16, 16)
+    cloudy = torch.randn(1, 13, 16, 16)
 
     with torch.no_grad():
-        prediction = model(feature, cld_comp)
+        prediction = model(feature, cld_comp, cloudy)
 
     assert prediction.shape == (1, 13, 16, 16)
     assert prediction.dtype == feature.dtype
 
 
-def test_cca_crnet_runs_with_adapter_injection() -> None:
+def test_cca_crnet_blends_cloudy_with_low_and_feature_difference_high() -> None:
+    model = CCA_CRNet(
+        out_channels=1,
+        num_layers=0,
+        feature_sizes=2,
+        comp_channels=2,
+        detail_blocks=1,
+    ).eval()
+    model.low_head = ConstantImage(out_channels=1, value=4.0)
+    model.high_refine = AddFeatureDelta(value=3.0)
+    model.high_head = CaptureReturnImage(out_channels=1, value=2.0)
+    model.cca = FixedMask(value=0.25)
+    feature = torch.zeros(1, 2, 4, 4)
+    cld_comp = torch.randn(1, 2, 4, 4)
+    cloudy = torch.full((1, 1, 4, 4), 10.0)
+
+    with torch.no_grad():
+        prediction = model(feature, cld_comp, cloudy)
+
+    assert torch.allclose(prediction, torch.full_like(prediction, 9.0))
+    assert torch.allclose(model.high_head.input, torch.full_like(feature, 3.0))
+
+
+def test_cca_crnet_runs_with_local_high_refine() -> None:
     model = CCA_CRNet(out_channels=13, num_layers=4).eval()
     feature = torch.randn(1, 256, 16, 16)
     cld_comp = torch.randn(1, 128, 16, 16)
+    cloudy = torch.randn(1, 13, 16, 16)
 
     with torch.no_grad():
-        prediction = model(feature, cld_comp)
+        prediction = model(feature, cld_comp, cloudy)
 
     assert prediction.shape == (1, 13, 16, 16)
     assert prediction.dtype == feature.dtype
