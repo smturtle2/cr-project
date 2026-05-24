@@ -11,31 +11,19 @@ from modules.model.fdt_cca import (
     Extractor,
     FDT_CCA,
     FDT_CRNet_CCA,
-    JointBlock,
-    ParallelBlock,
 )
 from modules.model.module.attention import MultiHeadAttention
 
 
 class RecordingBlock(nn.Module):
-    init_dims: list[int] = []
     call_shapes: list[tuple[int, tuple[int, int]]] = []
 
-    def __init__(self, dim: int, num_layers: int, heads: int):
-        super().__init__()
-        self.init_dims.append(dim)
-
-    def forward(
-        self,
-        sar: torch.Tensor,
-        cld: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        self.call_shapes.append((sar.shape[1], tuple(sar.shape[-2:])))
-        return sar, cld
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        self.call_shapes.append((x.shape[1], tuple(x.shape[-2:])))
+        return x
 
     @classmethod
     def reset(cls) -> None:
-        cls.init_dims = []
         cls.call_shapes = []
 
 
@@ -67,17 +55,31 @@ class ZeroRecon(nn.Module):
         cls.recon_shapes = []
 
 
+class FixedFeature(nn.Module):
+    def __init__(self, feature: torch.Tensor):
+        super().__init__()
+        self.register_buffer("feature", feature)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.feature.expand(x.shape[0], -1, x.shape[-2], x.shape[-1])
+
+
 class FixedJoint(nn.Module):
     def __init__(self, joint: torch.Tensor):
         super().__init__()
         self.register_buffer("joint", joint)
 
-    def forward(self, sar: torch.Tensor, cld: torch.Tensor) -> torch.Tensor:
-        return self.joint.expand_as(sar)
-
-
-class IdentityCapture(nn.Module):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.joint.expand(x.shape[0], -1, x.shape[-2], x.shape[-1])
+
+
+class InputCapture(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.input: torch.Tensor | None = None
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        self.input = x.detach().clone()
         return x
 
 
@@ -145,19 +147,14 @@ def test_fdt_cca_returns_full_resolution_cloudy_component_only() -> None:
 
 
 def test_extractor_returns_full_resolution_features() -> None:
-    extractor = Extractor(
-        2,
-        13,
-        dims=(128, 256, 512),
-        num_layers=1,
-        heads=4,
-        block_cls=ParallelBlock,
-    ).eval()
+    sar_extractor = Extractor(2, dims=(128, 256, 512), num_layers=1, heads=4).eval()
+    cld_extractor = Extractor(13, dims=(128, 256, 512), num_layers=1, heads=4).eval()
     sar = torch.randn(1, 2, 16, 16)
     cloudy = torch.randn(1, 13, 16, 16)
 
     with torch.no_grad():
-        sar_feat, cld_feat = extractor(sar, cloudy)
+        sar_feat = sar_extractor(sar)
+        cld_feat = cld_extractor(cloudy)
 
     assert sar_feat.shape == (1, 128, 16, 16)
     assert cld_feat.shape == (1, 128, 16, 16)
@@ -168,19 +165,13 @@ def test_extractor_returns_full_resolution_features() -> None:
 
 
 def test_extractor_accepts_feature_inputs_for_common() -> None:
-    extractor = Extractor(
-        128,
-        128,
-        dims=(128, 256, 512),
-        num_layers=1,
-        heads=4,
-        block_cls=JointBlock,
-    ).eval()
+    extractor = Extractor(128, dims=(128, 256, 512), num_layers=1, heads=4).eval()
     sar_feat = torch.randn(1, 128, 16, 16)
     cld_feat = torch.randn(1, 128, 16, 16)
 
     with torch.no_grad():
-        sar_com, cld_com = extractor(sar_feat, cld_feat)
+        sar_com = extractor(sar_feat)
+        cld_com = extractor(cld_feat)
 
     assert sar_com.shape == sar_feat.shape
     assert cld_com.shape == cld_feat.shape
@@ -188,37 +179,43 @@ def test_extractor_accepts_feature_inputs_for_common() -> None:
     assert bool(torch.isfinite(cld_com).all().item())
 
 
-def test_joint_block_adds_normalized_joint_to_each_modality() -> None:
-    block = JointBlock(dim=4, num_layers=1, heads=1).eval()
+def test_fdt_cca_adds_joint_extractor_residual_before_common_extractors() -> None:
+    model = FDT_CCA(
+        dim=8,
+        num_layers=1,
+        num_heads=1,
+        extractor_dims=(4, 8),
+    ).eval()
+    sar_feat = torch.ones(1, 4, 1, 1)
+    cld_feat = torch.full((1, 4, 1, 1), 2.0)
     joint = torch.tensor([[[[3.0]], [[4.0]], [[0.0]], [[0.0]]]])
-    block.joint_encoder = FixedJoint(joint)
-    block.sar_feat_encoder = IdentityCapture()
-    block.cld_feat_encoder = IdentityCapture()
-    sar = torch.ones(1, 4, 1, 1)
-    cld = torch.full((1, 4, 1, 1), 2.0)
+    model.sar_extractor = FixedFeature(sar_feat)
+    model.cld_extractor = FixedFeature(cld_feat)
+    model.joint_extractor = FixedJoint(joint)
+    model.sar_common_extractor = InputCapture()
+    model.cld_common_extractor = InputCapture()
 
     with torch.no_grad():
-        sar_out, cld_out = block(sar, cld)
+        model(torch.randn(1, 2, 1, 1), torch.randn(1, 13, 1, 1))
 
-    assert torch.allclose(sar_out, sar + block.sar_joint_norm(joint))
-    assert torch.allclose(cld_out, cld + block.cld_joint_norm(joint))
+    joint_norm = joint * torch.rsqrt(joint.square().mean(dim=1, keepdim=True) + 1e-8)
+    assert torch.allclose(model.sar_common_extractor.input, sar_feat + joint_norm)
+    assert torch.allclose(model.cld_common_extractor.input, cld_feat + joint_norm)
 
 
 def test_extractor_applies_blocks_only_on_top_down_levels() -> None:
     RecordingBlock.reset()
     extractor = Extractor(
         2,
-        13,
         dims=(8, 16, 32),
         num_layers=1,
         heads=4,
-        block_cls=RecordingBlock,
     ).eval()
+    extractor.up.blocks = nn.ModuleList([RecordingBlock(), RecordingBlock()])
 
     with torch.no_grad():
-        extractor(torch.randn(1, 2, 16, 16), torch.randn(1, 13, 16, 16))
+        extractor(torch.randn(1, 2, 16, 16))
 
-    assert RecordingBlock.init_dims == [32, 16]
     assert RecordingBlock.call_shapes == [(32, (4, 4)), (16, (8, 8))]
 
 
@@ -227,19 +224,17 @@ def test_extractor_uses_reconstruction_residual_skips() -> None:
     ZeroRecon.reset()
     extractor = Extractor(
         2,
-        13,
         dims=(8, 16, 32),
         num_layers=1,
         heads=4,
-        block_cls=RecordingBlock,
     ).eval()
-    extractor.up.sar_recons = nn.ModuleList(
+    extractor.up.blocks = nn.ModuleList([RecordingBlock(), RecordingBlock()])
+    extractor.up.recons = nn.ModuleList(
         [ZeroRecon(8, record=True), ZeroRecon(16, record=True)]
     )
-    extractor.up.cld_recons = nn.ModuleList([ZeroRecon(8), ZeroRecon(16)])
 
     with torch.no_grad():
-        extractor(torch.randn(1, 2, 16, 16), torch.randn(1, 13, 16, 16))
+        extractor(torch.randn(1, 2, 16, 16))
 
     assert ZeroRecon.recon_shapes == [
         (16, (8, 8), (16, 16)),
