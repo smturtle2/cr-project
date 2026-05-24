@@ -3,7 +3,6 @@ from __future__ import annotations
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from sympy.physics.units import Pa
 
 from ..fdt.fdt import CommonEncoder as FeatureEncoder
 from ..fdt.fdt import Residual3x3Block, ResizeConvUp
@@ -219,24 +218,17 @@ class UpLevels(nn.Module):
                 self.cld_recons,
             )
         ]
-        sar, cld = self.blocks[0](sars[-1], clds[-1])
+        sar, cld = sars[-1], clds[-1]
 
-        for level, sar_up, cld_up, block in zip(
-            range(len(sars) - 2, 0, -1),
-            self.sar_ups[:-1],
-            self.cld_ups[:-1],
-            self.blocks[1:],
+        for level, block, sar_up, cld_up in zip(
+            range(len(sars) - 1, 0, -1),
+            self.blocks,
+            self.sar_ups,
+            self.cld_ups,
         ):
-            sar_residual = sar_residuals[level]
-            cld_residual = cld_residuals[level]
-            sar = sar_up(sar) + sar_residual
-            cld = cld_up(cld) + cld_residual
             sar, cld = block(sar, cld)
-
-        sar_residual = sar_residuals[0]
-        cld_residual = cld_residuals[0]
-        sar = self.sar_ups[-1](sar) + sar_residual
-        cld = self.cld_ups[-1](cld) + cld_residual
+            sar = sar_up(sar) + sar_residuals[level - 1]
+            cld = cld_up(cld) + cld_residuals[level - 1]
         return sar, cld
 
 
@@ -261,8 +253,8 @@ class Extractor(nn.Module):
 
         self.down = DownLevels(sar_channels, cloudy_channels, dims)
         self.up = UpLevels(dims, num_layers, heads, block_cls)
-        self.sar_out = _conv_block(dims[0], dims[0])
-        self.cld_out = _conv_block(dims[0], dims[0])
+        self.sar_out = Residual3x3Block(dims[0])
+        self.cld_out = Residual3x3Block(dims[0])
 
     def forward(
         self,
@@ -322,6 +314,14 @@ class FDT_CCA(nn.Module):
             heads=num_heads,
             block_cls=JointBlock,
         )
+        self.feature_refine = Extractor(
+            self.up_dim,
+            self.up_dim,
+            dims=extractor_dims,
+            num_layers=num_layers,
+            heads=num_heads,
+            block_cls=ParallelBlock,
+        )
         self.common_extractor = Extractor(
             self.up_dim,
             self.up_dim,
@@ -333,7 +333,10 @@ class FDT_CCA(nn.Module):
         self.com_fuse = nn.Conv2d(self.up_dim * 2, self.common_dim, kernel_size=1)
 
     def forward(self, sar: torch.Tensor, cloudy: torch.Tensor):
+        # feature extraction
         sar_feat, cld_feat = self.feature_extractor(sar, cloudy)
+        sar_feat, cld_feat = self.feature_refine(sar_feat, cld_feat)
+        # common and complementary extraction
         sar_com, cld_com = self.common_extractor(sar_feat, cld_feat)
         sar_comp = sar_feat - sar_com
         cld_comp = cld_feat - cld_com
