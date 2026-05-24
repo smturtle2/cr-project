@@ -548,7 +548,7 @@ class MainTrainingFlowTest(unittest.TestCase):
             self.assertFalse((output_dir / "epoch-0001.pt").exists())
             self.assertFalse((output_dir / "epoch-0003.pt").exists())
 
-    def test_distributed_epoch_examples_are_saved_on_primary_with_sync_marker(self) -> None:
+    def test_distributed_epoch_examples_are_saved_on_primary_with_barrier(self) -> None:
         example_config = main.ExampleSaveConfig(
             splits=("test",),
             max_samples_by_split={"test": 16},
@@ -561,6 +561,7 @@ class MainTrainingFlowTest(unittest.TestCase):
             mock.patch.object(main, "is_primary", return_value=True),
             mock.patch.object(main.dist, "is_available", return_value=True),
             mock.patch.object(main.dist, "is_initialized", return_value=True),
+            mock.patch.object(main.dist, "barrier") as barrier,
             mock.patch.object(main, "save_examples_for_splits", return_value={"test": []}) as save_examples,
         ):
             output_dir = Path(tmp_dir)
@@ -571,13 +572,14 @@ class MainTrainingFlowTest(unittest.TestCase):
                 example_config=example_config,
                 saved_epochs=saved_epochs,
             )
-            self.assertTrue((main.distributed_example_sync_dir(output_dir, epoch=1) / "complete").exists())
+            self.assertFalse((output_dir / ".example_sync").exists())
 
         self.assertEqual(result, {"test": []})
         self.assertEqual(saved_epochs, {1})
+        barrier.assert_called_once_with()
         save_examples.assert_called_once()
 
-    def test_distributed_epoch_examples_wait_on_non_primary(self) -> None:
+    def test_distributed_epoch_examples_barrier_on_non_primary(self) -> None:
         example_config = main.ExampleSaveConfig(
             splits=("test",),
             max_samples_by_split={"test": 16},
@@ -590,7 +592,7 @@ class MainTrainingFlowTest(unittest.TestCase):
             mock.patch.object(main, "is_primary", return_value=False),
             mock.patch.object(main.dist, "is_available", return_value=True),
             mock.patch.object(main.dist, "is_initialized", return_value=True),
-            mock.patch.object(main, "_wait_for_distributed_example_completion") as wait_for_examples,
+            mock.patch.object(main.dist, "barrier") as barrier,
             mock.patch.object(main, "save_examples_for_splits") as save_examples,
         ):
             output_dir = Path(tmp_dir)
@@ -605,11 +607,7 @@ class MainTrainingFlowTest(unittest.TestCase):
         self.assertEqual(result, {})
         self.assertEqual(saved_epochs, {1})
         save_examples.assert_not_called()
-        wait_for_examples.assert_called_once()
-        self.assertEqual(
-            wait_for_examples.call_args.args[0],
-            main.distributed_example_sync_dir(output_dir, epoch=1),
-        )
+        barrier.assert_called_once_with()
 
     def test_deferred_distributed_examples_load_best_checkpoint(self) -> None:
         selector = main.build_best_epoch_selector()
@@ -669,6 +667,7 @@ class MainTrainingFlowTest(unittest.TestCase):
                 mock.patch.object(main, "build_scheduler_monitor", return_value=None),
                 mock.patch.object(main, "is_distributed_run", return_value=True),
                 mock.patch.object(main, "is_primary", return_value=True),
+                mock.patch.object(main.dist, "barrier"),
                 mock.patch.object(
                     main,
                     "save_examples_for_splits",

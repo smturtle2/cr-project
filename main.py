@@ -2,9 +2,7 @@ from __future__ import annotations
 
 import json
 import math
-import os
 import random
-import time
 from collections.abc import Callable, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -1390,42 +1388,6 @@ def is_distributed_run() -> bool:
     return dist.is_available() and dist.is_initialized()
 
 
-_DISTRIBUTED_EXAMPLE_POLL_SECONDS = 1.0
-_DISTRIBUTED_EXAMPLE_WAIT_TIMEOUT_SECONDS = 24 * 60 * 60
-
-
-def _distributed_example_run_key() -> str:
-    master_addr = os.environ.get("MASTER_ADDR", "")
-    master_port = os.environ.get("MASTER_PORT", "")
-    local_world_size = os.environ.get("LOCAL_WORLD_SIZE")
-    world_size = os.environ.get("WORLD_SIZE")
-    parts = [part for part in (master_addr, master_port) if part]
-    if local_world_size == world_size or not parts:
-        parts.append(f"parent-{os.getppid()}")
-    run_key = "-".join(parts)
-    return "".join(char if char.isalnum() or char in "._-" else "_" for char in run_key)
-
-
-def distributed_example_sync_dir(output_dir: Path, *, epoch: int) -> Path:
-    return output_dir / ".example_sync" / _distributed_example_run_key() / f"epoch-{epoch:04d}"
-
-
-def _wait_for_distributed_example_completion(sync_dir: Path) -> None:
-    complete_marker = sync_dir / "complete"
-    failed_marker = sync_dir / "failed"
-    deadline = time.time() + _DISTRIBUTED_EXAMPLE_WAIT_TIMEOUT_SECONDS
-
-    while True:
-        if complete_marker.exists():
-            return
-        if failed_marker.exists():
-            message = failed_marker.read_text(encoding="utf-8").strip()
-            raise RuntimeError(f"distributed example generation failed on primary rank: {message}")
-        if time.time() >= deadline:
-            raise TimeoutError(f"timed out waiting for distributed examples: {sync_dir}")
-        time.sleep(_DISTRIBUTED_EXAMPLE_POLL_SECONDS)
-
-
 def _save_distributed_epoch_examples(
     trainer: Trainer,
     *,
@@ -1434,34 +1396,22 @@ def _save_distributed_epoch_examples(
     example_config: ExampleSaveConfig,
     saved_epochs: set[int],
 ) -> dict[str, list[Path]]:
-    sync_dir = distributed_example_sync_dir(output_dir, epoch=epoch)
-    if not is_primary():
-        _wait_for_distributed_example_completion(sync_dir)
-        saved_epochs.add(epoch)
-        return {}
-
-    sync_dir.mkdir(parents=True, exist_ok=True)
-    complete_marker = sync_dir / "complete"
-    failed_marker = sync_dir / "failed"
-    complete_marker.unlink(missing_ok=True)
-    failed_marker.unlink(missing_ok=True)
-
+    saved_paths_by_split: dict[str, list[Path]] = {}
     try:
-        with _single_process_example_model(trainer):
-            saved_paths_by_split = save_examples_for_splits(
-                trainer,
-                splits=example_config.splits,
-                max_samples_by_split=example_config.max_samples_by_split,
-                epoch=epoch,
-                output_dir=examples_epoch_dir(output_dir, epoch=epoch),
-                num_examples=example_config.num_examples,
-                distributed_data=False,
-            )
-    except Exception as exc:
-        failed_marker.write_text(f"{type(exc).__name__}: {exc}\n", encoding="utf-8")
-        raise
+        if is_primary():
+            with _single_process_example_model(trainer):
+                saved_paths_by_split = save_examples_for_splits(
+                    trainer,
+                    splits=example_config.splits,
+                    max_samples_by_split=example_config.max_samples_by_split,
+                    epoch=epoch,
+                    output_dir=examples_epoch_dir(output_dir, epoch=epoch),
+                    num_examples=example_config.num_examples,
+                    distributed_data=False,
+                )
+    finally:
+        dist.barrier()
 
-    complete_marker.write_text("ok\n", encoding="utf-8")
     saved_epochs.add(epoch)
     return saved_paths_by_split
 
