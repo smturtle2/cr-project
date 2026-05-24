@@ -67,6 +67,20 @@ class ZeroRecon(nn.Module):
         cls.recon_shapes = []
 
 
+class FixedJoint(nn.Module):
+    def __init__(self, joint: torch.Tensor):
+        super().__init__()
+        self.register_buffer("joint", joint)
+
+    def forward(self, sar: torch.Tensor, cld: torch.Tensor) -> torch.Tensor:
+        return self.joint.expand_as(sar)
+
+
+class IdentityCapture(nn.Module):
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return x
+
+
 def test_fdt_imports_and_runs_forward() -> None:
     model = FDT(num_layers=1, num_heads=4).eval()
     sar = torch.randn(1, 2, 16, 16)
@@ -172,6 +186,22 @@ def test_extractor_accepts_feature_inputs_for_common() -> None:
     assert cld_com.shape == cld_feat.shape
     assert bool(torch.isfinite(sar_com).all().item())
     assert bool(torch.isfinite(cld_com).all().item())
+
+
+def test_joint_block_adds_normalized_joint_to_each_modality() -> None:
+    block = JointBlock(dim=4, num_layers=1, heads=1).eval()
+    joint = torch.tensor([[[[3.0]], [[4.0]], [[0.0]], [[0.0]]]])
+    block.joint_encoder = FixedJoint(joint)
+    block.sar_feat_encoder = IdentityCapture()
+    block.cld_feat_encoder = IdentityCapture()
+    sar = torch.ones(1, 4, 1, 1)
+    cld = torch.full((1, 4, 1, 1), 2.0)
+
+    with torch.no_grad():
+        sar_out, cld_out = block(sar, cld)
+
+    assert torch.allclose(sar_out, sar + block.sar_joint_norm(joint))
+    assert torch.allclose(cld_out, cld + block.cld_joint_norm(joint))
 
 
 def test_extractor_applies_blocks_only_on_top_down_levels() -> None:

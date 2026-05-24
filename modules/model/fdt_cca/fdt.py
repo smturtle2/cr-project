@@ -8,6 +8,23 @@ from ..fdt.fdt import CommonEncoder as FeatureEncoder
 from ..fdt.fdt import Residual3x3Block, ResizeConvUp
 
 
+class RMSNorm2d(nn.Module):
+    def __init__(
+        self,
+        channels: int,
+        eps: float = 1e-8,
+        init_weight: float = 1.0,
+    ):
+        super().__init__()
+        self.eps = eps
+        self.weight = nn.Parameter(torch.full((1, channels, 1, 1), init_weight))
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        rms = x.float().square().mean(dim=1, keepdim=True)
+        scale = torch.rsqrt(rms + self.eps).to(dtype=x.dtype)
+        return x * scale * self.weight.to(dtype=x.dtype)
+
+
 class JointEncoder(FeatureEncoder):
     def __init__(
         self,
@@ -56,6 +73,8 @@ class JointBlock(nn.Module):
     ):
         super().__init__()
         self.joint_encoder = JointEncoder(dim, num_layers, heads)
+        self.sar_joint_norm = RMSNorm2d(dim, init_weight=0.1)
+        self.cld_joint_norm = RMSNorm2d(dim, init_weight=0.1)
         self.sar_feat_encoder = FeatureEncoder(dim, num_layers, heads)
         self.cld_feat_encoder = FeatureEncoder(dim, num_layers, heads)
 
@@ -65,7 +84,9 @@ class JointBlock(nn.Module):
         cld: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         joint = self.joint_encoder(sar, cld)
-        return self.sar_feat_encoder(joint), self.cld_feat_encoder(joint)
+        sar = self.sar_feat_encoder(sar + self.sar_joint_norm(joint))
+        cld = self.cld_feat_encoder(cld + self.cld_joint_norm(joint))
+        return sar, cld
 
 
 def _validate_extractor_dims(
