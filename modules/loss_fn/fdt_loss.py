@@ -1,19 +1,59 @@
 from __future__ import annotations
 
 import torch
+import torch.nn.functional as F
 from torch import nn
 
 
-class FDTDecompositionLoss(nn.Module):
+def _check_same_shape(first: torch.Tensor, second: torch.Tensor) -> None:
+    if first.shape != second.shape:
+        raise ValueError(f"feature shapes must match: {first.shape} != {second.shape}")
+
+
+class PatchSlicedWassersteinLoss(nn.Module):
     def __init__(
         self,
         *,
+        num_projections: int = 128,
         eps: float = 1e-7,
-    ):
+    ) -> None:
+        super().__init__()
+        self.num_projections = num_projections
+        self.eps = eps
+
+    def _projection_weight(self, feature: torch.Tensor) -> torch.Tensor:
+        weight = torch.randn(
+            self.num_projections,
+            feature.shape[1],
+            3,
+            3,
+            device=feature.device,
+            dtype=torch.float32,
+        )
+        norm = weight.flatten(1).norm(dim=1).clamp_min(self.eps)
+        return weight / norm.view(-1, 1, 1, 1)
+
+    def _project(self, feature: torch.Tensor, weight: torch.Tensor) -> torch.Tensor:
+        feature = F.pad(feature, (1, 1, 1, 1), mode="replicate")
+        return F.conv2d(feature, weight).flatten(2)
+
+    def forward(self, first: torch.Tensor, second: torch.Tensor) -> torch.Tensor:
+        _check_same_shape(first, second)
+        with torch.autocast(device_type=first.device.type, enabled=False):
+            first = first.float()
+            second = second.float()
+            weight = self._projection_weight(first)
+            first = self._project(first, weight).sort(dim=-1).values
+            second = self._project(second, weight).sort(dim=-1).values
+            return (first - second).abs().mean()
+
+
+class FeatureUncorrelationLoss(nn.Module):
+    def __init__(self, *, eps: float = 1e-7) -> None:
         super().__init__()
         self.eps = eps
 
-    def _centered_ccc(
+    def _centered_corr(
         self,
         first: torch.Tensor,
         second: torch.Tensor,
@@ -22,55 +62,42 @@ class FDTDecompositionLoss(nn.Module):
     ) -> torch.Tensor:
         first = first - first.mean(dim=dim, keepdim=True)
         second = second - second.mean(dim=dim, keepdim=True)
-        numerator = 2.0 * (first * second).mean(dim=dim)
-        denominator = first.square().mean(dim=dim) + second.square().mean(dim=dim)
-        return numerator / (denominator + self.eps)
+        covariance = (first * second).mean(dim=dim)
+        first_std = first.square().mean(dim=dim).sqrt()
+        second_std = second.square().mean(dim=dim).sqrt()
+        return covariance / (first_std * second_std + self.eps)
 
-    def _axis_ccc_scores(
-        self,
-        first: torch.Tensor,
-        second: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
+    def forward(self, first: torch.Tensor, second: torch.Tensor) -> torch.Tensor:
+        _check_same_shape(first, second)
         with torch.autocast(device_type=first.device.type, enabled=False):
             first = first.float()
             second = second.float()
-            # [B, C, H, W] -> [B, H*W, C] -> [B, H*W]
-            channel_scores = self._centered_ccc(
+            channel_corr = self._centered_corr(
                 first.flatten(2).transpose(1, 2),
                 second.flatten(2).transpose(1, 2),
                 dim=-1,
             )
-            # [B, C, H, W] -> [B, C, H*W] -> [B, C]
-            spatial_scores = self._centered_ccc(
+            spatial_corr = self._centered_corr(
                 first.flatten(2),
                 second.flatten(2),
                 dim=-1,
             )
-            return channel_scores, spatial_scores
+            return channel_corr.square().mean() + spatial_corr.square().mean()
 
-    def _feature_scores(
-        self,
-        first: torch.Tensor,
-        second: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        channel_scores, spatial_scores = self._axis_ccc_scores(first, second)
-        return channel_scores.mean(dim=1), spatial_scores.mean(dim=1)
 
-    def _common_alignment_loss(
+class FDTDecompositionLoss(nn.Module):
+    def __init__(
         self,
-        sar_com: torch.Tensor,
-        cld_com: torch.Tensor,
-    ) -> torch.Tensor:
-        channel_score, spatial_score = self._feature_scores(sar_com, cld_com)
-        return ((1.0 - channel_score) + (1.0 - spatial_score)).mean()
-
-    def _comp_decorrelation_loss(
-        self,
-        sar_comp: torch.Tensor,
-        cld_comp: torch.Tensor,
-    ) -> torch.Tensor:
-        channel_scores, spatial_scores = self._axis_ccc_scores(sar_comp, cld_comp)
-        return channel_scores.square().mean() + spatial_scores.square().mean()
+        *,
+        num_projections: int = 128,
+        eps: float = 1e-7,
+    ) -> None:
+        super().__init__()
+        self.common_loss = PatchSlicedWassersteinLoss(
+            num_projections=num_projections,
+            eps=eps,
+        )
+        self.comp_loss = FeatureUncorrelationLoss(eps=eps)
 
     def forward(
         self,
@@ -79,6 +106,6 @@ class FDTDecompositionLoss(nn.Module):
         sar_comp: torch.Tensor,
         cld_comp: torch.Tensor,
     ) -> torch.Tensor:
-        common_loss = self._common_alignment_loss(sar_com, cld_com)
-        comp_loss = self._comp_decorrelation_loss(sar_comp, cld_comp)
+        common_loss = self.common_loss(sar_com, cld_com)
+        comp_loss = self.comp_loss(sar_comp, cld_comp)
         return common_loss + comp_loss
