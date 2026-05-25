@@ -8,9 +8,12 @@ from modules.model.fdt import FDT, FDT_CRNet_Direct, FDT_CRNet_Side, ResizeConvU
 from modules.model.fdt_cca import (
     CCAMask,
     CCA_CRNet,
+    CloudyStem,
     Extractor,
+    ExtractorLayer,
     FDT_CCA,
     FDT_CRNet_CCA,
+    SarStem,
 )
 from modules.model.module.attention import MultiHeadAttention
 
@@ -62,17 +65,6 @@ class FixedFeature(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.feature.expand(x.shape[0], -1, x.shape[-2], x.shape[-1])
-
-
-class FixedJoint(nn.Module):
-    def __init__(self, joint: torch.Tensor):
-        super().__init__()
-        self.register_buffer("joint", joint)
-        self.input: torch.Tensor | None = None
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        self.input = x.detach().clone()
-        return self.joint.expand(x.shape[0], -1, x.shape[-2], x.shape[-1])
 
 
 class InputCapture(nn.Module):
@@ -182,6 +174,10 @@ def test_fdt_cca_returns_full_resolution_cloudy_component_only() -> None:
     sar = torch.randn(1, 2, 16, 16)
     cloudy = torch.randn(1, 13, 16, 16)
 
+    assert model.feature_extractor_layers == 2
+    assert len(model.sar_extractor.layers) == 2
+    assert len(model.cld_extractor.layers) == 2
+
     with torch.no_grad():
         outputs = model(sar, cloudy)
 
@@ -192,15 +188,32 @@ def test_fdt_cca_returns_full_resolution_cloudy_component_only() -> None:
         assert bool(torch.isfinite(output).all().item())
 
 
-def test_extractor_returns_full_resolution_features() -> None:
-    sar_extractor = Extractor(2, dims=(128, 256, 512), num_layers=1, heads=4).eval()
-    cld_extractor = Extractor(13, dims=(128, 256, 512), num_layers=1, heads=4).eval()
+def test_stems_and_extractors_return_full_resolution_features() -> None:
+    sar_stem = SarStem(2, 128).eval()
+    cld_stem = CloudyStem(13, 128).eval()
+    sar_extractor = Extractor(
+        128,
+        dims=(128, 256, 512),
+        layer_count=2,
+        num_layers=1,
+        heads=4,
+    ).eval()
+    cld_extractor = Extractor(
+        128,
+        dims=(128, 256, 512),
+        layer_count=2,
+        num_layers=1,
+        heads=4,
+    ).eval()
     sar = torch.randn(1, 2, 16, 16)
     cloudy = torch.randn(1, 13, 16, 16)
 
+    assert sar_stem.proj[0].kernel_size == (3, 3)
+    assert cld_stem.proj[0].kernel_size == (1, 1)
+
     with torch.no_grad():
-        sar_feat = sar_extractor(sar)
-        cld_feat = cld_extractor(cloudy)
+        sar_feat = sar_extractor(sar_stem(sar))
+        cld_feat = cld_extractor(cld_stem(cloudy))
 
     assert sar_feat.shape == (1, 128, 16, 16)
     assert cld_feat.shape == (1, 128, 16, 16)
@@ -225,43 +238,55 @@ def test_extractor_accepts_feature_inputs_for_common() -> None:
     assert bool(torch.isfinite(cld_com).all().item())
 
 
-def test_fdt_cca_adds_joint_extractor_residual_before_common_extractors() -> None:
+def test_fdt_cca_uses_stem_features_without_joint_extractor() -> None:
     model = FDT_CCA(
         dim=8,
         num_layers=1,
         num_heads=1,
         extractor_dims=(4, 8),
     ).eval()
-    sar_feat = torch.ones(1, 4, 1, 1)
-    cld_feat = torch.full((1, 4, 1, 1), 2.0)
-    joint = torch.tensor([[[[3.0]], [[4.0]], [[0.0]], [[0.0]]]])
-    model.sar_extractor = FixedFeature(sar_feat)
-    model.cld_extractor = FixedFeature(cld_feat)
-    model.joint_extractor = FixedJoint(joint)
+    sar_stem_feat = torch.ones(1, 4, 1, 1)
+    cld_stem_feat = torch.full((1, 4, 1, 1), 2.0)
+    model.sar_stem = FixedFeature(sar_stem_feat)
+    model.cld_stem = FixedFeature(cld_stem_feat)
+    model.sar_extractor = InputCapture()
+    model.cld_extractor = InputCapture()
     model.sar_common_extractor = InputCapture()
     model.cld_common_extractor = InputCapture()
 
     with torch.no_grad():
         model(torch.randn(1, 2, 1, 1), torch.randn(1, 13, 1, 1))
 
-    sar_norm = sar_feat * torch.rsqrt(
-        sar_feat.square().mean(dim=1, keepdim=True) + 1e-8
-    )
-    cld_norm = cld_feat * torch.rsqrt(
-        cld_feat.square().mean(dim=1, keepdim=True) + 1e-8
-    )
-    assert torch.allclose(
-        model.joint_extractor.input,
-        torch.cat((sar_norm, cld_norm), dim=1),
-    )
-    assert torch.allclose(model.sar_common_extractor.input, sar_feat + joint)
-    assert torch.allclose(model.cld_common_extractor.input, cld_feat + joint)
+    assert not hasattr(model, "joint_extractor")
+    assert not hasattr(model, "sar_joint_norm")
+    assert not hasattr(model, "cld_joint_norm")
+    assert torch.allclose(model.sar_extractor.input, sar_stem_feat)
+    assert torch.allclose(model.cld_extractor.input, cld_stem_feat)
+    assert torch.allclose(model.sar_common_extractor.input, sar_stem_feat)
+    assert torch.allclose(model.cld_common_extractor.input, cld_stem_feat)
+
+
+def test_extractor_stacks_same_dim_layers() -> None:
+    extractor = Extractor(
+        4,
+        dims=(4, 8),
+        layer_count=2,
+        num_layers=1,
+        heads=1,
+    ).eval()
+    extractor.layers = nn.ModuleList([AddFeatureDelta(1.0), AddFeatureDelta(2.0)])
+    feature = torch.zeros(1, 4, 2, 2)
+
+    with torch.no_grad():
+        actual = extractor(feature)
+
+    assert torch.allclose(actual, torch.full_like(feature, 3.0))
 
 
 def test_extractor_applies_blocks_only_on_top_down_levels() -> None:
     RecordingBlock.reset()
-    extractor = Extractor(
-        2,
+    extractor = ExtractorLayer(
+        8,
         dims=(8, 16, 32),
         num_layers=1,
         heads=4,
@@ -269,7 +294,7 @@ def test_extractor_applies_blocks_only_on_top_down_levels() -> None:
     extractor.up.blocks = nn.ModuleList([RecordingBlock(), RecordingBlock()])
 
     with torch.no_grad():
-        extractor(torch.randn(1, 2, 16, 16))
+        extractor(torch.randn(1, 8, 16, 16))
 
     assert RecordingBlock.call_shapes == [(32, (4, 4)), (16, (8, 8))]
 
@@ -277,8 +302,8 @@ def test_extractor_applies_blocks_only_on_top_down_levels() -> None:
 def test_extractor_uses_reconstruction_residual_skips() -> None:
     RecordingBlock.reset()
     ZeroRecon.reset()
-    extractor = Extractor(
-        2,
+    extractor = ExtractorLayer(
+        8,
         dims=(8, 16, 32),
         num_layers=1,
         heads=4,
@@ -289,7 +314,7 @@ def test_extractor_uses_reconstruction_residual_skips() -> None:
     )
 
     with torch.no_grad():
-        extractor(torch.randn(1, 2, 16, 16))
+        extractor(torch.randn(1, 8, 16, 16))
 
     assert ZeroRecon.recon_shapes == [
         (16, (8, 8), (16, 16)),
@@ -342,6 +367,9 @@ def test_fdt_cca_rejects_invalid_extractor_config() -> None:
 
     with pytest.raises(ValueError, match="divisible by heads"):
         FDT_CCA(dim=256, extractor_dims=(128, 258))
+
+    with pytest.raises(ValueError, match="feature_extractor_layers"):
+        FDT_CCA(feature_extractor_layers=0)
 
 
 def test_cca_mask_returns_per_band_intervention_mask() -> None:

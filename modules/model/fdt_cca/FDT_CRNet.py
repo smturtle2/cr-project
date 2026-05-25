@@ -17,6 +17,7 @@ class FDT_CRNet_CCA(nn.Module):
         out_channels=13,
         dim=256,
         fdt_layers=2,
+        feature_extractor_layers=2,
         cr_layers=16,
         num_heads=4,
         alpha=0.1,
@@ -40,6 +41,7 @@ class FDT_CRNet_CCA(nn.Module):
             num_heads=num_heads,
             num_layers=fdt_layers,
             extractor_dims=extractor_dims,
+            feature_extractor_layers=feature_extractor_layers,
         )
         self.component_channels = self.fdt.extractor_dims[0]
         crnet = CCA_CRNet(

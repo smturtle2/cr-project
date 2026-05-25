@@ -8,17 +8,6 @@ from ..fdt.fdt import CommonEncoder as FeatureEncoder
 from ..fdt.fdt import Residual3x3Block, ResizeConvUp
 
 
-class RMSNorm2d(nn.Module):
-    def __init__(self, eps: float = 1e-8):
-        super().__init__()
-        self.eps = eps
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        rms = x.float().square().mean(dim=1, keepdim=True)
-        scale = torch.rsqrt(rms + self.eps).to(dtype=x.dtype)
-        return x * scale
-
-
 def _validate_extractor_dims(
     dims: tuple[int, ...] | list[int],
     heads: int,
@@ -60,6 +49,58 @@ def _conv_block(
         ),
         nn.GELU(),
     )
+
+
+class SarStem(nn.Module):
+    def __init__(
+        self,
+        in_channels: int,
+        dim: int,
+        blocks: int = 2,
+    ):
+        super().__init__()
+        if blocks < 0:
+            raise ValueError("blocks must be non-negative")
+
+        self.proj = nn.Sequential(
+            nn.Conv2d(
+                in_channels,
+                dim,
+                kernel_size=3,
+                padding=1,
+                padding_mode="replicate",
+            ),
+            nn.GELU(),
+        )
+        self.blocks = nn.Sequential(*[Residual3x3Block(dim) for _ in range(blocks)])
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.blocks(self.proj(x))
+
+
+class CloudyStem(nn.Module):
+    def __init__(
+        self,
+        in_channels: int,
+        dim: int,
+        blocks: int = 2,
+    ):
+        super().__init__()
+        if blocks < 0:
+            raise ValueError("blocks must be non-negative")
+
+        self.proj = nn.Sequential(
+            nn.Conv2d(
+                in_channels,
+                dim,
+                kernel_size=1,
+            ),
+            nn.GELU(),
+        )
+        self.blocks = nn.Sequential(*[Residual3x3Block(dim) for _ in range(blocks)])
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.blocks(self.proj(x))
 
 
 class ResizeProjectUp(nn.Module):
@@ -149,10 +190,10 @@ class UpLevels(nn.Module):
         return x
 
 
-class Extractor(nn.Module):
+class ExtractorLayer(nn.Module):
     def __init__(
         self,
-        in_channels: int,
+        dim: int,
         dims: tuple[int, ...] | list[int] = (128, 256, 512),
         num_layers: int = 2,
         heads: int = 4,
@@ -162,17 +203,59 @@ class Extractor(nn.Module):
             raise ValueError("num_layers must be greater than zero")
 
         dims = _validate_extractor_dims(dims, heads)
+        if dims[0] != dim:
+            raise ValueError("dim must match extractor_dims[0]")
+
+        self.dim = dim
         self.dims = dims
         self.num_levels = len(dims)
 
-        self.down = DownLevels(in_channels, dims)
+        self.down = DownLevels(dim, dims)
         self.up = UpLevels(dims, num_layers, heads)
-        self.out = Residual3x3Block(dims[0])
+        self.out = Residual3x3Block(dim)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         levels = self.down(x)
         x = self.up(levels)
         return self.out(x)
+
+
+class Extractor(nn.Module):
+    def __init__(
+        self,
+        dim: int,
+        dims: tuple[int, ...] | list[int] = (128, 256, 512),
+        layer_count: int = 1,
+        num_layers: int = 2,
+        heads: int = 4,
+    ):
+        super().__init__()
+        if layer_count <= 0:
+            raise ValueError("layer_count must be greater than zero")
+
+        dims = _validate_extractor_dims(dims, heads)
+        if dims[0] != dim:
+            raise ValueError("dim must match extractor_dims[0]")
+
+        self.dim = dim
+        self.dims = dims
+        self.layer_count = layer_count
+        self.layers = nn.ModuleList(
+            [
+                ExtractorLayer(
+                    dim,
+                    dims=dims,
+                    num_layers=num_layers,
+                    heads=heads,
+                )
+                for _ in range(layer_count)
+            ]
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        for layer in self.layers:
+            x = layer(x)
+        return x
 
 
 class ResizeConvUpHalf(ResizeConvUp):
@@ -192,8 +275,9 @@ class FDT_CCA(nn.Module):
         sar_channels=2,
         cloudy_channels=13,
         dim=256,
-        num_layers=2,
-        num_heads=4,
+        num_layers: int = 2,
+        feature_extractor_layers: int = 2,
+        num_heads: int = 4,
         extractor_dims: tuple[int, ...] | list[int] = (128, 256, 512),
     ):
         super().__init__()
@@ -201,6 +285,8 @@ class FDT_CCA(nn.Module):
             raise ValueError("dim must be divisible by num_heads")
         if num_layers <= 0:
             raise ValueError("num_layers must be greater than zero")
+        if feature_extractor_layers <= 0:
+            raise ValueError("feature_extractor_layers must be greater than zero")
 
         extractor_dims = _validate_extractor_dims(extractor_dims, num_heads)
         if extractor_dims[0] * 2 != dim:
@@ -213,28 +299,25 @@ class FDT_CCA(nn.Module):
         self.heads = num_heads
         self.num_heads = num_heads
         self.extractor_dims = extractor_dims
+        self.feature_extractor_layers = feature_extractor_layers
         self.up_dim = extractor_dims[0]
         self.common_dim = extractor_dims[0]
+        self.sar_stem = SarStem(sar_channels, self.up_dim)
+        self.cld_stem = CloudyStem(cloudy_channels, self.up_dim)
         self.sar_extractor = Extractor(
-            sar_channels,
+            self.up_dim,
             dims=extractor_dims,
+            layer_count=feature_extractor_layers,
             num_layers=num_layers,
             heads=num_heads,
         )
         self.cld_extractor = Extractor(
-            cloudy_channels,
+            self.up_dim,
             dims=extractor_dims,
+            layer_count=feature_extractor_layers,
             num_layers=num_layers,
             heads=num_heads,
         )
-        self.joint_extractor = Extractor(
-            self.up_dim * 2,
-            dims=extractor_dims,
-            num_layers=num_layers,
-            heads=num_heads,
-        )
-        self.sar_joint_norm = RMSNorm2d()
-        self.cld_joint_norm = RMSNorm2d()
         self.sar_common_extractor = Extractor(
             self.up_dim,
             dims=extractor_dims,
@@ -251,17 +334,8 @@ class FDT_CCA(nn.Module):
 
     def forward(self, sar: torch.Tensor, cloudy: torch.Tensor):
         # feature extraction
-        sar_feat = self.sar_extractor(sar)
-        cld_feat = self.cld_extractor(cloudy)
-
-        # joint feature extraction
-        joint_input = torch.cat(
-            (self.sar_joint_norm(sar_feat), self.cld_joint_norm(cld_feat)),
-            dim=1,
-        )
-        joint = self.joint_extractor(joint_input)
-        sar_feat = sar_feat + joint
-        cld_feat = cld_feat + joint
+        sar_feat = self.sar_extractor(self.sar_stem(sar))
+        cld_feat = self.cld_extractor(self.cld_stem(cloudy))
 
         # common and complementary extraction
         sar_com = self.sar_common_extractor(sar_feat)
