@@ -53,7 +53,7 @@ class FeatureUncorrelationLoss(nn.Module):
         super().__init__()
         self.eps = eps
 
-    def _centered_corr(
+    def _centered_corr_square(
         self,
         first: torch.Tensor,
         second: torch.Tensor,
@@ -63,26 +63,26 @@ class FeatureUncorrelationLoss(nn.Module):
         first = first - first.mean(dim=dim, keepdim=True)
         second = second - second.mean(dim=dim, keepdim=True)
         covariance = (first * second).mean(dim=dim)
-        first_std = first.square().mean(dim=dim).sqrt()
-        second_std = second.square().mean(dim=dim).sqrt()
-        return covariance / (first_std * second_std + self.eps)
+        first_var = first.square().mean(dim=dim)
+        second_var = second.square().mean(dim=dim)
+        return covariance.square() / ((first_var + self.eps) * (second_var + self.eps))
 
     def forward(self, first: torch.Tensor, second: torch.Tensor) -> torch.Tensor:
         _check_same_shape(first, second)
         with torch.autocast(device_type=first.device.type, enabled=False):
             first = first.float()
             second = second.float()
-            channel_corr = self._centered_corr(
+            channel_loss = self._centered_corr_square(
                 first.flatten(2).transpose(1, 2),
                 second.flatten(2).transpose(1, 2),
                 dim=-1,
             )
-            spatial_corr = self._centered_corr(
+            spatial_loss = self._centered_corr_square(
                 first.flatten(2),
                 second.flatten(2),
                 dim=-1,
             )
-            return channel_corr.square().mean() + spatial_corr.square().mean()
+            return channel_loss.mean() + spatial_loss.mean()
 
 
 class FDTDecompositionLoss(nn.Module):
