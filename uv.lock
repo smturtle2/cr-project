@@ -167,7 +167,7 @@ provides-extras = ["torch26", "latest"]
 [[package]]
 name = "cr-train"
 version = "0.1.0"
-source = { git = "https://github.com/smturtle2/cr-train.git#8027899c796e31a2fc6ad7cc7060351f26f96a45" }
+source = { git = "https://github.com/smturtle2/cr-train.git#b21a9d023cb14b3f59a789c93ae4b8e58da8c323" }
 dependencies = [
     { name = "huggingface-hub" },
     { name = "numpy" },
