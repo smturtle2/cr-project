@@ -7,24 +7,23 @@ from typing import Any
 import numpy as np
 import torch
 
-TSNE_GROUPS = ("SAR Com", "Cloudy Com", "SAR Comp", "Cloudy Comp")
+TSNE_GROUPS = ("SAR Feat", "Cloudy Com", "Cloudy Comp")
 TSNE_GROUP_COLORS = {
-    "SAR Com": "#2563eb",
+    "SAR Feat": "#2563eb",
     "Cloudy Com": "#06b6d4",
-    "SAR Comp": "#dc2626",
     "Cloudy Comp": "#f97316",
 }
 
 
 def split_fdt_output(
     model_output: Any,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-    if not isinstance(model_output, tuple) or len(model_output) != 5:
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    if not isinstance(model_output, tuple) or len(model_output) != 4:
         raise TypeError(
-            "FDT_CRNet must return prediction and four decomposition tensors"
+            "FDT_CRNet must return prediction and three decomposition tensors"
         )
-    prediction, sar_com, cld_com, sar_comp, cld_comp = model_output
-    return prediction, sar_com, cld_com, sar_comp, cld_comp
+    prediction, sar_feat, cld_com, cld_comp = model_output
+    return prediction, sar_feat, cld_com, cld_comp
 
 
 def prediction_from_fdt_output(model_output: Any) -> torch.Tensor:
@@ -147,28 +146,26 @@ def build_fdt_example_panels(
     ],
     normalize_map: Callable[[torch.Tensor], np.ndarray],
 ):
-    _, sar_com, cld_com, sar_comp, cld_comp = split_fdt_output(model_output)
-    sar_feat = sar_com + sar_comp
+    _, sar_feat, cld_com, cld_comp = split_fdt_output(model_output)
     cld_feat = cld_com + cld_comp
     sar_feat_pca, cld_feat_pca = _pca_heatmaps(sar_feat, cld_feat)
-    sar_com_pc1, cld_com_pc1 = _joint_pc1_maps(sar_com, cld_com)
-    sar_com_pca, cld_com_pca = _normalize_paired_maps(sar_com_pc1, cld_com_pc1)
-    sar_comp_pc1, cld_comp_pc1 = _joint_pc1_maps(sar_comp, cld_comp)
-    sar_comp_pca, cld_comp_pca = _normalize_paired_maps(sar_comp_pc1, cld_comp_pc1)
-    common_channel_score, common_spatial_score, common_channel_map = (
-        _axis_ccc_diagnostics(sar_com, cld_com)
+    _, cld_com_pca = _pca_heatmaps(sar_feat, cld_com)
+    _, cld_comp_pca = _pca_heatmaps(cld_com, cld_comp)
+    common_channel_score, common_spatial_score, common_channel_map = _axis_ccc_diagnostics(
+        sar_feat,
+        cld_com,
     )
     common_match = np.clip((common_channel_map + 1.0) / 2.0, 0.0, 1.0)
-    comp_channel_score, comp_spatial_score, comp_channel_map = _axis_ccc_diagnostics(
-        sar_comp,
+    split_channel_score, split_spatial_score, split_channel_map = _axis_ccc_diagnostics(
+        cld_com,
         cld_comp,
     )
-    comp_leak = np.clip(np.abs(comp_channel_map), 0.0, 1.0)
+    split_leak = np.clip(np.abs(split_channel_map), 0.0, 1.0)
     common_title = (
-        f"COM MATCH | {common_channel_score:+.2f} | {common_spatial_score:+.2f}"
+        f"SHARED MATCH | {common_channel_score:+.2f} | {common_spatial_score:+.2f}"
     )
-    comp_title = (
-        f"COMP LEAK | {comp_channel_score:+.2f} | {comp_spatial_score:+.2f}"
+    split_title = (
+        f"COM/COMP LEAK | {split_channel_score:+.2f} | {split_spatial_score:+.2f}"
     )
     cloudy_rgb, prediction_rgb, target_rgb = normalize_rgb_triplet(
         cloudy,
@@ -182,12 +179,12 @@ def build_fdt_example_panels(
         ("SAR Mean", normalize_map(sar.mean(dim=0)), "gray"),
         (common_title, common_match, "viridis", 0.0, 1.0),
         ("SAR Feat PCA", sar_feat_pca, "viridis"),
-        ("SAR Com PCA", sar_com_pca, "viridis"),
-        ("SAR Comp PCA", sar_comp_pca, "viridis"),
-        (comp_title, comp_leak, "magma", 0.0, 1.0),
         ("Cloudy Feat PCA", cld_feat_pca, "viridis"),
         ("Cloudy Com PCA", cld_com_pca, "viridis"),
+        (split_title, split_leak, "magma", 0.0, 1.0),
         ("Cloudy Comp PCA", cld_comp_pca, "viridis"),
+        ("Cloudy Com Energy", normalize_map(cld_com.abs().mean(dim=0)), "magma"),
+        ("Cloudy Comp Energy", normalize_map(cld_comp.abs().mean(dim=0)), "magma"),
     )
 
 
@@ -204,19 +201,17 @@ def _sample_feature_points(
 def _append_tsne_sample_points(
     grouped_features: dict[str, list[np.ndarray]],
     *,
-    sar_com: torch.Tensor,
+    sar_feat: torch.Tensor,
     cld_com: torch.Tensor,
-    sar_comp: torch.Tensor,
     cld_comp: torch.Tensor,
     rng: np.random.Generator,
     points_per_sample: int,
 ) -> None:
-    num_positions = sar_com.shape[-2] * sar_com.shape[-1]
+    num_positions = sar_feat.shape[-2] * sar_feat.shape[-1]
     point_count = min(points_per_sample, num_positions)
     indices = rng.choice(num_positions, size=point_count, replace=False)
-    grouped_features["SAR Com"].append(_sample_feature_points(sar_com, indices))
+    grouped_features["SAR Feat"].append(_sample_feature_points(sar_feat, indices))
     grouped_features["Cloudy Com"].append(_sample_feature_points(cld_com, indices))
-    grouped_features["SAR Comp"].append(_sample_feature_points(sar_comp, indices))
     grouped_features["Cloudy Comp"].append(_sample_feature_points(cld_comp, indices))
 
 
@@ -279,20 +274,18 @@ def _collect_tsne_features(
                 model_output = predict_fn(batch)
                 (
                     _,
-                    sar_com,
+                    sar_feat,
                     cld_com,
-                    sar_comp,
                     cld_comp,
                 ) = split_fdt_output(model_output)
-                batch_size = sar_com.shape[0]
+                batch_size = sar_feat.shape[0]
                 for batch_index in range(batch_size):
                     if samples_seen >= sample_count:
                         break
                     _append_tsne_sample_points(
                         grouped_features,
-                        sar_com=sar_com[batch_index],
+                        sar_feat=sar_feat[batch_index],
                         cld_com=cld_com[batch_index],
-                        sar_comp=sar_comp[batch_index],
                         cld_comp=cld_comp[batch_index],
                         rng=rng,
                         points_per_sample=points_per_sample,
@@ -467,8 +460,8 @@ def _save_tsne_scatter_figure(
     _plot_tsne_panel(
         axes[1],
         grouped_embedding,
-        labels=("SAR Com", "Cloudy Com"),
-        title="Com Only",
+        labels=("SAR Feat", "Cloudy Com"),
+        title="Shared",
         x_limits=x_limits,
         y_limits=y_limits,
         rng=rng,
@@ -478,8 +471,8 @@ def _save_tsne_scatter_figure(
     _plot_tsne_panel(
         axes[2],
         grouped_embedding,
-        labels=("SAR Comp", "Cloudy Comp"),
-        title="Comp Only",
+        labels=("Cloudy Com", "Cloudy Comp"),
+        title="Cloudy Split",
         x_limits=x_limits,
         y_limits=y_limits,
         rng=rng,

@@ -90,7 +90,6 @@ class MainVisualizationTest(unittest.TestCase):
             feature,
             feature.roll(shifts=1, dims=-1),
             torch.randn(8, 4, 4),
-            torch.randn(8, 4, 4),
         )
 
         panels = build_fdt_example_panels(
@@ -107,7 +106,7 @@ class MainVisualizationTest(unittest.TestCase):
 
         self.assertRegex(
             common_panel[0],
-            r"^COM MATCH \| [+-]\d+\.\d{2} \| [+-]\d+\.\d{2}$",
+            r"^SHARED MATCH \| [+-]\d+\.\d{2} \| [+-]\d+\.\d{2}$",
         )
         self.assertNotIn("Ch", common_panel[0])
         self.assertNotIn("Sp", common_panel[0])
@@ -115,7 +114,7 @@ class MainVisualizationTest(unittest.TestCase):
         self.assertTrue(np.isfinite(common_panel[1]).all())
         self.assertRegex(
             comp_panel[0],
-            r"^COMP LEAK \| [+-]\d+\.\d{2} \| [+-]\d+\.\d{2}$",
+            r"^COM/COMP LEAK \| [+-]\d+\.\d{2} \| [+-]\d+\.\d{2}$",
         )
         self.assertNotIn("Ch", comp_panel[0])
         self.assertNotIn("Sp", comp_panel[0])
@@ -133,7 +132,7 @@ class MainVisualizationTest(unittest.TestCase):
         def predict_fn(batch):
             value = float(batch["value"])
             feature = torch.full((1, 2, 2, 2), value)
-            return feature, feature, feature + 1.0, feature + 2.0, feature + 3.0
+            return feature, feature + 1.0, feature + 2.0, feature + 3.0
 
         dataloader = [{"value": 1.0}, {"value": 2.0}]
 
@@ -158,7 +157,7 @@ class MainVisualizationTest(unittest.TestCase):
         self.assertEqual(captured["kwargs"]["title"], "test")
         self.assertEqual(
             set(captured["features"]),
-            {"SAR Com", "Cloudy Com", "SAR Comp", "Cloudy Comp"},
+            {"SAR Feat", "Cloudy Com", "Cloudy Comp"},
         )
         for features in captured["features"].values():
             self.assertEqual(features.shape, (8, 2))

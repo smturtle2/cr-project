@@ -301,7 +301,6 @@ class FDT_CCA(nn.Module):
         self.extractor_dims = extractor_dims
         self.feature_extractor_layers = feature_extractor_layers
         self.up_dim = extractor_dims[0]
-        self.common_dim = extractor_dims[0]
         self.sar_stem = SarStem(sar_channels, self.up_dim)
         self.cld_stem = CloudyStem(cloudy_channels, self.up_dim)
         self.sar_extractor = Extractor(
@@ -318,39 +317,27 @@ class FDT_CCA(nn.Module):
             num_layers=num_layers,
             heads=num_heads,
         )
-        self.sar_common_extractor = Extractor(
-            self.up_dim,
-            dims=extractor_dims,
-            num_layers=num_layers,
-            heads=num_heads,
-        )
         self.cld_common_extractor = Extractor(
             self.up_dim,
             dims=extractor_dims,
             num_layers=num_layers,
             heads=num_heads,
         )
-        self.com_fuse = nn.Conv2d(self.up_dim * 2, self.common_dim, kernel_size=1)
 
     def forward(self, sar: torch.Tensor, cloudy: torch.Tensor):
         # feature extraction
         sar_feat = self.sar_extractor(self.sar_stem(sar))
         cld_feat = self.cld_extractor(self.cld_stem(cloudy))
 
-        # common and complementary extraction
-        sar_com = self.sar_common_extractor(sar_feat)
+        # Cloudy-only decomposition. SAR stays as the shared scene reference.
         cld_com = self.cld_common_extractor(cld_feat)
-        sar_comp = sar_feat - sar_com
         cld_comp = cld_feat - cld_com
 
-        # fusion and output
-        com_fused = self.com_fuse(torch.cat((sar_com, cld_com), dim=1))
-        output = torch.cat((com_fused, sar_comp), dim=1)
+        output = torch.cat((sar_feat, cld_com), dim=1)
 
         return (
             output,
-            sar_com,
+            sar_feat,
             cld_com,
-            sar_comp,
             cld_comp,
         )

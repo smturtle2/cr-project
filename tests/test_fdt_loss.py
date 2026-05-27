@@ -87,16 +87,15 @@ class FDTDecompositionLossTest(unittest.TestCase):
 
     def test_backward_is_finite(self) -> None:
         loss_fn = FDTDecompositionLoss(num_projections=32)
-        sar_com = torch.randn(2, 16, 16, 16, requires_grad=True)
+        sar_feat = torch.randn(2, 16, 16, 16, requires_grad=True)
         cld_com = torch.randn(2, 16, 16, 16, requires_grad=True)
-        sar_comp = torch.randn(2, 16, 16, 16, requires_grad=True)
         cld_comp = torch.randn(2, 16, 16, 16, requires_grad=True)
 
-        loss = loss_fn(sar_com, cld_com, sar_comp, cld_comp)
+        loss = loss_fn(sar_feat, cld_com, cld_comp)
         loss.backward()
 
         self.assertTrue(bool(torch.isfinite(loss).item()))
-        for feature in (sar_com, cld_com, sar_comp, cld_comp):
+        for feature in (sar_feat, cld_com, cld_comp):
             self.assertIsNotNone(feature.grad)
             self.assertTrue(bool(torch.isfinite(feature.grad).all().item()))
 

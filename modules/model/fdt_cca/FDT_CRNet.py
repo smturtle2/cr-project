@@ -58,12 +58,11 @@ class FDT_CRNet_CCA(nn.Module):
     def forward(self, sar: torch.Tensor, cloudy: torch.Tensor):
         (
             fdt_feature,
-            sar_com,
+            sar_feat,
             cld_com,
-            sar_comp,
             cld_comp,
         ) = self.fdt(sar, cloudy)
         prediction = self.crnet(fdt_feature, cld_comp, cloudy)
         if self.return_decomposition:
-            return prediction, sar_com, cld_com, sar_comp, cld_comp
+            return prediction, sar_feat, cld_com, cld_comp
         return prediction

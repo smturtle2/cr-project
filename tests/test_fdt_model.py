@@ -169,7 +169,7 @@ def test_resize_conv_up_returns_expected_feature_shape() -> None:
     assert bool(torch.isfinite(actual).all().item())
 
 
-def test_fdt_cca_returns_full_resolution_cloudy_component_only() -> None:
+def test_fdt_cca_returns_full_resolution_sar_feature_and_cloudy_components() -> None:
     model = FDT_CCA(num_layers=1, num_heads=4).eval()
     sar = torch.randn(1, 2, 16, 16)
     cloudy = torch.randn(1, 13, 16, 16)
@@ -181,7 +181,7 @@ def test_fdt_cca_returns_full_resolution_cloudy_component_only() -> None:
     with torch.no_grad():
         outputs = model(sar, cloudy)
 
-    assert len(outputs) == 5
+    assert len(outputs) == 4
     assert outputs[0].shape == (1, 256, 16, 16)
     for output in outputs[1:]:
         assert output.shape == (1, 128, 16, 16)
@@ -229,12 +229,12 @@ def test_extractor_accepts_feature_inputs_for_common() -> None:
     cld_feat = torch.randn(1, 128, 16, 16)
 
     with torch.no_grad():
-        sar_com = extractor(sar_feat)
+        sar_feature = extractor(sar_feat)
         cld_com = extractor(cld_feat)
 
-    assert sar_com.shape == sar_feat.shape
+    assert sar_feature.shape == sar_feat.shape
     assert cld_com.shape == cld_feat.shape
-    assert bool(torch.isfinite(sar_com).all().item())
+    assert bool(torch.isfinite(sar_feature).all().item())
     assert bool(torch.isfinite(cld_com).all().item())
 
 
@@ -251,19 +251,20 @@ def test_fdt_cca_uses_stem_features_without_joint_extractor() -> None:
     model.cld_stem = FixedFeature(cld_stem_feat)
     model.sar_extractor = InputCapture()
     model.cld_extractor = InputCapture()
-    model.sar_common_extractor = InputCapture()
     model.cld_common_extractor = InputCapture()
 
     with torch.no_grad():
-        model(torch.randn(1, 2, 1, 1), torch.randn(1, 13, 1, 1))
+        outputs = model(torch.randn(1, 2, 1, 1), torch.randn(1, 13, 1, 1))
 
     assert not hasattr(model, "joint_extractor")
     assert not hasattr(model, "sar_joint_norm")
     assert not hasattr(model, "cld_joint_norm")
+    assert not hasattr(model, "sar_common_extractor")
+    assert not hasattr(model, "com_fuse")
     assert torch.allclose(model.sar_extractor.input, sar_stem_feat)
     assert torch.allclose(model.cld_extractor.input, cld_stem_feat)
-    assert torch.allclose(model.sar_common_extractor.input, sar_stem_feat)
     assert torch.allclose(model.cld_common_extractor.input, cld_stem_feat)
+    assert torch.allclose(outputs[0], torch.cat((sar_stem_feat, cld_stem_feat), dim=1))
 
 
 def test_extractor_stacks_same_dim_layers() -> None:
@@ -455,6 +456,21 @@ def test_fdt_crnet_cca_imports_and_runs_forward() -> None:
 
     assert prediction.shape == cloudy.shape
     assert prediction.dtype == cloudy.dtype
+
+
+def test_fdt_crnet_cca_returns_new_decomposition_contract() -> None:
+    model = FDT_CRNet_CCA(fdt_layers=1, cr_layers=1, return_decomposition=True).eval()
+    sar = torch.randn(1, 2, 16, 16)
+    cloudy = torch.randn(1, 13, 16, 16)
+
+    with torch.no_grad():
+        outputs = model(sar, cloudy)
+
+    assert len(outputs) == 4
+    prediction, sar_feat, cld_com, cld_comp = outputs
+    assert prediction.shape == cloudy.shape
+    for feature in (sar_feat, cld_com, cld_comp):
+        assert feature.shape == (1, 128, 16, 16)
 
 
 def test_fdt_crnet_side_imports_and_runs_forward() -> None:

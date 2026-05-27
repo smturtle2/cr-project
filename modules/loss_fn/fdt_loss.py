@@ -101,11 +101,10 @@ class FDTDecompositionLoss(nn.Module):
 
     def forward(
         self,
-        sar_com: torch.Tensor,
+        sar_feat: torch.Tensor,
         cld_com: torch.Tensor,
-        sar_comp: torch.Tensor,
         cld_comp: torch.Tensor,
     ) -> torch.Tensor:
-        common_loss = self.common_loss(sar_com, cld_com)
-        comp_loss = self.comp_loss(sar_comp, cld_comp)
+        common_loss = self.common_loss(sar_feat, cld_com)
+        comp_loss = self.comp_loss(cld_com, cld_comp)
         return common_loss + comp_loss
