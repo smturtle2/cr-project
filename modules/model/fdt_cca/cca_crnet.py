@@ -8,17 +8,28 @@ from ..fdt.fdt import Residual3x3Block
 
 
 class CCAMask(nn.Module):
-    def __init__(self, comp_channels: int, mask_channels: int):
+    def __init__(
+        self,
+        cloud_channels: int,
+        mask_channels: int,
+        mask_bias_init: float = -2.0,
+    ):
         super().__init__()
-        self.net = nn.Sequential(
-            Residual3x3Block(comp_channels),
-            Residual3x3Block(comp_channels),
-            nn.Conv2d(comp_channels, mask_channels, kernel_size=1),
-            nn.Sigmoid(),
+        self.mask_bias_init = mask_bias_init
+        self.body = nn.Sequential(
+            Residual3x3Block(cloud_channels),
+            Residual3x3Block(cloud_channels),
         )
+        self.mask_head = nn.Conv2d(cloud_channels, mask_channels, kernel_size=1)
+        self.activation = nn.Sigmoid()
+        self.reset_parameters()
 
-    def forward(self, cld_comp: torch.Tensor) -> torch.Tensor:
-        return self.net(cld_comp)
+    def reset_parameters(self) -> None:
+        nn.init.zeros_(self.mask_head.weight)
+        nn.init.constant_(self.mask_head.bias, self.mask_bias_init)
+
+    def forward(self, cld_cloud: torch.Tensor) -> torch.Tensor:
+        return self.activation(self.mask_head(self.body(cld_cloud)))
 
 
 class CCA_CRNet(ACA_CRNet):
@@ -28,7 +39,7 @@ class CCA_CRNet(ACA_CRNet):
         alpha: float = 0.1,
         num_layers: int = 16,
         feature_sizes: int = 256,
-        comp_channels: int | None = None,
+        cloud_channels: int | None = None,
         cca_layers: int = 1,
         num_heads: int = 4,
         ca=DefaultConAttn,
@@ -45,7 +56,7 @@ class CCA_CRNet(ACA_CRNet):
             ca_kwargs=ca_kwargs,
             mode="direct",
         )
-        comp_channels = feature_sizes // 2 if comp_channels is None else comp_channels
+        cloud_channels = feature_sizes // 2 if cloud_channels is None else cloud_channels
         low_head = self.net[-1]
         self.net = nn.ModuleList(self.net[:-1])
         self.low_head = low_head
@@ -60,14 +71,16 @@ class CCA_CRNet(ACA_CRNet):
             stride=1,
             padding=1,
         )
-        self.cca = CCAMask(comp_channels, out_channels)
+        self.cca = CCAMask(cloud_channels, out_channels)
 
     def forward(
         self,
         feature: torch.Tensor,
-        cld_comp: torch.Tensor,
+        cld_cloud: torch.Tensor,
         cloudy: torch.Tensor,
-    ) -> torch.Tensor:
+        *,
+        return_candidate: bool = False,
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         z = feature
         for layer in self.net:
             z = layer(z)
@@ -76,5 +89,8 @@ class CCA_CRNet(ACA_CRNet):
         high_z = self.high_refine(z)
         high = self.high_head(high_z - z)
         candidate = low + high
-        mask = self.cca(cld_comp)
-        return cloudy * (1.0 - mask) + candidate * mask
+        mask = self.cca(cld_cloud)
+        prediction = cloudy * (1.0 - mask) + candidate * mask
+        if return_candidate:
+            return prediction, candidate
+        return prediction

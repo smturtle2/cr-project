@@ -86,25 +86,14 @@ class FeatureUncorrelationLoss(nn.Module):
 
 
 class FDTDecompositionLoss(nn.Module):
-    def __init__(
-        self,
-        *,
-        num_projections: int = 128,
-        eps: float = 1e-7,
-    ) -> None:
+    def __init__(self) -> None:
         super().__init__()
-        self.common_loss = PatchSlicedWassersteinLoss(
-            num_projections=num_projections,
-            eps=eps,
-        )
-        self.comp_loss = FeatureUncorrelationLoss(eps=eps)
+        self.candidate_loss = nn.L1Loss()
 
     def forward(
         self,
-        sar_feat: torch.Tensor,
-        cld_com: torch.Tensor,
-        cld_comp: torch.Tensor,
+        candidate: torch.Tensor,
+        target: torch.Tensor,
     ) -> torch.Tensor:
-        common_loss = self.common_loss(sar_feat, cld_com)
-        comp_loss = self.comp_loss(cld_com, cld_comp)
-        return common_loss + comp_loss
+        _check_same_shape(candidate, target)
+        return self.candidate_loss(candidate, target)

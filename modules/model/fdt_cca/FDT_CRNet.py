@@ -17,7 +17,7 @@ class FDT_CRNet_CCA(nn.Module):
         out_channels=13,
         dim=256,
         fdt_layers=2,
-        feature_extractor_layers=2,
+        feature_extractor_layers=1,
         cr_layers=16,
         num_heads=4,
         alpha=0.1,
@@ -43,26 +43,32 @@ class FDT_CRNet_CCA(nn.Module):
             extractor_dims=extractor_dims,
             feature_extractor_layers=feature_extractor_layers,
         )
-        self.component_channels = self.fdt.extractor_dims[0]
+        self.cloud_channels = self.fdt.extractor_dims[0]
         crnet = CCA_CRNet(
             out_channels=out_channels,
             alpha=alpha,
             num_layers=cr_layers,
             feature_sizes=self.fdt.dim,
-            comp_channels=self.component_channels,
+            cloud_channels=self.cloud_channels,
             ca=ca,
             ca_kwargs=ca_kwargs,
         )
         self.crnet = init_net(crnet, init_type=init_type)
+        self.crnet.cca.reset_parameters()
 
     def forward(self, sar: torch.Tensor, cloudy: torch.Tensor):
         (
             fdt_feature,
             sar_feat,
-            cld_com,
-            cld_comp,
+            cld_clear,
+            cld_cloud,
         ) = self.fdt(sar, cloudy)
-        prediction = self.crnet(fdt_feature, cld_comp, cloudy)
+        prediction, candidate = self.crnet(
+            fdt_feature,
+            cld_cloud,
+            cloudy,
+            return_candidate=True,
+        )
         if self.return_decomposition:
-            return prediction, sar_feat, cld_com, cld_comp
+            return prediction, candidate, sar_feat, cld_clear, cld_cloud
         return prediction

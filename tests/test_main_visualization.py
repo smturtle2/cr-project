@@ -87,6 +87,7 @@ class MainVisualizationTest(unittest.TestCase):
         feature = torch.randn(8, 4, 4)
         model_output = (
             torch.zeros(13, 4, 4),
+            torch.zeros(13, 4, 4),
             feature,
             feature.roll(shifts=1, dims=-1),
             torch.randn(8, 4, 4),
@@ -101,25 +102,25 @@ class MainVisualizationTest(unittest.TestCase):
             normalize_rgb_triplet=normalize_triplet,
             normalize_map=normalize_map,
         )
-        common_panel = panels[4]
-        comp_panel = panels[8]
+        shared_panel = panels[4]
+        split_panel = panels[5]
 
         self.assertRegex(
-            common_panel[0],
+            shared_panel[0],
             r"^SHARED MATCH \| [+-]\d+\.\d{2} \| [+-]\d+\.\d{2}$",
         )
-        self.assertNotIn("Ch", common_panel[0])
-        self.assertNotIn("Sp", common_panel[0])
-        self.assertEqual(common_panel[2:], ("viridis", 0.0, 1.0))
-        self.assertTrue(np.isfinite(common_panel[1]).all())
+        self.assertNotIn("Ch", shared_panel[0])
+        self.assertNotIn("Sp", shared_panel[0])
+        self.assertEqual(shared_panel[2:], ("viridis", 0.0, 1.0))
+        self.assertTrue(np.isfinite(shared_panel[1]).all())
         self.assertRegex(
-            comp_panel[0],
-            r"^COM/COMP LEAK \| [+-]\d+\.\d{2} \| [+-]\d+\.\d{2}$",
+            split_panel[0],
+            r"^CLEAR/CLOUD LEAK \| [+-]\d+\.\d{2} \| [+-]\d+\.\d{2}$",
         )
-        self.assertNotIn("Ch", comp_panel[0])
-        self.assertNotIn("Sp", comp_panel[0])
-        self.assertEqual(comp_panel[2:], ("magma", 0.0, 1.0))
-        self.assertTrue(np.isfinite(comp_panel[1]).all())
+        self.assertNotIn("Ch", split_panel[0])
+        self.assertNotIn("Sp", split_panel[0])
+        self.assertEqual(split_panel[2:], ("magma", 0.0, 1.0))
+        self.assertTrue(np.isfinite(split_panel[1]).all())
 
     def test_fdt_tsne_scatter_uses_dataloader_and_predict_fn(self) -> None:
         captured = {}
@@ -132,7 +133,8 @@ class MainVisualizationTest(unittest.TestCase):
         def predict_fn(batch):
             value = float(batch["value"])
             feature = torch.full((1, 2, 2, 2), value)
-            return feature, feature + 1.0, feature + 2.0, feature + 3.0
+            candidate = torch.full((1, 13, 2, 2), value)
+            return feature, candidate, feature + 1.0, feature + 2.0, feature + 3.0
 
         dataloader = [{"value": 1.0}, {"value": 2.0}]
 
@@ -157,7 +159,7 @@ class MainVisualizationTest(unittest.TestCase):
         self.assertEqual(captured["kwargs"]["title"], "test")
         self.assertEqual(
             set(captured["features"]),
-            {"SAR Feat", "Cloudy Com", "Cloudy Comp"},
+            {"SAR Feat", "Cloudy Clear", "Cloudy Cloud"},
         )
         for features in captured["features"].values():
             self.assertEqual(features.shape, (8, 2))

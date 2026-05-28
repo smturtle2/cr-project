@@ -276,7 +276,7 @@ class FDT_CCA(nn.Module):
         cloudy_channels=13,
         dim=256,
         num_layers: int = 2,
-        feature_extractor_layers: int = 2,
+        feature_extractor_layers: int = 1,
         num_heads: int = 4,
         extractor_dims: tuple[int, ...] | list[int] = (128, 256, 512),
     ):
@@ -317,27 +317,45 @@ class FDT_CCA(nn.Module):
             num_layers=num_layers,
             heads=num_heads,
         )
-        self.cld_common_extractor = Extractor(
+        self.cld_clear_extractor = Extractor(
             self.up_dim,
             dims=extractor_dims,
             num_layers=num_layers,
             heads=num_heads,
         )
+        self.cld_clean_context = nn.Conv2d(
+            self.up_dim * 2,
+            self.up_dim,
+            kernel_size=1,
+        )
+        self._reset_cld_clean_context()
+
+    def _reset_cld_clean_context(self) -> None:
+        with torch.no_grad():
+            nn.init.zeros_(self.cld_clean_context.weight)
+            nn.init.zeros_(self.cld_clean_context.bias)
+            for channel in range(self.up_dim):
+                self.cld_clean_context.weight[
+                    channel, self.up_dim + channel, 0, 0
+                ] = 1.0
 
     def forward(self, sar: torch.Tensor, cloudy: torch.Tensor):
         # feature extraction
         sar_feat = self.sar_extractor(self.sar_stem(sar))
         cld_feat = self.cld_extractor(self.cld_stem(cloudy))
 
-        # Cloudy-only decomposition. SAR stays as the shared scene reference.
-        cld_com = self.cld_common_extractor(cld_feat)
-        cld_comp = cld_feat - cld_com
+        # Clean is SAR-conditioned; cloud is the residual left in cloudy feature space.
+        cld_clean_context = self.cld_clean_context(
+            torch.cat((sar_feat, cld_feat), dim=1)
+        )
+        cld_clear = self.cld_clear_extractor(cld_clean_context)
+        cld_cloud = cld_feat - cld_clear
 
-        output = torch.cat((sar_feat, cld_com), dim=1)
+        output = torch.cat((sar_feat, cld_clear), dim=1)
 
         return (
             output,
             sar_feat,
-            cld_com,
-            cld_comp,
+            cld_clear,
+            cld_cloud,
         )
