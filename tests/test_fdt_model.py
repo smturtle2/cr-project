@@ -405,7 +405,7 @@ def test_cca_mask_starts_with_small_uniform_mask() -> None:
     cld_cloud = torch.randn(2, 128, 16, 16)
     expected = torch.full(
         (2, 13, 16, 16),
-        torch.sigmoid(torch.tensor(-2.0)).item(),
+        torch.sigmoid(torch.tensor(-5.0)).item(),
     )
 
     with torch.no_grad():
@@ -419,7 +419,7 @@ def test_fdt_crnet_cca_keeps_small_mask_init_after_crnet_init() -> None:
     cld_cloud = torch.randn(2, model.cloud_channels, 16, 16)
     expected = torch.full(
         (2, 13, 16, 16),
-        torch.sigmoid(torch.tensor(-2.0)).item(),
+        torch.sigmoid(torch.tensor(-5.0)).item(),
     )
 
     with torch.no_grad():

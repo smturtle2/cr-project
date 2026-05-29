@@ -12,7 +12,7 @@ class CCAMask(nn.Module):
         self,
         cloud_channels: int,
         mask_channels: int,
-        mask_bias_init: float = -2.0,
+        mask_bias_init: float = -5.0,
     ):
         super().__init__()
         self.mask_bias_init = mask_bias_init
