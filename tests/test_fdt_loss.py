@@ -13,8 +13,13 @@ class FDTCCALossTest(unittest.TestCase):
     def setUp(self) -> None:
         torch.manual_seed(0)
 
-    def test_combines_prediction_ssim_and_candidate_losses(self) -> None:
-        loss_fn = FDTCCALoss(ssim_weight=0.5, candidate_loss_weight=0.1)
+    def test_combines_prediction_candidate_laplacian_and_sam_losses(self) -> None:
+        loss_fn = FDTCCALoss(
+            charbonnier_weight=1.0,
+            candidate_loss_weight=0.1,
+            laplacian_weight=0.05,
+            sam_weight=0.03,
+        )
         prediction = torch.randn(2, 13, 16, 16)
         candidate = torch.randn(2, 13, 16, 16)
         target = torch.randn(2, 13, 16, 16)
@@ -22,26 +27,29 @@ class FDTCCALossTest(unittest.TestCase):
 
         loss = loss_fn(model_output, target)
         expected = (
-            torch.mean(torch.abs(prediction - target))
-            + 0.5 * loss_fn.ssim_loss(prediction, target)
-            + 0.1 * torch.mean(torch.abs(candidate - target))
+            loss_fn.charbonnier_loss(prediction, target)
+            + 0.1 * loss_fn.candidate_loss(candidate, target)
+            + 0.05 * loss_fn.laplacian_loss(prediction, target)
+            + 0.03 * loss_fn.sam_loss(prediction, target)
         )
 
         self.assertTrue(torch.allclose(loss, expected))
 
     def test_accepts_prediction_tensor_when_candidate_loss_is_disabled(self) -> None:
-        loss_fn = FDTCCALoss(ssim_weight=0.5, candidate_loss_weight=0.0)
+        loss_fn = FDTCCALoss(candidate_loss_weight=0.0)
         prediction = torch.randn(2, 13, 16, 16)
         target = torch.randn(2, 13, 16, 16)
 
         loss = loss_fn(prediction, target)
-        expected = torch.mean(torch.abs(prediction - target)) + 0.5 * (
-            loss_fn.ssim_loss(prediction, target)
+        expected = (
+            loss_fn.charbonnier_loss(prediction, target)
+            + 0.05 * loss_fn.laplacian_loss(prediction, target)
+            + 0.03 * loss_fn.sam_loss(prediction, target)
         )
 
         self.assertTrue(torch.allclose(loss, expected))
 
-    def test_ssim_loss_stays_finite_for_large_bfloat16_inputs(self) -> None:
+    def test_loss_stays_finite_for_large_bfloat16_inputs(self) -> None:
         loss_fn = FDTCCALoss(candidate_loss_weight=0.0)
         prediction = (torch.randn(2, 13, 16, 16) * 1000.0).bfloat16()
         target = (torch.randn(2, 13, 16, 16) * 1000.0).bfloat16()
