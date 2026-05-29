@@ -13,12 +13,13 @@ class FDTCCALossTest(unittest.TestCase):
     def setUp(self) -> None:
         torch.manual_seed(0)
 
-    def test_combines_prediction_candidate_laplacian_and_sam_losses(self) -> None:
+    def test_combines_prediction_candidate_log_sam_and_ssim_losses(self) -> None:
         loss_fn = FDTCCALoss(
             charbonnier_weight=1.0,
             candidate_loss_weight=0.1,
-            laplacian_weight=0.05,
-            sam_weight=0.03,
+            log_weight=0.05,
+            sam_weight=0.02,
+            ssim_weight=0.1,
         )
         prediction = torch.randn(2, 13, 16, 16)
         candidate = torch.randn(2, 13, 16, 16)
@@ -29,8 +30,9 @@ class FDTCCALossTest(unittest.TestCase):
         expected = (
             loss_fn.charbonnier_loss(prediction, target)
             + 0.1 * loss_fn.candidate_loss(candidate, target)
-            + 0.05 * loss_fn.laplacian_loss(prediction, target)
-            + 0.03 * loss_fn.sam_loss(prediction, target)
+            + 0.05 * loss_fn.log_loss(prediction, target)
+            + 0.02 * loss_fn.sam_loss(prediction, target)
+            + 0.1 * loss_fn.ssim_loss(prediction, target)
         )
 
         self.assertTrue(torch.allclose(loss, expected))
@@ -43,11 +45,17 @@ class FDTCCALossTest(unittest.TestCase):
         loss = loss_fn(prediction, target)
         expected = (
             loss_fn.charbonnier_loss(prediction, target)
-            + 0.05 * loss_fn.laplacian_loss(prediction, target)
-            + 0.03 * loss_fn.sam_loss(prediction, target)
+            + 0.05 * loss_fn.log_loss(prediction, target)
+            + 0.02 * loss_fn.sam_loss(prediction, target)
+            + 0.1 * loss_fn.ssim_loss(prediction, target)
         )
 
         self.assertTrue(torch.allclose(loss, expected))
+
+    def test_accepts_laplacian_weight_as_log_weight_alias(self) -> None:
+        loss_fn = FDTCCALoss(laplacian_weight=0.2)
+
+        self.assertEqual(loss_fn.log_weight, 0.2)
 
     def test_loss_stays_finite_for_large_bfloat16_inputs(self) -> None:
         loss_fn = FDTCCALoss(candidate_loss_weight=0.0)
