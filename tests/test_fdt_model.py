@@ -8,12 +8,11 @@ from modules.model.fdt import FDT, FDT_CRNet_Direct, FDT_CRNet_Side, ResizeConvU
 from modules.model.fdt_cca import (
     CCAMask,
     CCA_CRNet,
-    CloudyStem,
     Extractor,
     ExtractorLayer,
     FDT_CCA,
     FDT_CRNet_CCA,
-    SarStem,
+    Stem,
 )
 from modules.model.module.attention import MultiHeadAttention
 
@@ -62,8 +61,10 @@ class FixedFeature(nn.Module):
     def __init__(self, feature: torch.Tensor):
         super().__init__()
         self.register_buffer("feature", feature)
+        self.input: torch.Tensor | None = None
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        self.input = x.detach().clone()
         return self.feature.expand(x.shape[0], -1, x.shape[-2], x.shape[-1])
 
 
@@ -189,8 +190,8 @@ def test_fdt_cca_returns_full_resolution_sar_clear_and_cloud_features() -> None:
 
 
 def test_stems_and_extractors_return_full_resolution_features() -> None:
-    sar_stem = SarStem(2, 128).eval()
-    cld_stem = CloudyStem(13, 128).eval()
+    sar_stem = Stem(2, 128).eval()
+    cld_stem = Stem(15, 128).eval()
     sar_extractor = Extractor(
         128,
         dims=(128, 256, 512),
@@ -209,11 +210,12 @@ def test_stems_and_extractors_return_full_resolution_features() -> None:
     cloudy = torch.randn(1, 13, 16, 16)
 
     assert sar_stem.proj[0].kernel_size == (3, 3)
-    assert cld_stem.proj[0].kernel_size == (1, 1)
+    assert cld_stem.proj[0].kernel_size == (3, 3)
+    assert cld_stem.proj[0].in_channels == 15
 
     with torch.no_grad():
         sar_feat = sar_extractor(sar_stem(sar))
-        cld_feat = cld_extractor(cld_stem(cloudy))
+        cld_feat = cld_extractor(cld_stem(torch.cat((sar, cloudy), dim=1)))
 
     assert sar_feat.shape == (1, 128, 16, 16)
     assert cld_feat.shape == (1, 128, 16, 16)
@@ -253,8 +255,11 @@ def test_fdt_cca_uses_stem_features_without_joint_extractor() -> None:
     model.cld_extractor = InputCapture()
     model.cld_clear_extractor = AddFeatureDelta(1.0)
 
+    sar = torch.randn(1, 2, 1, 1)
+    cloudy = torch.randn(1, 13, 1, 1)
+
     with torch.no_grad():
-        outputs = model(torch.randn(1, 2, 1, 1), torch.randn(1, 13, 1, 1))
+        outputs = model(sar, cloudy)
 
     assert not hasattr(model, "joint_extractor")
     assert not hasattr(model, "sar_joint_norm")
@@ -262,29 +267,19 @@ def test_fdt_cca_uses_stem_features_without_joint_extractor() -> None:
     assert not hasattr(model, "sar_common_extractor")
     assert not hasattr(model, "cld_common_extractor")
     assert not hasattr(model, "com_fuse")
+    assert not hasattr(model, "cld_clean_context")
     assert not hasattr(model, "cld_cloud_context")
     assert not hasattr(model, "cld_cloud_extractor")
+    assert torch.allclose(model.sar_stem.input, sar)
+    assert torch.allclose(model.cld_stem.input, torch.cat((sar, cloudy), dim=1))
     assert torch.allclose(model.sar_extractor.input, sar_stem_feat)
     assert torch.allclose(model.cld_extractor.input, cld_stem_feat)
-    assert torch.allclose(outputs[0], torch.cat((sar_stem_feat, cld_stem_feat + 1.0), dim=1))
+    assert torch.allclose(
+        outputs[0],
+        torch.cat((sar_stem_feat, cld_stem_feat + 1.0), dim=1),
+    )
     assert torch.allclose(outputs[2], cld_stem_feat + 1.0)
     assert torch.allclose(outputs[3], cld_stem_feat - outputs[2])
-
-
-def test_fdt_cca_clean_context_starts_as_cloudy_passthrough() -> None:
-    model = FDT_CCA(
-        dim=8,
-        num_layers=1,
-        num_heads=1,
-        extractor_dims=(4, 8),
-    ).eval()
-    sar_feat = torch.randn(2, 4, 3, 3)
-    cld_feat = torch.randn(2, 4, 3, 3)
-
-    with torch.no_grad():
-        actual = model.cld_clean_context(torch.cat((sar_feat, cld_feat), dim=1))
-
-    assert torch.allclose(actual, cld_feat)
 
 
 def test_extractor_stacks_same_dim_layers() -> None:
@@ -469,22 +464,26 @@ def test_cca_crnet_blends_cloudy_with_low_and_feature_difference_high() -> None:
     assert torch.allclose(model.high_head.input, torch.full_like(feature, 3.0))
 
 
-def test_cca_crnet_returns_candidate_when_requested() -> None:
+def test_cca_crnet_returns_candidate_and_mask_when_requested() -> None:
     model = CCA_CRNet(out_channels=13, num_layers=0).eval()
     feature = torch.randn(1, 256, 16, 16)
     cld_cloud = torch.randn(1, 128, 16, 16)
     cloudy = torch.randn(1, 13, 16, 16)
 
     with torch.no_grad():
-        prediction, candidate = model(
+        prediction, candidate, mask = model(
             feature,
             cld_cloud,
             cloudy,
             return_candidate=True,
+            return_mask=True,
         )
 
     assert prediction.shape == cloudy.shape
     assert candidate.shape == cloudy.shape
+    assert mask.shape == cloudy.shape
+    assert torch.all(mask >= 0.0)
+    assert torch.all(mask <= 1.0)
 
 
 def test_cca_crnet_runs_with_local_high_refine() -> None:
@@ -532,10 +531,11 @@ def test_fdt_crnet_cca_returns_clear_cloud_contract() -> None:
     with torch.no_grad():
         outputs = model(sar, cloudy)
 
-    assert len(outputs) == 5
-    prediction, candidate, sar_feat, cld_clear, cld_cloud = outputs
+    assert len(outputs) == 6
+    prediction, candidate, mask, sar_feat, cld_clear, cld_cloud = outputs
     assert prediction.shape == cloudy.shape
     assert candidate.shape == cloudy.shape
+    assert mask.shape == cloudy.shape
     for feature in (sar_feat, cld_clear, cld_cloud):
         assert feature.shape == (1, 128, 16, 16)
 

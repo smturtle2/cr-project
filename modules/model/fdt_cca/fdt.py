@@ -51,12 +51,12 @@ def _conv_block(
     )
 
 
-class SarStem(nn.Module):
+class Stem(nn.Module):
     def __init__(
         self,
         in_channels: int,
         dim: int,
-        blocks: int = 2,
+        blocks: int = 3,
     ):
         super().__init__()
         if blocks < 0:
@@ -69,31 +69,6 @@ class SarStem(nn.Module):
                 kernel_size=3,
                 padding=1,
                 padding_mode="replicate",
-            ),
-            nn.GELU(),
-        )
-        self.blocks = nn.Sequential(*[Residual3x3Block(dim) for _ in range(blocks)])
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.blocks(self.proj(x))
-
-
-class CloudyStem(nn.Module):
-    def __init__(
-        self,
-        in_channels: int,
-        dim: int,
-        blocks: int = 2,
-    ):
-        super().__init__()
-        if blocks < 0:
-            raise ValueError("blocks must be non-negative")
-
-        self.proj = nn.Sequential(
-            nn.Conv2d(
-                in_channels,
-                dim,
-                kernel_size=1,
             ),
             nn.GELU(),
         )
@@ -301,8 +276,8 @@ class FDT_CCA(nn.Module):
         self.extractor_dims = extractor_dims
         self.feature_extractor_layers = feature_extractor_layers
         self.up_dim = extractor_dims[0]
-        self.sar_stem = SarStem(sar_channels, self.up_dim)
-        self.cld_stem = CloudyStem(cloudy_channels, self.up_dim)
+        self.sar_stem = Stem(sar_channels, self.up_dim)
+        self.cld_stem = Stem(cloudy_channels + sar_channels, self.up_dim)
         self.sar_extractor = Extractor(
             self.up_dim,
             dims=extractor_dims,
@@ -323,32 +298,14 @@ class FDT_CCA(nn.Module):
             num_layers=num_layers,
             heads=num_heads,
         )
-        self.cld_clean_context = nn.Conv2d(
-            self.up_dim * 2,
-            self.up_dim,
-            kernel_size=1,
-        )
-        self._reset_cld_clean_context()
-
-    def _reset_cld_clean_context(self) -> None:
-        with torch.no_grad():
-            nn.init.zeros_(self.cld_clean_context.weight)
-            nn.init.zeros_(self.cld_clean_context.bias)
-            for channel in range(self.up_dim):
-                self.cld_clean_context.weight[
-                    channel, self.up_dim + channel, 0, 0
-                ] = 1.0
 
     def forward(self, sar: torch.Tensor, cloudy: torch.Tensor):
         # feature extraction
         sar_feat = self.sar_extractor(self.sar_stem(sar))
-        cld_feat = self.cld_extractor(self.cld_stem(cloudy))
+        cld_feat = self.cld_extractor(self.cld_stem(torch.cat((sar, cloudy), dim=1)))
 
-        # Clean is SAR-conditioned; cloud is the residual left in cloudy feature space.
-        cld_clean_context = self.cld_clean_context(
-            torch.cat((sar_feat, cld_feat), dim=1)
-        )
-        cld_clear = self.cld_clear_extractor(cld_clean_context)
+        # Cloudy feature decomposition
+        cld_clear = self.cld_clear_extractor(cld_feat)
         cld_cloud = cld_feat - cld_clear
 
         output = torch.cat((sar_feat, cld_clear), dim=1)

@@ -63,12 +63,13 @@ class FDT_CRNet_CCA(nn.Module):
             cld_clear,
             cld_cloud,
         ) = self.fdt(sar, cloudy)
-        prediction, candidate = self.crnet(
+        prediction, candidate, mask = self.crnet(
             fdt_feature,
             cld_cloud,
             cloudy,
             return_candidate=True,
+            return_mask=True,
         )
         if self.return_decomposition:
-            return prediction, candidate, sar_feat, cld_clear, cld_cloud
+            return prediction, candidate, mask, sar_feat, cld_clear, cld_cloud
         return prediction

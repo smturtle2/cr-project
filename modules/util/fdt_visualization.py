@@ -7,130 +7,37 @@ from typing import Any
 import numpy as np
 import torch
 
-TSNE_GROUPS = ("SAR Feat", "Cloudy Clear", "Cloudy Cloud")
+TSNE_GROUPS = ("SAR Feat", "CLD Feat", "CLD Clean", "CLD Cloudy")
 TSNE_GROUP_COLORS = {
     "SAR Feat": "#2563eb",
-    "Cloudy Clear": "#06b6d4",
-    "Cloudy Cloud": "#f97316",
+    "CLD Feat": "#7c3aed",
+    "CLD Clean": "#06b6d4",
+    "CLD Cloudy": "#f97316",
 }
 
 
 def split_fdt_output(
     model_output: Any,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-    if not isinstance(model_output, tuple) or len(model_output) != 5:
+) -> tuple[
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+]:
+    if not isinstance(model_output, tuple) or len(model_output) != 6:
         raise TypeError(
-            "FDT_CRNet must return prediction, candidate, and three decomposition tensors"
+            "FDT_CRNet must return prediction, candidate, mask, and three decomposition tensors"
         )
-    prediction, candidate, sar_feat, cld_clear, cld_cloud = model_output
-    return prediction, candidate, sar_feat, cld_clear, cld_cloud
+    prediction, candidate, mask, sar_feat, cld_clear, cld_cloud = model_output
+    return prediction, candidate, mask, sar_feat, cld_clear, cld_cloud
 
 
 def prediction_from_fdt_output(model_output: Any) -> torch.Tensor:
     if isinstance(model_output, torch.Tensor):
         return model_output
     return split_fdt_output(model_output)[0]
-
-
-def _feature_tokens(feature: torch.Tensor) -> tuple[np.ndarray, int, int]:
-    tensor = feature.detach().cpu().float()
-    if tensor.ndim != 3:
-        raise ValueError("feature must have shape CxHxW")
-    channels, height, width = tensor.shape
-    tokens = tensor.reshape(channels, height * width).transpose(0, 1).numpy()
-    return np.nan_to_num(tokens, copy=False), height, width
-
-
-def _joint_pc1_maps(
-    first: torch.Tensor,
-    second: torch.Tensor,
-) -> tuple[np.ndarray, np.ndarray]:
-    first_tokens, height, width = _feature_tokens(first)
-    second_tokens, second_height, second_width = _feature_tokens(second)
-    if (height, width) != (second_height, second_width):
-        raise ValueError("paired features must have the same spatial size")
-
-    merged = np.concatenate([first_tokens, second_tokens], axis=0)
-    centered = merged - merged.mean(axis=0, keepdims=True)
-    covariance = centered.T @ centered
-    eigenvalues, eigenvectors = np.linalg.eigh(covariance)
-    component = eigenvectors[:, int(np.argmax(eigenvalues))]
-    if component.sum() < 0:
-        component = -component
-    projected = centered @ component
-
-    split_at = height * width
-    first_map = projected[:split_at].reshape(height, width)
-    second_map = projected[split_at:].reshape(height, width)
-    return first_map, second_map
-
-
-def _normalize_paired_maps(
-    first: np.ndarray,
-    second: np.ndarray,
-) -> tuple[np.ndarray, np.ndarray]:
-    merged = np.concatenate([first.reshape(-1), second.reshape(-1)], axis=0)
-    low, high = np.quantile(merged, [0.02, 0.98])
-    normalized = np.clip((merged - low) / max(high - low, 1e-6), 0.0, 1.0)
-    split_at = first.size
-    return (
-        normalized[:split_at].reshape(first.shape),
-        normalized[split_at:].reshape(second.shape),
-    )
-
-
-def _pca_heatmaps(
-    first: torch.Tensor,
-    second: torch.Tensor,
-) -> tuple[np.ndarray, np.ndarray]:
-    return _normalize_paired_maps(*_joint_pc1_maps(first, second))
-
-
-def _centered_ccc_numpy(
-    first: torch.Tensor | np.ndarray,
-    second: torch.Tensor | np.ndarray,
-    *,
-    axis: int,
-    eps: float = 1e-6,
-) -> np.ndarray:
-    if isinstance(first, torch.Tensor):
-        first_values = first.detach().cpu().float().numpy()
-    else:
-        first_values = np.asarray(first, dtype=np.float32)
-    if isinstance(second, torch.Tensor):
-        second_values = second.detach().cpu().float().numpy()
-    else:
-        second_values = np.asarray(second, dtype=np.float32)
-    if first_values.shape != second_values.shape:
-        raise ValueError("paired features must have the same shape")
-
-    first_values = first_values - first_values.mean(axis=axis, keepdims=True)
-    second_values = second_values - second_values.mean(axis=axis, keepdims=True)
-    numerator = 2.0 * (first_values * second_values).mean(axis=axis)
-    denominator = np.square(first_values).mean(axis=axis) + np.square(
-        second_values,
-    ).mean(axis=axis)
-    return np.nan_to_num(numerator / (denominator + eps), copy=False)
-
-
-def _axis_ccc_diagnostics(
-    first: torch.Tensor,
-    second: torch.Tensor,
-    *,
-    eps: float = 1e-6,
-) -> tuple[float, float, np.ndarray]:
-    if first.ndim != 3 or second.ndim != 3:
-        raise ValueError("features must have shape CxHxW")
-    if first.shape != second.shape:
-        raise ValueError("paired features must have the same shape")
-
-    channel_map = _centered_ccc_numpy(first, second, axis=0, eps=eps)
-    channels = first.detach().cpu().float().reshape(first.shape[0], -1)
-    second_channels = second.detach().cpu().float().reshape(second.shape[0], -1)
-    spatial_scores = _centered_ccc_numpy(channels, second_channels, axis=1, eps=eps)
-    channel_score = float(channel_map.mean())
-    spatial_score = float(spatial_scores.mean())
-    return channel_score, spatial_score, channel_map
 
 
 def build_fdt_example_panels(
@@ -146,43 +53,29 @@ def build_fdt_example_panels(
     ],
     normalize_map: Callable[[torch.Tensor], np.ndarray],
 ):
-    _, _, sar_feat, cld_clear, cld_cloud = split_fdt_output(model_output)
-    sar_feat_pca, cld_clear_pca = _pca_heatmaps(sar_feat, cld_clear)
-    _, cld_cloud_pca = _pca_heatmaps(cld_clear, cld_cloud)
-    shared_channel_score, shared_spatial_score, shared_channel_map = _axis_ccc_diagnostics(
-        sar_feat,
-        cld_clear,
-    )
-    shared_match = np.clip((shared_channel_map + 1.0) / 2.0, 0.0, 1.0)
-    split_channel_score, split_spatial_score, split_channel_map = _axis_ccc_diagnostics(
-        cld_clear,
-        cld_cloud,
-    )
-    split_leak = np.clip(np.abs(split_channel_map), 0.0, 1.0)
-    shared_title = (
-        f"SHARED MATCH | {shared_channel_score:+.2f} | {shared_spatial_score:+.2f}"
-    )
-    split_title = (
-        f"CLEAR/CLOUD LEAK | {split_channel_score:+.2f} | {split_spatial_score:+.2f}"
-    )
+    _, candidate, mask, sar_feat, cld_clear, cld_cloud = split_fdt_output(model_output)
+    cld_feat = cld_clear + cld_cloud
     cloudy_rgb, prediction_rgb, target_rgb = normalize_rgb_triplet(
         cloudy,
         prediction,
         target,
     )
+    _, candidate_rgb, _ = normalize_rgb_triplet(cloudy, candidate, target)
+    mask_map = mask.mean(dim=0)
+    empty_panel = ("", np.ones_like(candidate_rgb), None)
     return (
         ("Cloudy RGB", cloudy_rgb, None),
         ("Prediction RGB", prediction_rgb, None),
         ("Target RGB", target_rgb, None),
         ("SAR Mean", normalize_map(sar.mean(dim=0)), "gray"),
-        (shared_title, shared_match, "viridis", 0.0, 1.0),
-        (split_title, split_leak, "magma", 0.0, 1.0),
-        ("SAR Feat PCA", sar_feat_pca, "viridis"),
-        ("Cloudy Clear PCA", cld_clear_pca, "viridis"),
-        ("Cloudy Cloud PCA", cld_cloud_pca, "viridis"),
-        ("Cloudy Clear Energy", normalize_map(cld_clear.abs().mean(dim=0)), "magma"),
-        ("Cloudy Cloud Energy", normalize_map(cld_cloud.abs().mean(dim=0)), "magma"),
-        ("Abs Error", normalize_map((prediction - target).abs().mean(dim=0)), "magma"),
+        ("SAR Feat", normalize_map(sar_feat.abs().mean(dim=0)), "magma"),
+        ("CLD Feat", normalize_map(cld_feat.abs().mean(dim=0)), "magma"),
+        ("CLD Clean", normalize_map(cld_clear.abs().mean(dim=0)), "magma"),
+        ("CLD Cloudy", normalize_map(cld_cloud.abs().mean(dim=0)), "magma"),
+        ("Mask", mask_map.detach().cpu().float().numpy(), "viridis", 0.0, 1.0),
+        ("Candidate RGB", candidate_rgb, None),
+        empty_panel,
+        empty_panel,
     )
 
 
@@ -200,6 +93,7 @@ def _append_tsne_sample_points(
     grouped_features: dict[str, list[np.ndarray]],
     *,
     sar_feat: torch.Tensor,
+    cld_feat: torch.Tensor,
     cld_clear: torch.Tensor,
     cld_cloud: torch.Tensor,
     rng: np.random.Generator,
@@ -209,8 +103,9 @@ def _append_tsne_sample_points(
     point_count = min(points_per_sample, num_positions)
     indices = rng.choice(num_positions, size=point_count, replace=False)
     grouped_features["SAR Feat"].append(_sample_feature_points(sar_feat, indices))
-    grouped_features["Cloudy Clear"].append(_sample_feature_points(cld_clear, indices))
-    grouped_features["Cloudy Cloud"].append(_sample_feature_points(cld_cloud, indices))
+    grouped_features["CLD Feat"].append(_sample_feature_points(cld_feat, indices))
+    grouped_features["CLD Clean"].append(_sample_feature_points(cld_clear, indices))
+    grouped_features["CLD Cloudy"].append(_sample_feature_points(cld_cloud, indices))
 
 
 def _cap_group_points(
@@ -273,10 +168,12 @@ def _collect_tsne_features(
                 (
                     _,
                     _,
+                    _,
                     sar_feat,
                     cld_clear,
                     cld_cloud,
                 ) = split_fdt_output(model_output)
+                cld_feat = cld_clear + cld_cloud
                 batch_size = sar_feat.shape[0]
                 for batch_index in range(batch_size):
                     if samples_seen >= sample_count:
@@ -284,6 +181,7 @@ def _collect_tsne_features(
                     _append_tsne_sample_points(
                         grouped_features,
                         sar_feat=sar_feat[batch_index],
+                        cld_feat=cld_feat[batch_index],
                         cld_clear=cld_clear[batch_index],
                         cld_cloud=cld_cloud[batch_index],
                         rng=rng,
@@ -459,8 +357,8 @@ def _save_tsne_scatter_figure(
     _plot_tsne_panel(
         axes[1],
         grouped_embedding,
-        labels=("SAR Feat", "Cloudy Clear"),
-        title="Shared",
+        labels=("SAR Feat", "CLD Feat"),
+        title="Stem Features",
         x_limits=x_limits,
         y_limits=y_limits,
         rng=rng,
@@ -470,7 +368,7 @@ def _save_tsne_scatter_figure(
     _plot_tsne_panel(
         axes[2],
         grouped_embedding,
-        labels=("Cloudy Clear", "Cloudy Cloud"),
+        labels=("CLD Clean", "CLD Cloudy"),
         title="Cloudy Split",
         x_limits=x_limits,
         y_limits=y_limits,

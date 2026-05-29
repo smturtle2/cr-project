@@ -80,7 +80,8 @@ class CCA_CRNet(ACA_CRNet):
         cloudy: torch.Tensor,
         *,
         return_candidate: bool = False,
-    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+        return_mask: bool = False,
+    ) -> torch.Tensor | tuple[torch.Tensor, ...]:
         z = feature
         for layer in self.net:
             z = layer(z)
@@ -91,6 +92,10 @@ class CCA_CRNet(ACA_CRNet):
         candidate = low + high
         mask = self.cca(cld_cloud)
         prediction = cloudy * (1.0 - mask) + candidate * mask
+        if return_candidate and return_mask:
+            return prediction, candidate, mask
         if return_candidate:
             return prediction, candidate
+        if return_mask:
+            return prediction, mask
         return prediction

@@ -77,7 +77,7 @@ class MainVisualizationTest(unittest.TestCase):
         self.assertEqual(captured_kwargs[1]["vmin"], -1.0)
         self.assertEqual(captured_kwargs[1]["vmax"], 1.0)
 
-    def test_fdt_example_match_panels_use_two_score_titles(self) -> None:
+    def test_fdt_example_panels_use_feature_mask_candidate_rows(self) -> None:
         def normalize_triplet(*_):
             return tuple(np.zeros((4, 4, 3), dtype=np.float32) for _ in range(3))
 
@@ -85,9 +85,11 @@ class MainVisualizationTest(unittest.TestCase):
             return np.zeros(tuple(tensor.shape), dtype=np.float32)
 
         feature = torch.randn(8, 4, 4)
+        mask = torch.full((13, 4, 4), 0.25)
         model_output = (
             torch.zeros(13, 4, 4),
             torch.zeros(13, 4, 4),
+            mask,
             feature,
             feature.roll(shifts=1, dims=-1),
             torch.randn(8, 4, 4),
@@ -102,25 +104,26 @@ class MainVisualizationTest(unittest.TestCase):
             normalize_rgb_triplet=normalize_triplet,
             normalize_map=normalize_map,
         )
-        shared_panel = panels[4]
-        split_panel = panels[5]
 
-        self.assertRegex(
-            shared_panel[0],
-            r"^SHARED MATCH \| [+-]\d+\.\d{2} \| [+-]\d+\.\d{2}$",
+        self.assertEqual(
+            [panel[0] for panel in panels],
+            [
+                "Cloudy RGB",
+                "Prediction RGB",
+                "Target RGB",
+                "SAR Mean",
+                "SAR Feat",
+                "CLD Feat",
+                "CLD Clean",
+                "CLD Cloudy",
+                "Mask",
+                "Candidate RGB",
+                "",
+                "",
+            ],
         )
-        self.assertNotIn("Ch", shared_panel[0])
-        self.assertNotIn("Sp", shared_panel[0])
-        self.assertEqual(shared_panel[2:], ("viridis", 0.0, 1.0))
-        self.assertTrue(np.isfinite(shared_panel[1]).all())
-        self.assertRegex(
-            split_panel[0],
-            r"^CLEAR/CLOUD LEAK \| [+-]\d+\.\d{2} \| [+-]\d+\.\d{2}$",
-        )
-        self.assertNotIn("Ch", split_panel[0])
-        self.assertNotIn("Sp", split_panel[0])
-        self.assertEqual(split_panel[2:], ("magma", 0.0, 1.0))
-        self.assertTrue(np.isfinite(split_panel[1]).all())
+        self.assertEqual(panels[8][2:], ("viridis", 0.0, 1.0))
+        self.assertTrue(np.allclose(panels[8][1], 0.25))
 
     def test_fdt_tsne_scatter_uses_dataloader_and_predict_fn(self) -> None:
         captured = {}
@@ -134,7 +137,8 @@ class MainVisualizationTest(unittest.TestCase):
             value = float(batch["value"])
             feature = torch.full((1, 2, 2, 2), value)
             candidate = torch.full((1, 13, 2, 2), value)
-            return feature, candidate, feature + 1.0, feature + 2.0, feature + 3.0
+            mask = torch.full((1, 13, 2, 2), 0.25)
+            return feature, candidate, mask, feature + 1.0, feature + 2.0, feature + 3.0
 
         dataloader = [{"value": 1.0}, {"value": 2.0}]
 
@@ -159,7 +163,7 @@ class MainVisualizationTest(unittest.TestCase):
         self.assertEqual(captured["kwargs"]["title"], "test")
         self.assertEqual(
             set(captured["features"]),
-            {"SAR Feat", "Cloudy Clear", "Cloudy Cloud"},
+            {"SAR Feat", "CLD Feat", "CLD Clean", "CLD Cloudy"},
         )
         for features in captured["features"].values():
             self.assertEqual(features.shape, (8, 2))
