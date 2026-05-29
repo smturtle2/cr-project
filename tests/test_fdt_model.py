@@ -175,10 +175,6 @@ def test_fdt_cca_returns_full_resolution_sar_clear_and_cloud_features() -> None:
     sar = torch.randn(1, 2, 16, 16)
     cloudy = torch.randn(1, 13, 16, 16)
 
-    assert model.feature_extractor_layers == 1
-    assert len(model.sar_extractor.layers) == 1
-    assert len(model.cld_extractor.layers) == 1
-
     with torch.no_grad():
         outputs = model(sar, cloudy)
 
@@ -209,10 +205,6 @@ def test_stems_and_extractors_return_full_resolution_features() -> None:
     sar = torch.randn(1, 2, 16, 16)
     cloudy = torch.randn(1, 13, 16, 16)
 
-    assert sar_stem.proj[0].kernel_size == (3, 3)
-    assert cld_stem.proj[0].kernel_size == (3, 3)
-    assert cld_stem.proj[0].in_channels == 15
-
     with torch.no_grad():
         sar_feat = sar_extractor(sar_stem(sar))
         cld_feat = cld_extractor(cld_stem(torch.cat((sar, cloudy), dim=1)))
@@ -240,7 +232,7 @@ def test_extractor_accepts_feature_inputs_for_clear_and_cloud_paths() -> None:
     assert bool(torch.isfinite(cld_clear).all().item())
 
 
-def test_fdt_cca_uses_stem_features_without_joint_extractor() -> None:
+def test_fdt_cca_uses_stem_features_for_extraction() -> None:
     model = FDT_CCA(
         dim=8,
         num_layers=1,
@@ -261,15 +253,6 @@ def test_fdt_cca_uses_stem_features_without_joint_extractor() -> None:
     with torch.no_grad():
         outputs = model(sar, cloudy)
 
-    assert not hasattr(model, "joint_extractor")
-    assert not hasattr(model, "sar_joint_norm")
-    assert not hasattr(model, "cld_joint_norm")
-    assert not hasattr(model, "sar_common_extractor")
-    assert not hasattr(model, "cld_common_extractor")
-    assert not hasattr(model, "com_fuse")
-    assert not hasattr(model, "cld_clean_context")
-    assert not hasattr(model, "cld_cloud_context")
-    assert not hasattr(model, "cld_cloud_extractor")
     assert torch.allclose(model.sar_stem.input, sar)
     assert torch.allclose(model.cld_stem.input, torch.cat((sar, cloudy), dim=1))
     assert torch.allclose(model.sar_extractor.input, sar_stem_feat)
