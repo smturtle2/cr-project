@@ -112,16 +112,6 @@ class AddFeatureDelta(nn.Module):
         return x + x.new_full(x.shape, self.value)
 
 
-class CaptureReturnImage(ConstantImage):
-    def __init__(self, out_channels: int, value: float):
-        super().__init__(out_channels, value)
-        self.input: torch.Tensor | None = None
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        self.input = x.detach().clone()
-        return super().forward(x)
-
-
 def test_fdt_imports_and_runs_forward() -> None:
     model = FDT(num_layers=1, num_heads=4).eval()
     sar = torch.randn(1, 2, 16, 16)
@@ -424,7 +414,7 @@ def test_cca_crnet_runs_without_attention_layer() -> None:
     assert prediction.dtype == feature.dtype
 
 
-def test_cca_crnet_blends_cloudy_with_low_and_feature_difference_high() -> None:
+def test_cca_crnet_applies_masked_signed_delta_to_cloudy() -> None:
     model = CCA_CRNet(
         out_channels=1,
         num_layers=0,
@@ -432,9 +422,7 @@ def test_cca_crnet_blends_cloudy_with_low_and_feature_difference_high() -> None:
         cloud_channels=2,
         detail_blocks=1,
     ).eval()
-    model.low_head = ConstantImage(out_channels=1, value=4.0)
-    model.high_refine = AddFeatureDelta(value=3.0)
-    model.high_head = CaptureReturnImage(out_channels=1, value=2.0)
+    model.delta_head = ConstantImage(out_channels=1, value=-4.0)
     model.cca = FixedMask(value=0.25)
     feature = torch.zeros(1, 2, 4, 4)
     cld_cloud = torch.randn(1, 2, 4, 4)
@@ -444,7 +432,6 @@ def test_cca_crnet_blends_cloudy_with_low_and_feature_difference_high() -> None:
         prediction = model(feature, cld_cloud, cloudy)
 
     assert torch.allclose(prediction, torch.full_like(prediction, 9.0))
-    assert torch.allclose(model.high_head.input, torch.full_like(feature, 3.0))
 
 
 def test_cca_crnet_returns_candidate_and_mask_when_requested() -> None:
@@ -469,7 +456,7 @@ def test_cca_crnet_returns_candidate_and_mask_when_requested() -> None:
     assert torch.all(mask <= 1.0)
 
 
-def test_cca_crnet_runs_with_local_high_refine() -> None:
+def test_cca_crnet_runs_with_delta_head() -> None:
     model = CCA_CRNet(out_channels=13, num_layers=4).eval()
     feature = torch.randn(1, 256, 16, 16)
     cld_cloud = torch.randn(1, 128, 16, 16)

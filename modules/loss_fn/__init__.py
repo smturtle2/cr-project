@@ -1,5 +1,5 @@
 from .CAFM_loss import CloudAdaptiveLoss, SimpleMSELoss
-from .fdt_loss import FDTCCALoss
+from .fdt_loss import FDTCCALoss, make_fdt_cca_loss_fn
 from .focal_frequency_loss import FocalFrequencyLoss
 from .lcr_loss import LCRLoss
 
@@ -8,5 +8,6 @@ __all__ = [
     "FDTCCALoss",
     "FocalFrequencyLoss",
     "LCRLoss",
+    "make_fdt_cca_loss_fn",
     "SimpleMSELoss",
 ]

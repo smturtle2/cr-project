@@ -3,9 +3,11 @@ from __future__ import annotations
 import unittest
 
 import torch
+import torch.nn.functional as F
 
 from modules.loss_fn import (
     FDTCCALoss,
+    make_fdt_cca_loss_fn,
 )
 
 
@@ -13,54 +15,73 @@ class FDTCCALossTest(unittest.TestCase):
     def setUp(self) -> None:
         torch.manual_seed(0)
 
-    def test_combines_prediction_candidate_log_sam_and_ssim_losses(self) -> None:
-        loss_fn = FDTCCALoss(
-            charbonnier_weight=1.0,
-            candidate_loss_weight=0.1,
-            log_weight=0.05,
-            sam_weight=0.02,
-            ssim_weight=0.1,
+    def _expected_output_loss(
+        self,
+        loss_fn: FDTCCALoss,
+        prediction: torch.Tensor,
+        target: torch.Tensor,
+        *,
+        weights: tuple[float, float] = (0.9, 0.1),
+    ) -> torch.Tensor:
+        prediction = prediction.float() / loss_fn.input_scale
+        target = target.float() / loss_fn.input_scale
+        return (
+            weights[0] * F.l1_loss(prediction, target)
+            + weights[1] * (1.0 - loss_fn.ssim(prediction, target))
         )
-        prediction = torch.randn(2, 13, 16, 16)
-        candidate = torch.randn(2, 13, 16, 16)
-        target = torch.randn(2, 13, 16, 16)
+
+    def test_combines_prediction_l1_and_ssim_losses(self) -> None:
+        loss_fn = FDTCCALoss()
+        prediction = torch.rand(2, 13, 16, 16) * loss_fn.input_scale
+        candidate = torch.rand(2, 13, 16, 16) * loss_fn.input_scale
+        target = torch.rand(2, 13, 16, 16) * loss_fn.input_scale
         model_output = (prediction, candidate, None, None, None, None)
 
         loss = loss_fn(model_output, target)
-        expected = (
-            loss_fn.charbonnier_loss(prediction, target)
-            + 0.1 * loss_fn.candidate_loss(candidate, target)
-            + 0.05 * loss_fn.log_loss(prediction, target)
-            + 0.02 * loss_fn.sam_loss(prediction, target)
-            + 0.1 * loss_fn.ssim_loss(prediction, target)
-        )
+        expected = self._expected_output_loss(loss_fn, prediction, target)
 
         self.assertTrue(torch.allclose(loss, expected))
 
-    def test_accepts_prediction_tensor_when_candidate_loss_is_disabled(self) -> None:
-        loss_fn = FDTCCALoss(candidate_loss_weight=0.0)
-        prediction = torch.randn(2, 13, 16, 16)
-        target = torch.randn(2, 13, 16, 16)
+    def test_accepts_prediction_tensor(self) -> None:
+        loss_fn = FDTCCALoss()
+        prediction = torch.rand(2, 13, 16, 16) * loss_fn.input_scale
+        target = torch.rand(2, 13, 16, 16) * loss_fn.input_scale
 
         loss = loss_fn(prediction, target)
-        expected = (
-            loss_fn.charbonnier_loss(prediction, target)
-            + 0.05 * loss_fn.log_loss(prediction, target)
-            + 0.02 * loss_fn.sam_loss(prediction, target)
-            + 0.1 * loss_fn.ssim_loss(prediction, target)
+        expected = self._expected_output_loss(loss_fn, prediction, target)
+
+        self.assertTrue(torch.allclose(loss, expected))
+
+    def test_accepts_custom_weights(self) -> None:
+        loss_fn = FDTCCALoss(l1_weight=0.7, ssim_weight=0.3)
+        prediction = torch.rand(2, 13, 16, 16) * loss_fn.input_scale
+        target = torch.rand(2, 13, 16, 16) * loss_fn.input_scale
+
+        loss = loss_fn(prediction, target)
+        expected = self._expected_output_loss(
+            loss_fn,
+            prediction,
+            target,
+            weights=(0.7, 0.3),
         )
 
         self.assertTrue(torch.allclose(loss, expected))
 
-    def test_accepts_laplacian_weight_as_log_weight_alias(self) -> None:
-        loss_fn = FDTCCALoss(laplacian_weight=0.2)
+    def test_factory_returns_tmp_main_compatible_loss_fn(self) -> None:
+        loss_fn = make_fdt_cca_loss_fn()
+        criterion = FDTCCALoss()
+        prediction = torch.rand(2, 13, 16, 16) * criterion.input_scale
+        target = torch.rand(2, 13, 16, 16) * criterion.input_scale
 
-        self.assertEqual(loss_fn.log_weight, 0.2)
+        loss = loss_fn((prediction, None, None), {"target": target})
+        expected = criterion(prediction, target)
+
+        self.assertTrue(torch.allclose(loss, expected))
 
     def test_loss_stays_finite_for_large_bfloat16_inputs(self) -> None:
-        loss_fn = FDTCCALoss(candidate_loss_weight=0.0)
-        prediction = (torch.randn(2, 13, 16, 16) * 1000.0).bfloat16()
-        target = (torch.randn(2, 13, 16, 16) * 1000.0).bfloat16()
+        loss_fn = FDTCCALoss()
+        prediction = (torch.rand(2, 13, 16, 16) * loss_fn.input_scale).bfloat16()
+        target = (torch.rand(2, 13, 16, 16) * loss_fn.input_scale).bfloat16()
 
         with torch.autocast(device_type="cpu", dtype=torch.bfloat16):
             loss = loss_fn(prediction, target)
@@ -70,9 +91,9 @@ class FDTCCALossTest(unittest.TestCase):
 
     def test_backward_is_finite(self) -> None:
         loss_fn = FDTCCALoss()
-        prediction = torch.randn(2, 13, 16, 16, requires_grad=True)
-        candidate = torch.randn(2, 13, 16, 16, requires_grad=True)
-        target = torch.randn(2, 13, 16, 16)
+        prediction = (torch.rand(2, 13, 16, 16) * loss_fn.input_scale).requires_grad_()
+        candidate = (torch.rand(2, 13, 16, 16) * loss_fn.input_scale).requires_grad_()
+        target = torch.rand(2, 13, 16, 16) * loss_fn.input_scale
         model_output = (prediction, candidate, None, None, None, None)
 
         loss = loss_fn(model_output, target)
@@ -80,9 +101,8 @@ class FDTCCALossTest(unittest.TestCase):
 
         self.assertTrue(bool(torch.isfinite(loss).item()))
         self.assertIsNotNone(prediction.grad)
-        self.assertIsNotNone(candidate.grad)
+        self.assertIsNone(candidate.grad)
         self.assertTrue(bool(torch.isfinite(prediction.grad).all().item()))
-        self.assertTrue(bool(torch.isfinite(candidate.grad).all().item()))
 
 
 if __name__ == "__main__":
