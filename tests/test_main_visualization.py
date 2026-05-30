@@ -77,7 +77,7 @@ class MainVisualizationTest(unittest.TestCase):
         self.assertEqual(captured_kwargs[1]["vmin"], -1.0)
         self.assertEqual(captured_kwargs[1]["vmax"], 1.0)
 
-    def test_fdt_example_panels_use_feature_mask_candidate_rows(self) -> None:
+    def test_fdt_example_panels_use_pca_mask_candidate_rows(self) -> None:
         def normalize_triplet(*_):
             return tuple(np.zeros((4, 4, 3), dtype=np.float32) for _ in range(3))
 
@@ -112,18 +112,18 @@ class MainVisualizationTest(unittest.TestCase):
                 "Prediction RGB",
                 "Target RGB",
                 "SAR Mean",
+                "Mask",
+                "Prediction PCA",
+                "Target PCA",
+                "Candidate RGB",
                 "SAR Feat",
                 "CLD Feat",
                 "CLD Clean",
                 "CLD Cloudy",
-                "Mask",
-                "Candidate RGB",
-                "",
-                "",
             ],
         )
-        self.assertEqual(panels[8][2:], ("viridis", 0.0, 1.0))
-        self.assertTrue(np.allclose(panels[8][1], 0.25))
+        for index in (4, 5, 6, 8, 9, 10, 11):
+            self.assertEqual(panels[index][2], "magma")
 
     def test_fdt_tsne_scatter_uses_dataloader_and_predict_fn(self) -> None:
         captured = {}

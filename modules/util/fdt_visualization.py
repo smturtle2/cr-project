@@ -40,6 +40,24 @@ def prediction_from_fdt_output(model_output: Any) -> torch.Tensor:
     return split_fdt_output(model_output)[0]
 
 
+def _pc1_map(
+    feature: torch.Tensor,
+    normalize_map: Callable[[torch.Tensor], np.ndarray],
+) -> np.ndarray:
+    channels, height, width = feature.shape
+    tokens = feature.detach().cpu().float().reshape(channels, -1).transpose(0, 1)
+    tokens = tokens - tokens.mean(dim=0, keepdim=True)
+    if channels == 1:
+        scores = tokens[:, 0]
+    else:
+        _, _, vh = torch.linalg.svd(tokens, full_matrices=False)
+        component = vh[0]
+        if component.sum() < 0:
+            component = -component
+        scores = tokens @ component
+    return normalize_map(scores.reshape(height, width))
+
+
 def build_fdt_example_panels(
     *,
     cloudy: torch.Tensor,
@@ -61,21 +79,19 @@ def build_fdt_example_panels(
         target,
     )
     _, candidate_rgb, _ = normalize_rgb_triplet(cloudy, candidate, target)
-    mask_map = mask.mean(dim=0)
-    empty_panel = ("", np.ones_like(candidate_rgb), None)
     return (
         ("Cloudy RGB", cloudy_rgb, None),
         ("Prediction RGB", prediction_rgb, None),
         ("Target RGB", target_rgb, None),
         ("SAR Mean", normalize_map(sar.mean(dim=0)), "gray"),
-        ("SAR Feat", normalize_map(sar_feat.abs().mean(dim=0)), "magma"),
-        ("CLD Feat", normalize_map(cld_feat.abs().mean(dim=0)), "magma"),
-        ("CLD Clean", normalize_map(cld_clear.abs().mean(dim=0)), "magma"),
-        ("CLD Cloudy", normalize_map(cld_cloud.abs().mean(dim=0)), "magma"),
-        ("Mask", mask_map.detach().cpu().float().numpy(), "viridis", 0.0, 1.0),
+        ("Mask", _pc1_map(mask, normalize_map), "magma"),
+        ("Prediction PCA", _pc1_map(prediction, normalize_map), "magma"),
+        ("Target PCA", _pc1_map(target, normalize_map), "magma"),
         ("Candidate RGB", candidate_rgb, None),
-        empty_panel,
-        empty_panel,
+        ("SAR Feat", _pc1_map(sar_feat, normalize_map), "magma"),
+        ("CLD Feat", _pc1_map(cld_feat, normalize_map), "magma"),
+        ("CLD Clean", _pc1_map(cld_clear, normalize_map), "magma"),
+        ("CLD Cloudy", _pc1_map(cld_cloud, normalize_map), "magma"),
     )
 
 
