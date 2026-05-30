@@ -12,21 +12,14 @@ class CCAMask(nn.Module):
         self,
         cloud_channels: int,
         mask_channels: int,
-        mask_bias_init: float = -5.0,
     ):
         super().__init__()
-        self.mask_bias_init = mask_bias_init
         self.body = nn.Sequential(
             Residual3x3Block(cloud_channels),
             Residual3x3Block(cloud_channels),
         )
         self.mask_head = nn.Conv2d(cloud_channels, mask_channels, kernel_size=1)
         self.activation = nn.Sigmoid()
-        self.reset_parameters()
-
-    def reset_parameters(self) -> None:
-        nn.init.zeros_(self.mask_head.weight)
-        nn.init.constant_(self.mask_head.bias, self.mask_bias_init)
 
     def forward(self, cld_cloud: torch.Tensor) -> torch.Tensor:
         return self.activation(self.mask_head(self.body(cld_cloud)))

@@ -423,32 +423,26 @@ def test_cca_mask_returns_per_band_intervention_mask() -> None:
     assert torch.all(mask <= 1.0)
 
 
-def test_cca_mask_starts_with_small_uniform_mask() -> None:
+def test_cca_mask_does_not_force_small_uniform_mask() -> None:
     cca = CCAMask(cloud_channels=128, mask_channels=13).eval()
     cld_cloud = torch.randn(2, 128, 16, 16)
-    expected = torch.full(
-        (2, 13, 16, 16),
-        torch.sigmoid(torch.tensor(-5.0)).item(),
-    )
 
     with torch.no_grad():
         mask = cca(cld_cloud)
 
-    assert torch.allclose(mask, expected)
+    forced_small_mask = torch.full_like(mask, torch.sigmoid(torch.tensor(-5.0)).item())
+    assert not torch.allclose(mask, forced_small_mask)
 
 
-def test_fdt_crnet_cca_keeps_small_mask_init_after_crnet_init() -> None:
+def test_fdt_crnet_cca_keeps_crnet_mask_initialization() -> None:
     model = FDT_CRNet_CCA(fdt_layers=1, cr_layers=1).eval()
     cld_cloud = torch.randn(2, model.cloud_channels, 16, 16)
-    expected = torch.full(
-        (2, 13, 16, 16),
-        torch.sigmoid(torch.tensor(-5.0)).item(),
-    )
 
     with torch.no_grad():
         mask = model.crnet.cca(cld_cloud)
 
-    assert torch.allclose(mask, expected)
+    forced_small_mask = torch.full_like(mask, torch.sigmoid(torch.tensor(-5.0)).item())
+    assert not torch.allclose(mask, forced_small_mask)
 
 
 def test_cca_crnet_runs_without_attention_layer() -> None:

@@ -54,7 +54,6 @@ class FDT_CRNet_CCA(nn.Module):
             ca_kwargs=ca_kwargs,
         )
         self.crnet = init_net(crnet, init_type=init_type)
-        self.crnet.cca.reset_parameters()
 
     def forward(self, sar: torch.Tensor, cloudy: torch.Tensor):
         (
