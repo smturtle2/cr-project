@@ -509,8 +509,8 @@ class MainTrainingFlowTest(unittest.TestCase):
 
     def test_best_mode_runs_test_by_default(self) -> None:
         records = [
-            make_epoch_record(epoch=1, train_loss=1.0, val_loss=0.6),
-            make_epoch_record(epoch=2, train_loss=0.9, val_loss=0.5),
+            make_epoch_record(epoch=1, train_loss=1.0, val_loss=0.5),
+            make_epoch_record(epoch=2, train_loss=0.9, val_loss=0.6),
         ]
 
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -524,6 +524,8 @@ class MainTrainingFlowTest(unittest.TestCase):
             )
 
             self.assertEqual(result["trainer"].test_calls, 1)
+            self.assertEqual(FakeTrainer.loaded_checkpoint_paths, [output_dir / "best.pt"])
+            self.assertEqual(result["trainer"].current_epoch, 1)
 
     def test_save_every_n_epochs_saves_periodic_checkpoints(self) -> None:
         records = [

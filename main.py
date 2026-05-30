@@ -1668,6 +1668,7 @@ def finalize_after_training(
     *,
     output_dir: Path,
     run_test: bool,
+    best_selector: BestEpochSelector,
     example_mode: Literal["best", "after_test"],
     example_config: ExampleSaveConfig,
     saved_example_epochs: set[int],
@@ -1682,6 +1683,10 @@ def finalize_after_training(
             saved_epochs=saved_example_epochs,
         )
     elif run_test:
+        best_state = load_best_state(output_dir, selector=best_selector)
+        checkpoint_path = best_checkpoint_path(output_dir)
+        if best_state is not None and checkpoint_path.exists():
+            trainer.load_checkpoint(checkpoint_path)
         run_test_and_record(trainer, history, global_step=trainer.global_step)
 
     save_history_plot(history, output_dir / "history.png")
@@ -1774,6 +1779,7 @@ def main(
             history,
             output_dir=output_dir,
             run_test=run_test,
+            best_selector=best_selector,
             example_mode=example_mode,
             example_config=example_config,
             saved_example_epochs=saved_example_epochs,
