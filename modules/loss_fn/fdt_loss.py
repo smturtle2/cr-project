@@ -110,9 +110,11 @@ class _GaussianSSIM(nn.Module):
         *,
         window_size: int = 11,
         sigma: float = 1.5,
+        eps: float = 1.6e-9,
     ) -> None:
         super().__init__()
         self.window_size = window_size
+        self.eps = eps
         self.register_buffer("_window", self._create_window(window_size, sigma))
 
     def forward(
@@ -121,16 +123,17 @@ class _GaussianSSIM(nn.Module):
         img2: torch.Tensor,
     ) -> torch.Tensor:
         _check_same_shape(img1, img2)
-        img1 = img1.float()
-        img2 = img2.float()
-        channel = img1.size(1)
-        window = self._window.to(device=img1.device, dtype=img1.dtype).expand(
-            channel,
-            1,
-            self.window_size,
-            self.window_size,
-        )
-        return self._ssim(img1, img2, window, channel)
+        with torch.autocast(device_type=img1.device.type, enabled=False):
+            img1 = img1.float()
+            img2 = img2.float()
+            channel = img1.size(1)
+            window = self._window.to(device=img1.device, dtype=img1.dtype).expand(
+                channel,
+                1,
+                self.window_size,
+                self.window_size,
+            )
+            return self._ssim(img1, img2, window, channel)
 
     def _create_window(
         self,
@@ -163,17 +166,18 @@ class _GaussianSSIM(nn.Module):
         mu2_sq = mu2.pow(2)
         mu1_mu2 = mu1 * mu2
 
-        sigma1_sq = self._conv(img1 * img1, window, channel) - mu1_sq
-        sigma2_sq = self._conv(img2 * img2, window, channel) - mu2_sq
+        sigma1_sq = (self._conv(img1 * img1, window, channel) - mu1_sq).clamp_min(0.0)
+        sigma2_sq = (self._conv(img2 * img2, window, channel) - mu2_sq).clamp_min(0.0)
         sigma12 = self._conv(img1 * img2, window, channel) - mu1_mu2
 
         c1 = 0.01**2
         c2 = 0.03**2
-        ssim_map = ((2 * mu1_mu2 + c1) * (2 * sigma12 + c2)) / (
-            (mu1_sq + mu2_sq + c1) * (sigma1_sq + sigma2_sq + c2)
-        )
+        numerator = (2 * mu1_mu2 + c1) * (2 * sigma12 + c2)
+        denominator = (mu1_sq + mu2_sq + c1) * (sigma1_sq + sigma2_sq + c2)
+        ssim_map = numerator / denominator.clamp_min(self.eps)
+        ssim_map = torch.nan_to_num(ssim_map, nan=-1.0, posinf=1.0, neginf=-1.0)
 
-        return ssim_map.mean()
+        return ssim_map.clamp(-1.0, 1.0).mean()
 
     def _conv(
         self,

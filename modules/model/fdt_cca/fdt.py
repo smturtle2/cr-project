@@ -3,8 +3,14 @@ from __future__ import annotations
 import torch
 import torch.nn as nn
 
-from ..fdt.fdt import CommonEncoder as FeatureEncoder
-from ..fdt.fdt import PixelShuffleUp, PixelUnshuffleDown, Residual3x3Block, ResizeConvUp
+from ..fdt.fdt import (
+    CommonEncoder as FeatureEncoder,
+    PixelShuffleUp,
+    PixelUnshuffleDown,
+    RMSNorm2d,
+    Residual3x3Block,
+    ResizeConvUp,
+)
 
 
 def _validate_extractor_dims(
@@ -122,6 +128,9 @@ class UpLevels(nn.Module):
         self.ups = nn.ModuleList(
             [ResizeProjectUp(dims[i], dims[i - 1]) for i in range(len(dims) - 1, 0, -1)]
         )
+        self.up_norms = nn.ModuleList(
+            [RMSNorm2d(dims[i]) for i in range(len(dims) - 1, 0, -1)]
+        )
         self.recons = nn.ModuleList(
             [ResizeProjectUp(dims[i + 1], dims[i]) for i in range(len(dims) - 1)]
         )
@@ -137,13 +146,15 @@ class UpLevels(nn.Module):
         ]
         x = levels[-1]
 
-        for level, block, up in zip(
+        for level, block, up_norm, up in zip(
             range(len(levels) - 1, 0, -1),
             self.blocks,
+            self.up_norms,
             self.ups,
+            strict=False,
         ):
             x = block(x)
-            x = up(x) + residuals[level - 1]
+            x = up(up_norm(x)) + residuals[level - 1]
         return x
 
 

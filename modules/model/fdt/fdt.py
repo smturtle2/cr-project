@@ -6,6 +6,17 @@ import torch.nn as nn
 from ..module.attention import TransformerLayer
 
 
+class RMSNorm2d(nn.Module):
+    def __init__(self, channels: int, eps: float = 1e-8):
+        super().__init__()
+        self.eps = eps
+        self.weight = nn.Parameter(torch.ones(1, channels, 1, 1))
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        rms = x.square().mean(dim=1, keepdim=True)
+        return x * torch.rsqrt(rms + self.eps) * self.weight
+
+
 class ChannelAttention(nn.Module):
     def __init__(self, channels: int, ratio: int = 16):
         super().__init__()
@@ -99,6 +110,7 @@ class PixelShuffleUp(nn.Module):
 class Residual3x3Block(nn.Module):
     def __init__(self, channels: int):
         super().__init__()
+        self.norm = RMSNorm2d(channels)
         self.net = nn.Sequential(
             nn.Conv2d(
                 channels,
@@ -120,7 +132,7 @@ class Residual3x3Block(nn.Module):
         nn.init.zeros_(self.net[-1].bias)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return x + self.net(x)
+        return x + self.net(self.norm(x))
 
 
 _Residual3x3Block = Residual3x3Block
