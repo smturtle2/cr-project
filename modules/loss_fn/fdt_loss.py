@@ -15,22 +15,18 @@ def _check_same_shape(first: torch.Tensor, second: torch.Tensor) -> None:
 
 
 class FDTCCALoss(nn.Module):
-    """Output L1 + SSIM loss adapted to this project's /2000 tensor scale."""
+    """Output L1 + SSIM loss for FDT-CCA predictions."""
 
     def __init__(
         self,
         *,
         l1_weight: float = 0.9,
         ssim_weight: float = 0.1,
-        input_scale: float = 5.0,
     ) -> None:
         super().__init__()
-        if input_scale <= 0.0:
-            raise ValueError("input_scale must be positive")
 
         self.l1_weight = float(l1_weight)
         self.ssim_weight = float(ssim_weight)
-        self.input_scale = float(input_scale)
         self.ssim = _GaussianSSIM()
 
     def forward(
@@ -60,19 +56,12 @@ class FDTCCALoss(nn.Module):
         target: torch.Tensor,
     ) -> torch.Tensor:
         _check_same_shape(prediction, target)
-        prediction = self._normalize(prediction)
-        target = self._normalize(target)
+        prediction = prediction.float()
+        target = target.float()
         return (
             self.l1_weight * F.l1_loss(prediction, target)
             + self.ssim_weight * (1.0 - self.ssim(prediction, target))
         )
-
-    def _normalize(
-        self,
-        tensor: torch.Tensor,
-    ) -> torch.Tensor:
-        # Local SEN12MS-CR tensors use reflectance / 2000; normalize to /10000.
-        return tensor.float() / self.input_scale
 
     def ssim_loss(
         self,
@@ -80,19 +69,17 @@ class FDTCCALoss(nn.Module):
         target: torch.Tensor,
     ) -> torch.Tensor:
         _check_same_shape(prediction, target)
-        return 1.0 - self.ssim(self._normalize(prediction), self._normalize(target))
+        return 1.0 - self.ssim(prediction.float(), target.float())
 
 
 def make_fdt_cca_loss_fn(
     *,
     l1_weight: float = 0.9,
     ssim_weight: float = 0.1,
-    input_scale: float = 5.0,
 ) -> Callable[[Any, Mapping[str, torch.Tensor]], torch.Tensor]:
     criterion = FDTCCALoss(
         l1_weight=l1_weight,
         ssim_weight=ssim_weight,
-        input_scale=input_scale,
     )
 
     def loss_fn(
