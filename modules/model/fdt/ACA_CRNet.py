@@ -24,11 +24,23 @@ class ResBlock(nn.Module):
         super(ResBlock, self).__init__()
         m = OrderedDict()
         m["conv1"] = nn.Conv2d(
-            in_channels, out_channels, kernel_size=3, bias=False, stride=1, padding=1
+            in_channels,
+            out_channels,
+            kernel_size=3,
+            bias=False,
+            stride=1,
+            padding=1,
+            padding_mode="reflect",
         )
         m["relu1"] = nn.ReLU(True)
         m["conv2"] = nn.Conv2d(
-            out_channels, out_channels, kernel_size=3, bias=False, stride=1, padding=1
+            out_channels,
+            out_channels,
+            kernel_size=3,
+            bias=False,
+            stride=1,
+            padding=1,
+            padding_mode="reflect",
         )
         self.net = nn.Sequential(m)
         self.relu = nn.Sequential(nn.ReLU(True))
@@ -55,11 +67,23 @@ class ResBlock_att(nn.Module):
         ca_kwargs = {} if ca_kwargs is None else dict(ca_kwargs)
         m = OrderedDict()
         m["conv1"] = nn.Conv2d(
-            in_channels, out_channels, kernel_size=3, bias=False, stride=2, padding=1
+            in_channels,
+            out_channels,
+            kernel_size=3,
+            bias=False,
+            stride=2,
+            padding=1,
+            padding_mode="reflect",
         )
         m["relu1"] = nn.ReLU(True)
         m["conv2"] = nn.Conv2d(
-            out_channels, out_channels, kernel_size=3, bias=False, stride=1, padding=1
+            out_channels,
+            out_channels,
+            kernel_size=3,
+            bias=False,
+            stride=1,
+            padding=1,
+            padding_mode="reflect",
         )
         m["relu2"] = nn.ReLU(True)
         m["att"] = ca(
@@ -113,6 +137,7 @@ class ResBlock_att_side(nn.Module):
                 bias=False,
                 stride=1,
                 padding=1,
+                padding_mode="reflect",
             )
         else:
             self.side = CrossModalBlock(out_channels, num_heads=num_heads)
@@ -227,6 +252,7 @@ class ACA_CRNet(nn.Module):
                 bias=True,
                 stride=1,
                 padding=1,
+                padding_mode="reflect",
             )
         )
         self.net = nn.ModuleList(m)
@@ -254,6 +280,7 @@ class BaselineInput(nn.Module):
                 bias=True,
                 stride=1,
                 padding=1,
+                padding_mode="reflect",
             ),
             nn.ReLU(True),
         )

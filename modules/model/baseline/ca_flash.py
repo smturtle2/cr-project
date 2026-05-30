@@ -66,9 +66,17 @@ class ConAttn(nn.Module):
                 kernel_size=ksize,
                 stride=1,
                 padding=ksize // 2,
+                padding_mode="reflect",
             ),
             nn.LeakyReLU(0.2, True),
-            nn.Conv2d(hidden_channels, out_channels=1, kernel_size=ksize, stride=1, padding=ksize // 2),
+            nn.Conv2d(
+                hidden_channels,
+                out_channels=1,
+                kernel_size=ksize,
+                stride=1,
+                padding=ksize // 2,
+                padding_mode="reflect",
+            ),
         )
         self.bias = nn.Sequential(
             nn.Conv2d(
@@ -77,14 +85,29 @@ class ConAttn(nn.Module):
                 kernel_size=ksize,
                 stride=1,
                 padding=ksize // 2,
+                padding_mode="reflect",
             ),
             nn.LeakyReLU(0.2, True),
-            nn.Conv2d(hidden_channels, out_channels=1, kernel_size=ksize, stride=1, padding=ksize // 2),
+            nn.Conv2d(
+                hidden_channels,
+                out_channels=1,
+                kernel_size=ksize,
+                stride=1,
+                padding=ksize // 2,
+                padding_mode="reflect",
+            ),
         )
         self.query = nn.Conv2d(in_channels=input_channels, out_channels=query_channels, kernel_size=1, stride=1, padding=0)
         self.value = nn.Conv2d(in_channels=input_channels, out_channels=input_channels, kernel_size=1, stride=1, padding=0)
         self.linear = nn.Sequential(
-            nn.Conv2d(in_channels=output_channels, out_channels=output_channels, kernel_size=3, stride=1, padding=1),
+            nn.Conv2d(
+                in_channels=output_channels,
+                out_channels=output_channels,
+                kernel_size=3,
+                stride=1,
+                padding=1,
+                padding_mode="reflect",
+            ),
             nn.LeakyReLU(0.2, True),
         )
 

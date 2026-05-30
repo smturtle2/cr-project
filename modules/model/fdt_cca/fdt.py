@@ -2,10 +2,9 @@ from __future__ import annotations
 
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 
 from ..fdt.fdt import CommonEncoder as FeatureEncoder
-from ..fdt.fdt import Residual3x3Block, ResizeConvUp
+from ..fdt.fdt import PixelShuffleUp, PixelUnshuffleDown, Residual3x3Block, ResizeConvUp
 
 
 def _validate_extractor_dims(
@@ -37,7 +36,7 @@ def _conv_block(
             kernel_size=3,
             stride=stride,
             padding=1,
-            padding_mode="replicate",
+            padding_mode="reflect",
         ),
         nn.GELU(),
         nn.Conv2d(
@@ -45,7 +44,7 @@ def _conv_block(
             out_channels,
             kernel_size=3,
             padding=1,
-            padding_mode="replicate",
+            padding_mode="reflect",
         ),
         nn.GELU(),
     )
@@ -66,9 +65,9 @@ class Stem(nn.Module):
             nn.Conv2d(
                 in_channels,
                 dim,
-                kernel_size=3,
-                padding=1,
-                padding_mode="replicate",
+                kernel_size=7,
+                padding=3,
+                padding_mode="reflect",
             ),
             nn.GELU(),
         )
@@ -81,27 +80,10 @@ class Stem(nn.Module):
 class ResizeProjectUp(nn.Module):
     def __init__(self, in_channels: int, out_channels: int):
         super().__init__()
-        self.proj = nn.Sequential(
-            nn.Conv2d(
-                in_channels,
-                out_channels,
-                kernel_size=3,
-                padding=1,
-                padding_mode="replicate",
-            ),
-            nn.GELU(),
-        )
-        self.refine = Residual3x3Block(out_channels)
+        self.up = PixelShuffleUp(in_channels, out_channels)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        x = F.interpolate(
-            x,
-            scale_factor=2,
-            mode="bilinear",
-            align_corners=False,
-        )
-        x = self.proj(x)
-        return self.refine(x)
+        return self.up(x)
 
 
 class DownLevels(nn.Module):
@@ -113,7 +95,7 @@ class DownLevels(nn.Module):
         super().__init__()
         self.stem = _conv_block(in_channels, dims[0])
         self.downs = nn.ModuleList(
-            [_conv_block(dims[i], dims[i + 1], stride=2) for i in range(len(dims) - 1)]
+            [PixelUnshuffleDown(dims[i], dims[i + 1]) for i in range(len(dims) - 1)]
         )
 
     def forward(self, x: torch.Tensor) -> list[torch.Tensor]:
@@ -234,14 +216,8 @@ class Extractor(nn.Module):
 
 
 class ResizeConvUpHalf(ResizeConvUp):
-    def __init__(self, in_channels: int, blocks: int = 2):
-        super().__init__(in_channels, blocks=blocks)
-        self.out_channels = in_channels // 2
-        self.refine = nn.Conv2d(
-            in_channels,
-            self.out_channels,
-            kernel_size=1,
-        )
+    def __init__(self, in_channels: int):
+        super().__init__(in_channels, out_channels=in_channels // 2)
 
 
 class FDT_CCA(nn.Module):

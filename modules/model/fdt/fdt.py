@@ -2,9 +2,98 @@ from __future__ import annotations
 
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 
 from ..module.attention import TransformerLayer
+
+
+class ChannelAttention(nn.Module):
+    def __init__(self, channels: int, ratio: int = 16):
+        super().__init__()
+        hidden = max(channels // ratio, 1)
+        self.avg_pool = nn.AdaptiveAvgPool2d(1)
+        self.max_pool = nn.AdaptiveMaxPool2d(1)
+        self.fc = nn.Sequential(
+            nn.Conv2d(channels, hidden, kernel_size=1, bias=False),
+            nn.GELU(),
+            nn.Conv2d(hidden, channels, kernel_size=1, bias=False),
+        )
+        self.sigmoid = nn.Sigmoid()
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        avg_out = self.fc(self.avg_pool(x))
+        max_out = self.fc(self.max_pool(x))
+        return self.sigmoid(avg_out + max_out) * x
+
+
+class SpatialAttention(nn.Module):
+    def __init__(self, kernel_size: int = 7):
+        super().__init__()
+        if kernel_size not in (3, 7):
+            raise ValueError("kernel_size must be 3 or 7")
+        padding = 3 if kernel_size == 7 else 1
+        self.conv = nn.Conv2d(
+            2,
+            1,
+            kernel_size=kernel_size,
+            padding=padding,
+            padding_mode="reflect",
+            bias=False,
+        )
+        self.sigmoid = nn.Sigmoid()
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        avg_out = torch.mean(x, dim=1, keepdim=True)
+        max_out, _ = torch.max(x, dim=1, keepdim=True)
+        attn = self.sigmoid(self.conv(torch.cat((avg_out, max_out), dim=1)))
+        return attn * x
+
+
+class PixelUnshuffleDown(nn.Module):
+    def __init__(self, in_channels: int, out_channels: int):
+        super().__init__()
+        if out_channels % 4 != 0:
+            raise ValueError("out_channels must be divisible by 4")
+        self.in_channels = in_channels
+        self.out_channels = out_channels
+        self.proj = nn.Sequential(
+            nn.Conv2d(
+                in_channels,
+                out_channels // 4,
+                kernel_size=3,
+                padding=1,
+                padding_mode="reflect",
+                bias=False,
+            ),
+            nn.PixelUnshuffle(2),
+            ChannelAttention(out_channels),
+            SpatialAttention(),
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.proj(x)
+
+
+class PixelShuffleUp(nn.Module):
+    def __init__(self, in_channels: int, out_channels: int):
+        super().__init__()
+        self.in_channels = in_channels
+        self.out_channels = out_channels
+        self.proj = nn.Sequential(
+            nn.Conv2d(
+                in_channels,
+                4 * out_channels,
+                kernel_size=3,
+                padding=1,
+                padding_mode="reflect",
+                bias=False,
+            ),
+            nn.PixelShuffle(2),
+            ChannelAttention(out_channels),
+            SpatialAttention(),
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.proj(x)
 
 
 class Residual3x3Block(nn.Module):
@@ -16,7 +105,7 @@ class Residual3x3Block(nn.Module):
                 channels,
                 kernel_size=3,
                 padding=1,
-                padding_mode="replicate",
+                padding_mode="reflect",
             ),
             nn.GELU(),
             nn.Conv2d(
@@ -24,7 +113,7 @@ class Residual3x3Block(nn.Module):
                 channels,
                 kernel_size=3,
                 padding=1,
-                padding_mode="replicate",
+                padding_mode="reflect",
             ),
         )
         nn.init.zeros_(self.net[-1].weight)
@@ -38,34 +127,21 @@ _Residual3x3Block = Residual3x3Block
 
 
 class ResizeConvUp(nn.Module):
-    def __init__(self, in_channels: int, blocks: int = 2):
+    def __init__(
+        self,
+        in_channels: int,
+        out_channels: int | None = None,
+    ):
         super().__init__()
-        if in_channels % 4 != 0:
+        if out_channels is None and in_channels % 4 != 0:
             raise ValueError("in_channels must be divisible by 4")
-        if blocks < 0:
-            raise ValueError("blocks must be non-negative")
 
         self.in_channels = in_channels
-        self.out_channels = in_channels // 4
-        self.blocks = blocks
-        self.residuals = nn.Sequential(
-            *[Residual3x3Block(in_channels) for _ in range(blocks)]
-        )
-        self.refine = nn.Conv2d(
-            in_channels,
-            self.out_channels,
-            kernel_size=1,
-        )
+        self.out_channels = out_channels if out_channels is not None else in_channels // 4
+        self.up = PixelShuffleUp(in_channels, self.out_channels)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        x = F.interpolate(
-            x,
-            scale_factor=2,
-            mode="bilinear",
-            align_corners=False,
-        )
-        x = self.residuals(x)
-        return self.refine(x)
+        return self.up(x)
 
 
 class FeatureTransformerBase(nn.Module):
@@ -107,17 +183,10 @@ class Encoder(FeatureTransformerBase):
                 dim,
                 kernel_size=3,
                 padding=1,
-                padding_mode="replicate",
+                padding_mode="reflect",
             ),
             nn.GELU(),
-            nn.Conv2d(
-                dim,
-                dim,
-                kernel_size=3,
-                stride=2,
-                padding=1,
-                padding_mode="replicate",
-            ),
+            PixelUnshuffleDown(dim, dim),
         )
         self.blocks = nn.ModuleList(
             [TransformerLayer(dim, num_heads=heads) for _ in range(num_layers)]

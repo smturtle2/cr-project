@@ -114,6 +114,10 @@ class AddFeatureDelta(nn.Module):
 
 def test_fdt_imports_and_runs_forward() -> None:
     model = FDT(num_layers=1, num_heads=4).eval()
+    assert isinstance(model.sar_encoder.proj[-1].proj[1], nn.PixelUnshuffle)
+    assert model.sar_encoder.proj[-1].proj[0].out_channels == model.dim // 4
+    assert isinstance(model.up.up.proj[1], nn.PixelShuffle)
+    assert model.up.up.proj[0].out_channels == model.up_dim * 4
     sar = torch.randn(1, 2, 16, 16)
     cloudy = torch.randn(1, 13, 16, 16)
 
@@ -150,6 +154,8 @@ def test_multi_head_attention_accepts_distinct_value_source() -> None:
 
 def test_resize_conv_up_returns_expected_feature_shape() -> None:
     up = ResizeConvUp(256).eval()
+    assert isinstance(up.up.proj[1], nn.PixelShuffle)
+    assert up.up.proj[0].out_channels == 256
     feature = torch.randn(2, 256, 8, 8)
 
     with torch.no_grad():
@@ -178,6 +184,12 @@ def test_fdt_cca_returns_full_resolution_sar_clear_and_cloud_features() -> None:
 def test_stems_and_extractors_return_full_resolution_features() -> None:
     sar_stem = Stem(2, 128).eval()
     cld_stem = Stem(15, 128).eval()
+    assert sar_stem.proj[0].kernel_size == (7, 7)
+    assert sar_stem.proj[0].padding == (3, 3)
+    assert sar_stem.proj[0].padding_mode == "reflect"
+    assert cld_stem.proj[0].kernel_size == (7, 7)
+    assert cld_stem.proj[0].padding == (3, 3)
+    assert cld_stem.proj[0].padding_mode == "reflect"
     sar_extractor = Extractor(
         128,
         dims=(128, 256, 512),
@@ -185,6 +197,15 @@ def test_stems_and_extractors_return_full_resolution_features() -> None:
         num_layers=1,
         heads=4,
     ).eval()
+    first_layer = sar_extractor.layers[0]
+    assert isinstance(first_layer.down.downs[0].proj[1], nn.PixelUnshuffle)
+    assert first_layer.down.downs[0].proj[0].out_channels == 64
+    assert isinstance(first_layer.down.downs[1].proj[1], nn.PixelUnshuffle)
+    assert first_layer.down.downs[1].proj[0].out_channels == 128
+    assert isinstance(first_layer.up.ups[0].up.proj[1], nn.PixelShuffle)
+    assert first_layer.up.ups[0].up.proj[0].out_channels == 1024
+    assert isinstance(first_layer.up.ups[1].up.proj[1], nn.PixelShuffle)
+    assert first_layer.up.ups[1].up.proj[0].out_channels == 512
     cld_extractor = Extractor(
         128,
         dims=(128, 256, 512),
@@ -336,15 +357,15 @@ def test_fdt_cca_accepts_four_level_extractor() -> None:
         num_heads=4,
         extractor_dims=(32, 64, 128, 256),
     ).eval()
-    sar = torch.randn(1, 2, 16, 16)
-    cloudy = torch.randn(1, 13, 16, 16)
+    sar = torch.randn(1, 2, 32, 32)
+    cloudy = torch.randn(1, 13, 32, 32)
 
     with torch.no_grad():
         outputs = model(sar, cloudy)
 
-    assert outputs[0].shape == (1, 64, 16, 16)
+    assert outputs[0].shape == (1, 64, 32, 32)
     for output in outputs[1:]:
-        assert output.shape == (1, 32, 16, 16)
+        assert output.shape == (1, 32, 32, 32)
 
 
 def test_fdt_cca_rejects_invalid_extractor_config() -> None:
