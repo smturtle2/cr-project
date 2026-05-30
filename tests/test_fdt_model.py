@@ -4,7 +4,14 @@ import torch
 import torch.nn as nn
 import pytest
 
-from modules.model.fdt import FDT, FDT_CRNet_Direct, FDT_CRNet_Side, ResizeConvUp
+from modules.model.fdt import (
+    DySample,
+    FDT,
+    FDT_CRNet_Direct,
+    FDT_CRNet_Side,
+    Residual3x3Block,
+    ResizeConvUp,
+)
 from modules.model.fdt_cca import (
     CCAMask,
     CCA_CRNet,
@@ -115,9 +122,10 @@ class AddFeatureDelta(nn.Module):
 def test_fdt_imports_and_runs_forward() -> None:
     model = FDT(num_layers=1, num_heads=4).eval()
     assert isinstance(model.sar_encoder.proj[-1].proj[1], nn.PixelUnshuffle)
+    assert isinstance(model.sar_encoder.proj[-1].proj[2], Residual3x3Block)
     assert model.sar_encoder.proj[-1].proj[0].out_channels == model.dim // 4
-    assert isinstance(model.up.up.proj[1], nn.PixelShuffle)
-    assert model.up.up.proj[0].out_channels == model.up_dim * 4
+    assert isinstance(model.up.up.proj[0], DySample)
+    assert model.up.up.proj[1].out_channels == model.up_dim
     sar = torch.randn(1, 2, 16, 16)
     cloudy = torch.randn(1, 13, 16, 16)
 
@@ -152,10 +160,29 @@ def test_multi_head_attention_accepts_distinct_value_source() -> None:
     assert torch.allclose(actual, expected)
 
 
+def test_dysample_preserves_channels_and_backpropagates() -> None:
+    up = DySample(64).train()
+    feature = torch.randn(2, 64, 5, 7, requires_grad=True)
+
+    actual = up(feature)
+    actual.square().mean().backward()
+
+    assert actual.shape == (2, 64, 10, 14)
+    assert actual.dtype == feature.dtype
+    assert bool(torch.isfinite(actual).all().item())
+    assert bool(torch.equal(up.scope.weight, torch.zeros_like(up.scope.weight)))
+    assert feature.grad is not None
+    assert bool(torch.isfinite(feature.grad).all().item())
+    assert up.offset.weight.grad is not None
+    assert bool(torch.isfinite(up.offset.weight.grad).all().item())
+    assert up.scope.weight.grad is not None
+    assert bool(torch.isfinite(up.scope.weight.grad).all().item())
+
+
 def test_resize_conv_up_returns_expected_feature_shape() -> None:
     up = ResizeConvUp(256).eval()
-    assert isinstance(up.up.proj[1], nn.PixelShuffle)
-    assert up.up.proj[0].out_channels == 256
+    assert isinstance(up.up.proj[0], DySample)
+    assert up.up.proj[1].out_channels == 64
     feature = torch.randn(2, 256, 8, 8)
 
     with torch.no_grad():
@@ -199,13 +226,15 @@ def test_stems_and_extractors_return_full_resolution_features() -> None:
     ).eval()
     first_layer = sar_extractor.layers[0]
     assert isinstance(first_layer.down.downs[0].proj[1], nn.PixelUnshuffle)
+    assert isinstance(first_layer.down.downs[0].proj[2], Residual3x3Block)
     assert first_layer.down.downs[0].proj[0].out_channels == 64
     assert isinstance(first_layer.down.downs[1].proj[1], nn.PixelUnshuffle)
+    assert isinstance(first_layer.down.downs[1].proj[2], Residual3x3Block)
     assert first_layer.down.downs[1].proj[0].out_channels == 128
-    assert isinstance(first_layer.up.ups[0].up.proj[1], nn.PixelShuffle)
-    assert first_layer.up.ups[0].up.proj[0].out_channels == 1024
-    assert isinstance(first_layer.up.ups[1].up.proj[1], nn.PixelShuffle)
-    assert first_layer.up.ups[1].up.proj[0].out_channels == 512
+    assert isinstance(first_layer.up.ups[0].up.proj[0], DySample)
+    assert first_layer.up.ups[0].up.proj[1].out_channels == 256
+    assert isinstance(first_layer.up.ups[1].up.proj[0], DySample)
+    assert first_layer.up.ups[1].up.proj[1].out_channels == 128
     cld_extractor = Extractor(
         128,
         dims=(128, 256, 512),

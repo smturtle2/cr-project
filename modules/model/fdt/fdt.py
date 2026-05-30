@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 from ..module.attention import TransformerLayer
 
@@ -76,6 +77,7 @@ class PixelUnshuffleDown(nn.Module):
                 bias=False,
             ),
             nn.PixelUnshuffle(2),
+            Residual3x3Block(out_channels),
             ChannelAttention(out_channels),
             SpatialAttention(),
         )
@@ -84,21 +86,102 @@ class PixelUnshuffleDown(nn.Module):
         return self.proj(x)
 
 
+# DySample+
+class DySample(nn.Module):
+    def __init__(self, channels: int, scale: int = 2, groups: int = 4):
+        super().__init__()
+        if scale <= 1:
+            raise ValueError("scale must be greater than one")
+        if channels < groups or channels % groups != 0:
+            raise ValueError("channels must be divisible by groups")
+
+        self.channels = channels
+        self.scale = scale
+        self.groups = groups
+        self.offset = nn.Conv2d(channels, 2 * groups * scale**2, kernel_size=1)
+        self.scope = nn.Conv2d(
+            channels,
+            2 * groups * scale**2,
+            kernel_size=1,
+            bias=False,
+        )
+        nn.init.normal_(self.offset.weight, mean=0.0, std=0.001)
+        nn.init.zeros_(self.offset.bias)
+        nn.init.zeros_(self.scope.weight)
+        self.register_buffer("init_pos", self._init_pos())
+
+    def _init_pos(self) -> torch.Tensor:
+        h = (
+            torch.arange(
+                (-self.scale + 1) / 2,
+                (self.scale - 1) / 2 + 1,
+            )
+            / self.scale
+        )
+        return (
+            torch.stack(torch.meshgrid(h, h, indexing="ij"))
+            .transpose(1, 2)
+            .repeat(1, self.groups, 1)
+            .reshape(1, -1, 1, 1)
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        batch, _, height, width = x.shape
+        offset = self.offset(x) * self.scope(x).sigmoid() * 0.5 + self.init_pos
+        offset = offset.view(batch, 2, -1, height, width)
+
+        coords_h = torch.arange(height, dtype=x.dtype, device=x.device) + 0.5
+        coords_w = torch.arange(width, dtype=x.dtype, device=x.device) + 0.5
+        coords = (
+            torch.stack(
+                torch.meshgrid(coords_w, coords_h, indexing="xy"),
+            )
+            .unsqueeze(1)
+            .unsqueeze(0)
+        )
+        normalizer = x.new_tensor([width, height]).view(1, 2, 1, 1, 1)
+        coords = 2.0 * (coords + offset) / normalizer - 1.0
+        coords = F.pixel_shuffle(
+            coords.view(batch, -1, height, width),
+            self.scale,
+        )
+        coords = (
+            coords.view(
+                batch,
+                2,
+                -1,
+                self.scale * height,
+                self.scale * width,
+            )
+            .permute(0, 2, 3, 4, 1)
+            .contiguous()
+            .flatten(0, 1)
+        )
+        return F.grid_sample(
+            x.reshape(batch * self.groups, -1, height, width),
+            coords,
+            mode="bilinear",
+            align_corners=False,
+            padding_mode="border",
+        ).view(batch, -1, self.scale * height, self.scale * width)
+
+
 class PixelShuffleUp(nn.Module):
     def __init__(self, in_channels: int, out_channels: int):
         super().__init__()
         self.in_channels = in_channels
         self.out_channels = out_channels
         self.proj = nn.Sequential(
+            DySample(in_channels),
             nn.Conv2d(
                 in_channels,
-                4 * out_channels,
+                out_channels,
                 kernel_size=3,
                 padding=1,
                 padding_mode="reflect",
                 bias=False,
             ),
-            nn.PixelShuffle(2),
+            Residual3x3Block(out_channels),
             ChannelAttention(out_channels),
             SpatialAttention(),
         )
@@ -149,7 +232,9 @@ class ResizeConvUp(nn.Module):
             raise ValueError("in_channels must be divisible by 4")
 
         self.in_channels = in_channels
-        self.out_channels = out_channels if out_channels is not None else in_channels // 4
+        self.out_channels = (
+            out_channels if out_channels is not None else in_channels // 4
+        )
         self.up = PixelShuffleUp(in_channels, self.out_channels)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
