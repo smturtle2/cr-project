@@ -57,9 +57,9 @@ class CCA_CRNet(ACA_CRNet):
             mode="direct",
         )
         cloud_channels = feature_sizes // 2 if cloud_channels is None else cloud_channels
-        delta_head = self.net[-1]
+        candidate_head = self.net[-1]
         self.net = nn.ModuleList(self.net[:-1])
-        self.delta_head = delta_head
+        self.candidate_head = candidate_head
         self.cca = CCAMask(cloud_channels, out_channels)
 
     def forward(
@@ -75,10 +75,9 @@ class CCA_CRNet(ACA_CRNet):
         for layer in self.net:
             z = layer(z)
 
-        delta = self.delta_head(z)
+        candidate = self.candidate_head(z).clamp(0.0, 5.0)
         mask = self.cca(cld_cloud)
-        prediction = cloudy + mask * delta
-        candidate = cloudy + delta
+        prediction = cloudy * (1.0 - mask) + candidate * mask
         if return_candidate and return_mask:
             return prediction, candidate, mask
         if return_candidate:

@@ -435,7 +435,7 @@ def test_cca_crnet_runs_without_attention_layer() -> None:
     assert prediction.dtype == feature.dtype
 
 
-def test_cca_crnet_applies_masked_signed_delta_to_cloudy() -> None:
+def test_cca_crnet_blends_cloudy_with_clamped_candidate() -> None:
     model = CCA_CRNet(
         out_channels=1,
         num_layers=0,
@@ -443,16 +443,25 @@ def test_cca_crnet_applies_masked_signed_delta_to_cloudy() -> None:
         cloud_channels=2,
         detail_blocks=1,
     ).eval()
-    model.delta_head = ConstantImage(out_channels=1, value=-4.0)
+    model.candidate_head = ConstantImage(out_channels=1, value=8.0)
     model.cca = FixedMask(value=0.25)
     feature = torch.zeros(1, 2, 4, 4)
     cld_cloud = torch.randn(1, 2, 4, 4)
-    cloudy = torch.full((1, 1, 4, 4), 10.0)
+    cloudy = torch.full((1, 1, 4, 4), 1.0)
 
     with torch.no_grad():
-        prediction = model(feature, cld_cloud, cloudy)
+        prediction, candidate, mask = model(
+            feature,
+            cld_cloud,
+            cloudy,
+            return_candidate=True,
+            return_mask=True,
+        )
 
-    assert torch.allclose(prediction, torch.full_like(prediction, 9.0))
+    expected_candidate = torch.full_like(candidate, 5.0)
+    expected_prediction = cloudy * (1.0 - mask) + expected_candidate * mask
+    assert torch.allclose(candidate, expected_candidate)
+    assert torch.allclose(prediction, expected_prediction)
 
 
 def test_cca_crnet_returns_candidate_and_mask_when_requested() -> None:
@@ -473,11 +482,13 @@ def test_cca_crnet_returns_candidate_and_mask_when_requested() -> None:
     assert prediction.shape == cloudy.shape
     assert candidate.shape == cloudy.shape
     assert mask.shape == cloudy.shape
+    assert torch.all(candidate >= 0.0)
+    assert torch.all(candidate <= 5.0)
     assert torch.all(mask >= 0.0)
     assert torch.all(mask <= 1.0)
 
 
-def test_cca_crnet_runs_with_delta_head() -> None:
+def test_cca_crnet_runs_with_candidate_head() -> None:
     model = CCA_CRNet(out_channels=13, num_layers=4).eval()
     feature = torch.randn(1, 256, 16, 16)
     cld_cloud = torch.randn(1, 128, 16, 16)
