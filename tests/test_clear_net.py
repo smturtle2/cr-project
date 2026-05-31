@@ -156,9 +156,10 @@ def test_clear_net_loss_adds_aux_ssim_when_present() -> None:
     model_output = (prediction, None, None, None, None, None, aux_prediction)
 
     loss = loss_fn(model_output, target)
-    expected = loss_fn.output_loss(prediction, target) + 0.05 * loss_fn.ssim_loss(
-        aux_prediction,
-        target,
+    expected = (
+        0.9 * F.l1_loss(prediction, target)
+        + 0.1 * loss_fn.ssim_loss(prediction, target)
+        + 0.05 * loss_fn.ssim_loss(aux_prediction, target)
     )
 
     assert torch.allclose(loss, expected)
