@@ -4,7 +4,17 @@ import torch
 from torch import nn
 
 from .aca_crnet import ACA_CRNet, init_net
-from .clear import Extractor, Stem
+from .clear import Extractor, Residual3x3Block, Stem
+
+
+class AuxHead(nn.Module):
+    def __init__(self, in_channels: int, out_channels: int):
+        super().__init__()
+        self.body = Residual3x3Block(in_channels)
+        self.proj = nn.Conv2d(in_channels, out_channels, kernel_size=1)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.proj(self.body(x)).clamp(0.0, 5.0)
 
 
 class CLEAR_Net(nn.Module):
@@ -61,6 +71,7 @@ class CLEAR_Net(nn.Module):
             num_layers=feature_layers,
             heads=num_heads,
         )
+        self.aux_head = AuxHead(self.dim, out_channels)
 
         decoder_kwargs = {}
         if ca is not None:
@@ -87,7 +98,8 @@ class CLEAR_Net(nn.Module):
         cloud_feat = cloudy_feat - clear_feat
         fused = torch.cat((sar_feat, clear_feat), dim=1)
 
+        aux_clear = self.aux_head(fused)
         prediction, candidate, mask = self.aca_crnet(fused, cloud_feat, cloudy)
         if self.return_decomposition:
-            return prediction, candidate, mask, sar_feat, clear_feat, cloud_feat
+            return prediction, candidate, mask, sar_feat, clear_feat, cloud_feat, aux_clear
         return prediction

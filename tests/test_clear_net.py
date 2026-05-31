@@ -72,14 +72,16 @@ def test_clear_net_owns_feature_paths_directly() -> None:
     cloudy = torch.randn(1, 13, 8, 8)
 
     with torch.no_grad():
-        _, _, _, sar_feat, clear_feat, cloud_feat = model(sar, cloudy)
+        _, _, _, sar_feat, clear_feat, cloud_feat, aux_clear = model(sar, cloudy)
 
     assert hasattr(model, "sar_stem")
     assert hasattr(model, "cloudy_stem")
     assert hasattr(model, "clear_extractor")
+    assert hasattr(model, "aux_head")
     assert sar_feat.shape == (1, 4, 8, 8)
     assert clear_feat.shape == (1, 4, 8, 8)
     assert cloud_feat.shape == (1, 4, 8, 8)
+    assert aux_clear.shape == cloudy.shape
     assert bool(torch.isfinite(clear_feat).all().item())
 
 
@@ -116,17 +118,20 @@ def test_clear_net_forward_and_decomposition_contract() -> None:
     with torch.no_grad():
         outputs = model(sar, cloudy)
 
-    assert len(outputs) == 6
-    prediction, candidate, mask, sar_feat, clear_feat, cloud_feat = outputs
+    assert len(outputs) == 7
+    prediction, candidate, mask, sar_feat, clear_feat, cloud_feat, aux_clear = outputs
     assert prediction.shape == cloudy.shape
     assert candidate.shape == cloudy.shape
     assert mask.shape == cloudy.shape
+    assert aux_clear.shape == cloudy.shape
     for feature in (sar_feat, clear_feat, cloud_feat):
         assert feature.shape == (1, 4, 8, 8)
     assert torch.all(candidate >= 0.0)
     assert torch.all(candidate <= 5.0)
     assert torch.all(mask >= 0.0)
     assert torch.all(mask <= 1.0)
+    assert torch.all(aux_clear >= 0.0)
+    assert torch.all(aux_clear <= 5.0)
 
 
 def test_clear_net_loss_combines_l1_and_ssim() -> None:
@@ -138,6 +143,22 @@ def test_clear_net_loss_combines_l1_and_ssim() -> None:
     loss = loss_fn(model_output, target)
     expected = 0.9 * F.l1_loss(prediction, target) + 0.1 * (
         1.0 - loss_fn.ssim(prediction, target)
+    )
+
+    assert torch.allclose(loss, expected)
+
+
+def test_clear_net_loss_adds_aux_ssim_when_present() -> None:
+    loss_fn = CLEAR_NetLoss()
+    prediction = torch.rand(2, 13, 16, 16) * 5.0
+    aux_prediction = torch.rand(2, 13, 16, 16) * 5.0
+    target = torch.rand(2, 13, 16, 16) * 5.0
+    model_output = (prediction, None, None, None, None, None, aux_prediction)
+
+    loss = loss_fn(model_output, target)
+    expected = loss_fn.output_loss(prediction, target) + 0.05 * loss_fn.ssim_loss(
+        aux_prediction,
+        target,
     )
 
     assert torch.allclose(loss, expected)

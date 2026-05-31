@@ -26,11 +26,11 @@ def split_fdt_output(
     torch.Tensor,
     torch.Tensor,
 ]:
-    if not isinstance(model_output, tuple) or len(model_output) != 6:
+    if not isinstance(model_output, tuple) or len(model_output) < 6:
         raise TypeError(
             "FDT_CRNet must return prediction, candidate, mask, and three decomposition tensors"
         )
-    prediction, candidate, mask, sar_feat, cld_clear, cld_cloud = model_output
+    prediction, candidate, mask, sar_feat, cld_clear, cld_cloud = model_output[:6]
     return prediction, candidate, mask, sar_feat, cld_clear, cld_cloud
 
 

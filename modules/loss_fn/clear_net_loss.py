@@ -20,16 +20,22 @@ class CLEAR_NetLoss(nn.Module):
         *,
         l1_weight: float = 0.9,
         ssim_weight: float = 0.1,
+        aux_ssim_weight: float = 0.05,
         data_range: float = 5.0,
     ) -> None:
         super().__init__()
         self.l1_weight = float(l1_weight)
         self.ssim_weight = float(ssim_weight)
+        self.aux_ssim_weight = float(aux_ssim_weight)
         self.ssim = GaussianSSIM(data_range=data_range)
 
     def forward(self, model_output: Any, target: torch.Tensor) -> torch.Tensor:
         prediction = self._prediction_from_output(model_output)
-        return self.output_loss(prediction, target)
+        loss = self.output_loss(prediction, target)
+        aux_prediction = self._aux_prediction_from_output(model_output)
+        if aux_prediction is not None:
+            loss = loss + self.aux_ssim_weight * self.ssim_loss(aux_prediction, target)
+        return loss
 
     def _prediction_from_output(self, model_output: Any) -> torch.Tensor:
         if isinstance(model_output, torch.Tensor):
@@ -40,6 +46,16 @@ class CLEAR_NetLoss(nn.Module):
         if not isinstance(prediction, torch.Tensor):
             raise TypeError("CLEAR_Net prediction output must be a tensor")
         return prediction
+
+    def _aux_prediction_from_output(self, model_output: Any) -> torch.Tensor | None:
+        if not isinstance(model_output, tuple) or len(model_output) < 7:
+            return None
+        aux_prediction = model_output[6]
+        if aux_prediction is None:
+            return None
+        if not isinstance(aux_prediction, torch.Tensor):
+            raise TypeError("CLEAR_Net aux output must be a tensor")
+        return aux_prediction
 
     def output_loss(self, prediction: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
         _check_same_shape(prediction, target)
@@ -59,11 +75,13 @@ def make_clear_net_loss_fn(
     *,
     l1_weight: float = 0.9,
     ssim_weight: float = 0.1,
+    aux_ssim_weight: float = 0.05,
     data_range: float = 5.0,
 ) -> Callable[[Any, Mapping[str, torch.Tensor]], torch.Tensor]:
     criterion = CLEAR_NetLoss(
         l1_weight=l1_weight,
         ssim_weight=ssim_weight,
+        aux_ssim_weight=aux_ssim_weight,
         data_range=data_range,
     )
 
