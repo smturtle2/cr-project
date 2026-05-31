@@ -46,6 +46,7 @@ class CLEAR_Net(nn.Module):
         self.return_decomposition = return_decomposition
         self.dim = dim
         self.extractor_dims = extractor_dims
+        self.fused_extractor_dims = tuple(channel * 2 for channel in extractor_dims)
         self.feature_channels = extractor_dims[0]
 
         self.sar_stem = Stem(sar_channels, self.feature_channels)
@@ -67,6 +68,13 @@ class CLEAR_Net(nn.Module):
         self.clear_extractor = Extractor(
             self.feature_channels,
             dims=extractor_dims,
+            layer_count=extractor_layers,
+            num_layers=feature_layers,
+            heads=num_heads,
+        )
+        self.fused_extractor = Extractor(
+            self.dim,
+            dims=self.fused_extractor_dims,
             layer_count=extractor_layers,
             num_layers=feature_layers,
             heads=num_heads,
@@ -97,6 +105,7 @@ class CLEAR_Net(nn.Module):
         clear_feat = self.clear_extractor(cloudy_feat)
         cloud_feat = cloudy_feat - clear_feat
         fused = torch.cat((sar_feat, clear_feat), dim=1)
+        fused = self.fused_extractor(fused)
 
         aux_clear = self.aux_head(fused)
         cr_output = self.aca_crnet(fused, cloud_feat, cloudy)
