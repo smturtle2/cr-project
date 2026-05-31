@@ -170,6 +170,5 @@ class ConAttn(nn.Module):
         out = y + F.relu(self.lambda_scale).to(y.dtype) * gate
 
         out = out.transpose(1, 2).reshape(batch, num_tokens, value_channels)
-        out = out.transpose(1, 2).reshape(batch, value_channels, height, width)
+        out = out.transpose(1, 2).reshape(batch, value_channels, height, width).contiguous()
         return self.linear(out) + x
-

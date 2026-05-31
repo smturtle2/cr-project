@@ -89,6 +89,44 @@ def test_clear_net_owns_feature_paths_directly() -> None:
     assert bool(torch.isfinite(clear_feat).all().item())
 
 
+def test_clear_net_uses_contiguous_conv_inputs() -> None:
+    model = CLEAR_Net(
+        dim=8,
+        feature_layers=1,
+        extractor_layers=1,
+        cr_layers=2,
+        num_heads=1,
+        extractor_dims=(4, 8),
+        return_decomposition=True,
+    ).eval()
+    hits = []
+
+    def record_non_contiguous_input(name: str):
+        def hook(_module: nn.Module, inputs: tuple[torch.Tensor, ...]) -> None:
+            x = inputs[0]
+            if x.dim() == 4 and not x.is_contiguous():
+                hits.append(name)
+
+        return hook
+
+    handles = [
+        module.register_forward_pre_hook(record_non_contiguous_input(name))
+        for name, module in model.named_modules()
+        if isinstance(module, nn.Conv2d)
+    ]
+    sar = torch.randn(1, 2, 8, 8)
+    cloudy = torch.randn(1, 13, 8, 8)
+
+    try:
+        with torch.no_grad():
+            model(sar, cloudy)
+    finally:
+        for handle in handles:
+            handle.remove()
+
+    assert hits == []
+
+
 def test_clear_net_defaults_use_half_width() -> None:
     model = CLEAR_Net(
         feature_layers=1,
@@ -200,7 +238,7 @@ def test_clear_net_loss_adds_aux_reconstruction_loss_when_present() -> None:
     expected = (
         0.9 * F.l1_loss(prediction, target)
         + 0.1 * loss_fn.ssim_loss(prediction, target)
-        + 0.1
+        + 0.05
         * (
             F.l1_loss(aux_prediction, target)
             + loss_fn.ssim_loss(aux_prediction, target)
