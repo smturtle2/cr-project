@@ -67,6 +67,17 @@ class FDTCCALossTest(unittest.TestCase):
 
         self.assertTrue(torch.allclose(loss, expected))
 
+    def test_default_ssim_data_range_matches_five_unit_inputs(self) -> None:
+        loss_fn = FDTCCALoss()
+        unit_range_loss_fn = FDTCCALoss(data_range=1.0)
+        prediction = torch.rand(2, 13, 16, 16) * 5.0
+        target = torch.rand(2, 13, 16, 16) * 5.0
+
+        ssim = loss_fn.ssim(prediction, target)
+        expected = unit_range_loss_fn.ssim(prediction / 5.0, target / 5.0)
+
+        self.assertTrue(torch.allclose(ssim, expected, atol=1e-6))
+
     def test_factory_returns_tmp_main_compatible_loss_fn(self) -> None:
         loss_fn = make_fdt_cca_loss_fn()
         criterion = FDTCCALoss()

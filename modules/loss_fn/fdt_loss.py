@@ -22,12 +22,13 @@ class FDTCCALoss(nn.Module):
         *,
         l1_weight: float = 0.9,
         ssim_weight: float = 0.1,
+        data_range: float = 5.0,
     ) -> None:
         super().__init__()
 
         self.l1_weight = float(l1_weight)
         self.ssim_weight = float(ssim_weight)
-        self.ssim = _GaussianSSIM()
+        self.ssim = _GaussianSSIM(data_range=data_range)
 
     def forward(
         self,
@@ -76,10 +77,12 @@ def make_fdt_cca_loss_fn(
     *,
     l1_weight: float = 0.9,
     ssim_weight: float = 0.1,
+    data_range: float = 5.0,
 ) -> Callable[[Any, Mapping[str, torch.Tensor]], torch.Tensor]:
     criterion = FDTCCALoss(
         l1_weight=l1_weight,
         ssim_weight=ssim_weight,
+        data_range=data_range,
     )
 
     def loss_fn(
@@ -97,10 +100,12 @@ class _GaussianSSIM(nn.Module):
         *,
         window_size: int = 11,
         sigma: float = 1.5,
+        data_range: float = 5.0,
         eps: float = 1.6e-9,
     ) -> None:
         super().__init__()
         self.window_size = window_size
+        self.data_range = float(data_range)
         self.eps = eps
         self.register_buffer("_window", self._create_window(window_size, sigma))
 
@@ -157,8 +162,8 @@ class _GaussianSSIM(nn.Module):
         sigma2_sq = (self._conv(img2 * img2, window, channel) - mu2_sq).clamp_min(0.0)
         sigma12 = self._conv(img1 * img2, window, channel) - mu1_mu2
 
-        c1 = 0.01**2
-        c2 = 0.03**2
+        c1 = (0.01 * self.data_range) ** 2
+        c2 = (0.03 * self.data_range) ** 2
         numerator = (2 * mu1_mu2 + c1) * (2 * sigma12 + c2)
         denominator = (mu1_sq + mu2_sq + c1) * (sigma1_sq + sigma2_sq + c2)
         ssim_map = numerator / denominator.clamp_min(self.eps)
