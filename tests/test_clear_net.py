@@ -85,7 +85,7 @@ def test_clear_net_owns_feature_paths_directly() -> None:
     assert bool(torch.isfinite(clear_feat).all().item())
 
 
-def test_aca_crnet_blends_cloudy_with_clamped_candidate() -> None:
+def test_aca_crnet_blends_cloudy_with_raw_candidate() -> None:
     model = ACA_CRNet(out_channels=1, num_layers=0, feature_sizes=2, cloud_channels=2).eval()
     model.candidate_head = ConstantImage(out_channels=1, value=8.0)
     model.mask = FixedMask(value=0.25, out_channels=1)
@@ -96,7 +96,7 @@ def test_aca_crnet_blends_cloudy_with_clamped_candidate() -> None:
     with torch.no_grad():
         prediction, candidate, mask = model(fused, cloud_feat, cloudy)
 
-    expected_candidate = torch.full_like(candidate, 5.0)
+    expected_candidate = torch.full_like(candidate, 8.0)
     expected_prediction = cloudy * (1.0 - mask) + expected_candidate * mask
     assert torch.allclose(candidate, expected_candidate)
     assert torch.allclose(prediction, expected_prediction)
@@ -126,12 +126,10 @@ def test_clear_net_forward_and_decomposition_contract() -> None:
     assert aux_clear.shape == cloudy.shape
     for feature in (sar_feat, clear_feat, cloud_feat):
         assert feature.shape == (1, 4, 8, 8)
-    assert torch.all(candidate >= 0.0)
-    assert torch.all(candidate <= 5.0)
     assert torch.all(mask >= 0.0)
     assert torch.all(mask <= 1.0)
-    assert torch.all(aux_clear >= 0.0)
-    assert torch.all(aux_clear <= 5.0)
+    assert bool(torch.isfinite(candidate).all().item())
+    assert bool(torch.isfinite(aux_clear).all().item())
 
 
 def test_clear_net_loss_combines_l1_and_ssim() -> None:
@@ -160,6 +158,23 @@ def test_clear_net_loss_adds_aux_ssim_when_present() -> None:
         0.9 * F.l1_loss(prediction, target)
         + 0.1 * loss_fn.ssim_loss(prediction, target)
         + 0.05 * loss_fn.ssim_loss(aux_prediction, target)
+    )
+
+    assert torch.allclose(loss, expected)
+
+
+def test_clear_net_loss_penalizes_candidate_and_aux_range_violations() -> None:
+    loss_fn = CLEAR_NetLoss(aux_ssim_weight=0.0)
+    prediction = torch.zeros(1, 1, 4, 4)
+    target = torch.zeros_like(prediction)
+    candidate = torch.full_like(prediction, -1.0)
+    aux_prediction = torch.full_like(prediction, 6.0)
+    model_output = (prediction, candidate, None, None, None, None, aux_prediction)
+
+    loss = loss_fn(model_output, target)
+    expected = 0.01 * (
+        loss_fn.range_loss(candidate)
+        + loss_fn.range_loss(aux_prediction)
     )
 
     assert torch.allclose(loss, expected)

@@ -146,7 +146,7 @@ class ACA_CRNet(nn.Module):
         for layer in self.body:
             z = layer(z)
 
-        candidate = self.candidate_head(z).clamp(0.0, 5.0)
+        candidate = self.candidate_head(z)
         mask = self.mask(cloud_feat)
         prediction = cloudy * (1.0 - mask) + candidate * mask
         return prediction, candidate, mask

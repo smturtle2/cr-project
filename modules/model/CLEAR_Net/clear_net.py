@@ -14,7 +14,7 @@ class AuxHead(nn.Module):
         self.proj = nn.Conv2d(in_channels, out_channels, kernel_size=1)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.proj(self.body(x)).clamp(0.0, 5.0)
+        return self.proj(self.body(x))
 
 
 class CLEAR_Net(nn.Module):

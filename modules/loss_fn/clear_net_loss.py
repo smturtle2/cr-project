@@ -21,16 +21,27 @@ class CLEAR_NetLoss(nn.Module):
         l1_weight: float = 0.9,
         ssim_weight: float = 0.1,
         aux_ssim_weight: float = 0.05,
+        range_weight: float = 0.01,
         data_range: float = 5.0,
     ) -> None:
         super().__init__()
         self.l1_weight = float(l1_weight)
         self.ssim_weight = float(ssim_weight)
         self.aux_ssim_weight = float(aux_ssim_weight)
+        self.range_weight = float(range_weight)
+        self.range_max = float(data_range)
         self.ssim = GaussianSSIM(data_range=data_range)
 
     def forward(self, model_output: Any, target: torch.Tensor) -> torch.Tensor:
-        prediction, aux_prediction = self._unpack_output(model_output)
+        if isinstance(model_output, tuple):
+            prediction = model_output[0]
+            candidate = model_output[1] if len(model_output) > 1 else None
+            aux_prediction = model_output[6] if len(model_output) > 6 else None
+        else:
+            prediction = model_output
+            candidate = None
+            aux_prediction = None
+
         _check_same_shape(prediction, target)
         prediction = prediction.float()
         target = target.float()
@@ -41,28 +52,21 @@ class CLEAR_NetLoss(nn.Module):
         )
         if aux_prediction is not None:
             loss = loss + self.aux_ssim_weight * self.ssim_loss(aux_prediction, target)
+        if candidate is not None:
+            loss = loss + self.range_weight * self.range_loss(candidate)
+        if aux_prediction is not None:
+            loss = loss + self.range_weight * self.range_loss(aux_prediction)
         return loss
-
-    def _unpack_output(self, model_output: Any) -> tuple[torch.Tensor, torch.Tensor | None]:
-        if isinstance(model_output, torch.Tensor):
-            return model_output, None
-        if not isinstance(model_output, tuple) or len(model_output) < 1:
-            raise TypeError("CLEAR_NetLoss expects a tensor or CLEAR_Net output tuple")
-
-        prediction = model_output[0]
-        if not isinstance(prediction, torch.Tensor):
-            raise TypeError("CLEAR_Net prediction output must be a tensor")
-
-        aux_prediction = None
-        if len(model_output) >= 7:
-            aux_prediction = model_output[6]
-            if aux_prediction is not None and not isinstance(aux_prediction, torch.Tensor):
-                raise TypeError("CLEAR_Net aux output must be a tensor")
-        return prediction, aux_prediction
 
     def ssim_loss(self, prediction: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
         _check_same_shape(prediction, target)
         return 1.0 - self.ssim(prediction.float(), target.float())
+
+    def range_loss(self, prediction: torch.Tensor) -> torch.Tensor:
+        prediction = prediction.float()
+        below_range = F.relu(-prediction).square().mean()
+        above_range = F.relu(prediction - self.range_max).square().mean()
+        return below_range + above_range
 
 
 def make_clear_net_loss_fn(
@@ -70,12 +74,14 @@ def make_clear_net_loss_fn(
     l1_weight: float = 0.9,
     ssim_weight: float = 0.1,
     aux_ssim_weight: float = 0.05,
+    range_weight: float = 0.01,
     data_range: float = 5.0,
 ) -> Callable[[Any, Mapping[str, torch.Tensor]], torch.Tensor]:
     criterion = CLEAR_NetLoss(
         l1_weight=l1_weight,
         ssim_weight=ssim_weight,
         aux_ssim_weight=aux_ssim_weight,
+        range_weight=range_weight,
         data_range=data_range,
     )
 
