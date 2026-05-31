@@ -35,7 +35,7 @@ class FDTCCALossTest(unittest.TestCase):
         prediction = torch.rand(2, 13, 16, 16) * 5.0
         candidate = torch.rand(2, 13, 16, 16) * 5.0
         target = torch.rand(2, 13, 16, 16) * 5.0
-        model_output = (prediction, candidate, None, None, None, None)
+        model_output = {"prediction": prediction, "candidate": candidate}
 
         loss = loss_fn(model_output, target)
         expected = self._expected_output_loss(loss_fn, prediction, target)
@@ -84,7 +84,7 @@ class FDTCCALossTest(unittest.TestCase):
         prediction = torch.rand(2, 13, 16, 16) * 5.0
         target = torch.rand(2, 13, 16, 16) * 5.0
 
-        loss = loss_fn((prediction, None, None), {"target": target})
+        loss = loss_fn({"prediction": prediction}, {"target": target})
         expected = criterion(prediction, target)
 
         self.assertTrue(torch.allclose(loss, expected))
@@ -105,7 +105,7 @@ class FDTCCALossTest(unittest.TestCase):
         prediction = (torch.rand(2, 13, 16, 16) * 5.0).requires_grad_()
         candidate = (torch.rand(2, 13, 16, 16) * 5.0).requires_grad_()
         target = torch.rand(2, 13, 16, 16) * 5.0
-        model_output = (prediction, candidate, None, None, None, None)
+        model_output = {"prediction": prediction, "candidate": candidate}
 
         loss = loss_fn(model_output, target)
         loss.backward()

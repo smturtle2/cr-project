@@ -141,7 +141,7 @@ class ACA_CRNet(nn.Module):
         fused_feature: torch.Tensor,
         cloud_feat: torch.Tensor,
         cloudy: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    ) -> dict[str, torch.Tensor]:
         z = fused_feature
         for layer in self.body:
             z = layer(z)
@@ -149,7 +149,11 @@ class ACA_CRNet(nn.Module):
         candidate = self.candidate_head(z)
         mask = self.mask(cloud_feat)
         prediction = cloudy * (1.0 - mask) + candidate * mask
-        return prediction, candidate, mask
+        return {
+            "prediction": prediction,
+            "candidate": candidate,
+            "mask": mask,
+        }
 
 
 def init_weights(net: nn.Module, init_type: str = "kaiming-uniform", gain: float = 0.02):

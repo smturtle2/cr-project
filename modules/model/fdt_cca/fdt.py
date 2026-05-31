@@ -297,9 +297,9 @@ class FDT_CCA(nn.Module):
 
         output = torch.cat((sar_feat, cld_clear), dim=1)
 
-        return (
-            output,
-            sar_feat,
-            cld_clear,
-            cld_cloud,
-        )
+        return {
+            "feature": output,
+            "sar_feat": sar_feat,
+            "clear_feat": cld_clear,
+            "cloud_feat": cld_cloud,
+        }

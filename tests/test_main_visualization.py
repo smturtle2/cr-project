@@ -86,14 +86,14 @@ class MainVisualizationTest(unittest.TestCase):
 
         feature = torch.randn(8, 4, 4)
         mask = torch.full((13, 4, 4), 0.25)
-        model_output = (
-            torch.zeros(13, 4, 4),
-            torch.zeros(13, 4, 4),
-            mask,
-            feature,
-            feature.roll(shifts=1, dims=-1),
-            torch.randn(8, 4, 4),
-        )
+        model_output = {
+            "prediction": torch.zeros(13, 4, 4),
+            "candidate": torch.zeros(13, 4, 4),
+            "mask": mask,
+            "sar_feat": feature,
+            "clear_feat": feature.roll(shifts=1, dims=-1),
+            "cloud_feat": torch.randn(8, 4, 4),
+        }
 
         panels = build_fdt_example_panels(
             cloudy=torch.zeros(13, 4, 4),
@@ -138,7 +138,14 @@ class MainVisualizationTest(unittest.TestCase):
             feature = torch.full((1, 2, 2, 2), value)
             candidate = torch.full((1, 13, 2, 2), value)
             mask = torch.full((1, 13, 2, 2), 0.25)
-            return feature, candidate, mask, feature + 1.0, feature + 2.0, feature + 3.0
+            return {
+                "prediction": feature,
+                "candidate": candidate,
+                "mask": mask,
+                "sar_feat": feature + 1.0,
+                "clear_feat": feature + 2.0,
+                "cloud_feat": feature + 3.0,
+            }
 
         dataloader = [{"value": 1.0}, {"value": 2.0}]
 

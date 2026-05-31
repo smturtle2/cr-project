@@ -72,12 +72,16 @@ def test_clear_net_owns_feature_paths_directly() -> None:
     cloudy = torch.randn(1, 13, 8, 8)
 
     with torch.no_grad():
-        _, _, _, sar_feat, clear_feat, cloud_feat, aux_clear = model(sar, cloudy)
+        outputs = model(sar, cloudy)
 
     assert hasattr(model, "sar_stem")
     assert hasattr(model, "cloudy_stem")
     assert hasattr(model, "clear_extractor")
     assert hasattr(model, "aux_head")
+    sar_feat = outputs["sar_feat"]
+    clear_feat = outputs["clear_feat"]
+    cloud_feat = outputs["cloud_feat"]
+    aux_clear = outputs["aux_clear"]
     assert sar_feat.shape == (1, 4, 8, 8)
     assert clear_feat.shape == (1, 4, 8, 8)
     assert cloud_feat.shape == (1, 4, 8, 8)
@@ -94,8 +98,11 @@ def test_aca_crnet_blends_cloudy_with_raw_candidate() -> None:
     cloudy = torch.full((1, 1, 4, 4), 1.0)
 
     with torch.no_grad():
-        prediction, candidate, mask = model(fused, cloud_feat, cloudy)
+        output = model(fused, cloud_feat, cloudy)
 
+    prediction = output["prediction"]
+    candidate = output["candidate"]
+    mask = output["mask"]
     expected_candidate = torch.full_like(candidate, 8.0)
     expected_prediction = cloudy * (1.0 - mask) + expected_candidate * mask
     assert torch.allclose(candidate, expected_candidate)
@@ -118,8 +125,22 @@ def test_clear_net_forward_and_decomposition_contract() -> None:
     with torch.no_grad():
         outputs = model(sar, cloudy)
 
-    assert len(outputs) == 7
-    prediction, candidate, mask, sar_feat, clear_feat, cloud_feat, aux_clear = outputs
+    assert set(outputs) == {
+        "prediction",
+        "candidate",
+        "mask",
+        "sar_feat",
+        "clear_feat",
+        "cloud_feat",
+        "aux_clear",
+    }
+    prediction = outputs["prediction"]
+    candidate = outputs["candidate"]
+    mask = outputs["mask"]
+    sar_feat = outputs["sar_feat"]
+    clear_feat = outputs["clear_feat"]
+    cloud_feat = outputs["cloud_feat"]
+    aux_clear = outputs["aux_clear"]
     assert prediction.shape == cloudy.shape
     assert candidate.shape == cloudy.shape
     assert mask.shape == cloudy.shape
@@ -136,7 +157,7 @@ def test_clear_net_loss_combines_l1_and_ssim() -> None:
     loss_fn = CLEAR_NetLoss()
     prediction = torch.rand(2, 13, 16, 16) * 5.0
     target = torch.rand(2, 13, 16, 16) * 5.0
-    model_output = (prediction, None, None)
+    model_output = {"prediction": prediction}
 
     loss = loss_fn(model_output, target)
     expected = 0.9 * F.l1_loss(prediction, target) + 0.1 * (
@@ -151,7 +172,7 @@ def test_clear_net_loss_adds_aux_ssim_when_present() -> None:
     prediction = torch.rand(2, 13, 16, 16) * 5.0
     aux_prediction = torch.rand(2, 13, 16, 16) * 5.0
     target = torch.rand(2, 13, 16, 16) * 5.0
-    model_output = (prediction, None, None, None, None, None, aux_prediction)
+    model_output = {"prediction": prediction, "aux_clear": aux_prediction}
 
     loss = loss_fn(model_output, target)
     expected = (
@@ -169,7 +190,11 @@ def test_clear_net_loss_penalizes_candidate_and_aux_range_violations() -> None:
     target = torch.zeros_like(prediction)
     candidate = torch.full_like(prediction, -1.0)
     aux_prediction = torch.full_like(prediction, 6.0)
-    model_output = (prediction, candidate, None, None, None, None, aux_prediction)
+    model_output = {
+        "prediction": prediction,
+        "candidate": candidate,
+        "aux_clear": aux_prediction,
+    }
 
     loss = loss_fn(model_output, target)
     expected = (
@@ -186,7 +211,7 @@ def test_clear_net_loss_factory_accepts_training_batch_contract() -> None:
     prediction = torch.rand(2, 13, 16, 16) * 5.0
     target = torch.rand(2, 13, 16, 16) * 5.0
 
-    loss = loss_fn((prediction, None, None), {"target": target})
+    loss = loss_fn({"prediction": prediction}, {"target": target})
 
     assert torch.allclose(loss, criterion(prediction, target))
 

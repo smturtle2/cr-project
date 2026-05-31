@@ -369,10 +369,10 @@ class FDT(nn.Module):
 
         com_fused = self.com_fuse(torch.cat((sar_com, cld_com), dim=1))
         output = torch.cat((com_fused, sar_comp, cld_comp), dim=1)
-        return (
-            output,
-            sar_com,
-            cld_com,
-            sar_comp,
-            cld_comp,
-        )
+        return {
+            "feature": output,
+            "sar_common": sar_com,
+            "cloudy_common": cld_com,
+            "sar_component": sar_comp,
+            "cloudy_component": cld_comp,
+        }

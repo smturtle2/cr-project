@@ -44,16 +44,17 @@ class FDT_CRNet_Direct(nn.Module):
         self.crnet = init_net(crnet, init_type=init_type)
 
     def forward(self, sar: torch.Tensor, cloudy: torch.Tensor):
-        (
-            fdt_feature,
-            sar_com,
-            cld_com,
-            sar_comp,
-            cld_comp,
-        ) = self.fdt(sar, cloudy)
+        fdt_output = self.fdt(sar, cloudy)
+        fdt_feature = fdt_output["feature"]
         prediction = cloudy + self.crnet(fdt_feature)
         if self.return_decomposition:
-            return prediction, sar_com, cld_com, sar_comp, cld_comp
+            return {
+                "prediction": prediction,
+                "sar_common": fdt_output["sar_common"],
+                "cloudy_common": fdt_output["cloudy_common"],
+                "sar_component": fdt_output["sar_component"],
+                "cloudy_component": fdt_output["cloudy_component"],
+            }
         return prediction
 
 
@@ -100,14 +101,15 @@ class FDT_CRNet_Side(nn.Module):
 
     def forward(self, sar: torch.Tensor, cloudy: torch.Tensor):
         main_feature = self.input(sar, cloudy)
-        (
-            fdt_feature,
-            sar_com,
-            cld_com,
-            sar_comp,
-            cld_comp,
-        ) = self.fdt(sar, cloudy)
+        fdt_output = self.fdt(sar, cloudy)
+        fdt_feature = fdt_output["feature"]
         prediction = self.crnet(main_feature, fdt_feature)
         if self.return_decomposition:
-            return prediction, sar_com, cld_com, sar_comp, cld_comp
+            return {
+                "prediction": prediction,
+                "sar_common": fdt_output["sar_common"],
+                "cloudy_common": fdt_output["cloudy_common"],
+                "sar_component": fdt_output["sar_component"],
+                "cloudy_component": fdt_output["cloudy_component"],
+            }
         return prediction

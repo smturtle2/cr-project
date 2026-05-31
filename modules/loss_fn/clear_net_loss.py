@@ -33,10 +33,10 @@ class CLEAR_NetLoss(nn.Module):
         self.ssim = GaussianSSIM(data_range=data_range)
 
     def forward(self, model_output: Any, target: torch.Tensor) -> torch.Tensor:
-        if isinstance(model_output, tuple):
-            prediction = model_output[0]
-            candidate = model_output[1] if len(model_output) > 1 else None
-            aux_prediction = model_output[6] if len(model_output) > 6 else None
+        if isinstance(model_output, Mapping):
+            prediction = model_output["prediction"]
+            candidate = model_output.get("candidate")
+            aux_prediction = model_output.get("aux_clear")
         else:
             prediction = model_output
             candidate = None

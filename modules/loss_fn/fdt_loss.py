@@ -44,11 +44,12 @@ class FDTCCALoss(nn.Module):
     ) -> torch.Tensor:
         if isinstance(model_output, torch.Tensor):
             return model_output
-        if not isinstance(model_output, tuple) or len(model_output) < 1:
-            raise TypeError("FDTCCALoss expects a tensor or FDT-CCA output tuple")
-        prediction = model_output[0]
+        if isinstance(model_output, Mapping):
+            prediction = model_output["prediction"]
+        else:
+            raise TypeError("FDTCCALoss expects a tensor or FDT output dict")
         if not isinstance(prediction, torch.Tensor):
-            raise TypeError("FDT-CCA prediction output must be a tensor")
+            raise TypeError("FDT prediction output must be a tensor")
         return prediction
 
     def output_loss(

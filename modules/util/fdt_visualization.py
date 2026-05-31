@@ -16,28 +16,23 @@ TSNE_GROUP_COLORS = {
 }
 
 
-def split_fdt_output(
-    model_output: Any,
-) -> tuple[
-    torch.Tensor,
-    torch.Tensor,
-    torch.Tensor,
-    torch.Tensor,
-    torch.Tensor,
-    torch.Tensor,
-]:
-    if not isinstance(model_output, tuple) or len(model_output) < 6:
-        raise TypeError(
-            "FDT_CRNet must return prediction, candidate, mask, and three decomposition tensors"
-        )
-    prediction, candidate, mask, sar_feat, cld_clear, cld_cloud = model_output[:6]
-    return prediction, candidate, mask, sar_feat, cld_clear, cld_cloud
-
-
 def prediction_from_fdt_output(model_output: Any) -> torch.Tensor:
     if isinstance(model_output, torch.Tensor):
         return model_output
-    return split_fdt_output(model_output)[0]
+    return model_output["prediction"]
+
+
+def _decomposition_from_fdt_output(
+    model_output: Mapping[str, torch.Tensor],
+) -> Mapping[str, torch.Tensor]:
+    return {
+        "prediction": model_output["prediction"],
+        "candidate": model_output["candidate"],
+        "mask": model_output["mask"],
+        "sar_feat": model_output["sar_feat"],
+        "clear_feat": model_output["clear_feat"],
+        "cloud_feat": model_output["cloud_feat"],
+    }
 
 
 def _pc1_map(
@@ -71,8 +66,13 @@ def build_fdt_example_panels(
     ],
     normalize_map: Callable[[torch.Tensor], np.ndarray],
 ):
-    _, candidate, mask, sar_feat, cld_clear, cld_cloud = split_fdt_output(model_output)
-    cld_feat = cld_clear + cld_cloud
+    decomposition = _decomposition_from_fdt_output(model_output)
+    candidate = decomposition["candidate"]
+    mask = decomposition["mask"]
+    sar_feat = decomposition["sar_feat"]
+    clear_feat = decomposition["clear_feat"]
+    cloud_feat = decomposition["cloud_feat"]
+    cld_feat = clear_feat + cloud_feat
     cloudy_rgb, prediction_rgb, target_rgb = normalize_rgb_triplet(
         cloudy,
         prediction,
@@ -90,8 +90,8 @@ def build_fdt_example_panels(
         ("Candidate RGB", candidate_rgb, None),
         ("SAR Feat", _pc1_map(sar_feat, normalize_map), "magma"),
         ("CLD Feat", _pc1_map(cld_feat, normalize_map), "magma"),
-        ("CLD Clean", _pc1_map(cld_clear, normalize_map), "magma"),
-        ("CLD Cloudy", _pc1_map(cld_cloud, normalize_map), "magma"),
+        ("CLD Clean", _pc1_map(clear_feat, normalize_map), "magma"),
+        ("CLD Cloudy", _pc1_map(cloud_feat, normalize_map), "magma"),
     )
 
 
@@ -181,15 +181,11 @@ def _collect_tsne_features(
                     break
 
                 model_output = predict_fn(batch)
-                (
-                    _,
-                    _,
-                    _,
-                    sar_feat,
-                    cld_clear,
-                    cld_cloud,
-                ) = split_fdt_output(model_output)
-                cld_feat = cld_clear + cld_cloud
+                decomposition = _decomposition_from_fdt_output(model_output)
+                sar_feat = decomposition["sar_feat"]
+                clear_feat = decomposition["clear_feat"]
+                cloud_feat = decomposition["cloud_feat"]
+                cld_feat = clear_feat + cloud_feat
                 batch_size = sar_feat.shape[0]
                 for batch_index in range(batch_size):
                     if samples_seen >= sample_count:
@@ -198,8 +194,8 @@ def _collect_tsne_features(
                         grouped_features,
                         sar_feat=sar_feat[batch_index],
                         cld_feat=cld_feat[batch_index],
-                        cld_clear=cld_clear[batch_index],
-                        cld_cloud=cld_cloud[batch_index],
+                        cld_clear=clear_feat[batch_index],
+                        cld_cloud=cloud_feat[batch_index],
                         rng=rng,
                         points_per_sample=points_per_sample,
                     )

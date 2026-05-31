@@ -99,7 +99,16 @@ class CLEAR_Net(nn.Module):
         fused = torch.cat((sar_feat, clear_feat), dim=1)
 
         aux_clear = self.aux_head(fused)
-        prediction, candidate, mask = self.aca_crnet(fused, cloud_feat, cloudy)
+        cr_output = self.aca_crnet(fused, cloud_feat, cloudy)
+        prediction = cr_output["prediction"]
         if self.return_decomposition:
-            return prediction, candidate, mask, sar_feat, clear_feat, cloud_feat, aux_clear
+            return {
+                "prediction": prediction,
+                "candidate": cr_output["candidate"],
+                "mask": cr_output["mask"],
+                "sar_feat": sar_feat,
+                "clear_feat": clear_feat,
+                "cloud_feat": cloud_feat,
+                "aux_clear": aux_clear,
+            }
         return prediction

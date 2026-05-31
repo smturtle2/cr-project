@@ -63,7 +63,7 @@ class CCA_CRNet(ACA_CRNet):
         *,
         return_candidate: bool = False,
         return_mask: bool = False,
-    ) -> torch.Tensor | tuple[torch.Tensor, ...]:
+    ) -> torch.Tensor | dict[str, torch.Tensor]:
         z = feature
         for layer in self.net:
             z = layer(z)
@@ -71,10 +71,11 @@ class CCA_CRNet(ACA_CRNet):
         candidate = self.candidate_head(z).clamp(0.0, 5.0)
         mask = self.cca(cld_cloud)
         prediction = cloudy * (1.0 - mask) + candidate * mask
-        if return_candidate and return_mask:
-            return prediction, candidate, mask
+        output = {"prediction": prediction}
         if return_candidate:
-            return prediction, candidate
+            output["candidate"] = candidate
         if return_mask:
-            return prediction, mask
+            output["mask"] = mask
+        if return_candidate or return_mask:
+            return output
         return prediction

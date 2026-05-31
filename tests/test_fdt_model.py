@@ -132,11 +132,22 @@ def test_fdt_imports_and_runs_forward() -> None:
     with torch.no_grad():
         outputs = model(sar, cloudy)
 
-    assert len(outputs) == 5
-    assert outputs[0].shape == (1, 256, 16, 16)
-    for output in outputs[1:]:
+    assert set(outputs) == {
+        "feature",
+        "sar_common",
+        "cloudy_common",
+        "sar_component",
+        "cloudy_component",
+    }
+    assert outputs["feature"].shape == (1, 256, 16, 16)
+    for output in (
+        outputs["sar_common"],
+        outputs["cloudy_common"],
+        outputs["sar_component"],
+        outputs["cloudy_component"],
+    ):
         assert output.shape == (1, 64, 16, 16)
-    for output in outputs:
+    for output in outputs.values():
         assert output.dtype == cloudy.dtype
         assert bool(torch.isfinite(output).all().item())
 
@@ -201,9 +212,13 @@ def test_fdt_cca_returns_full_resolution_sar_clear_and_cloud_features() -> None:
     with torch.no_grad():
         outputs = model(sar, cloudy)
 
-    assert len(outputs) == 4
-    assert outputs[0].shape == (1, 256, 16, 16)
-    for output in outputs[1:]:
+    assert set(outputs) == {"feature", "sar_feat", "clear_feat", "cloud_feat"}
+    assert outputs["feature"].shape == (1, 256, 16, 16)
+    for output in (
+        outputs["sar_feat"],
+        outputs["clear_feat"],
+        outputs["cloud_feat"],
+    ):
         assert output.shape == (1, 128, 16, 16)
         assert bool(torch.isfinite(output).all().item())
 
@@ -298,11 +313,14 @@ def test_fdt_cca_uses_stem_features_for_extraction() -> None:
     assert torch.allclose(model.sar_extractor.input, sar_stem_feat)
     assert torch.allclose(model.cld_extractor.input, cld_stem_feat)
     assert torch.allclose(
-        outputs[0],
+        outputs["feature"],
         torch.cat((sar_stem_feat, cld_stem_feat + 1.0), dim=1),
     )
-    assert torch.allclose(outputs[2], cld_stem_feat + 1.0)
-    assert torch.allclose(outputs[3], cld_stem_feat - outputs[2])
+    assert torch.allclose(outputs["clear_feat"], cld_stem_feat + 1.0)
+    assert torch.allclose(
+        outputs["cloud_feat"],
+        cld_stem_feat - outputs["clear_feat"],
+    )
 
 
 def test_extractor_stacks_same_dim_layers() -> None:
@@ -374,8 +392,12 @@ def test_fdt_cca_accepts_two_level_extractor() -> None:
     with torch.no_grad():
         outputs = model(sar, cloudy)
 
-    assert outputs[0].shape == (1, 256, 16, 16)
-    for output in outputs[1:]:
+    assert outputs["feature"].shape == (1, 256, 16, 16)
+    for output in (
+        outputs["sar_feat"],
+        outputs["clear_feat"],
+        outputs["cloud_feat"],
+    ):
         assert output.shape == (1, 128, 16, 16)
 
 
@@ -392,8 +414,12 @@ def test_fdt_cca_accepts_four_level_extractor() -> None:
     with torch.no_grad():
         outputs = model(sar, cloudy)
 
-    assert outputs[0].shape == (1, 64, 32, 32)
-    for output in outputs[1:]:
+    assert outputs["feature"].shape == (1, 64, 32, 32)
+    for output in (
+        outputs["sar_feat"],
+        outputs["clear_feat"],
+        outputs["cloud_feat"],
+    ):
         assert output.shape == (1, 32, 32, 32)
 
 
@@ -473,7 +499,7 @@ def test_cca_crnet_blends_cloudy_with_clamped_candidate() -> None:
     cloudy = torch.full((1, 1, 4, 4), 1.0)
 
     with torch.no_grad():
-        prediction, candidate, mask = model(
+        output = model(
             feature,
             cld_cloud,
             cloudy,
@@ -481,6 +507,9 @@ def test_cca_crnet_blends_cloudy_with_clamped_candidate() -> None:
             return_mask=True,
         )
 
+    prediction = output["prediction"]
+    candidate = output["candidate"]
+    mask = output["mask"]
     expected_candidate = torch.full_like(candidate, 5.0)
     expected_prediction = cloudy * (1.0 - mask) + expected_candidate * mask
     assert torch.allclose(candidate, expected_candidate)
@@ -494,7 +523,7 @@ def test_cca_crnet_returns_candidate_and_mask_when_requested() -> None:
     cloudy = torch.randn(1, 13, 16, 16)
 
     with torch.no_grad():
-        prediction, candidate, mask = model(
+        output = model(
             feature,
             cld_cloud,
             cloudy,
@@ -502,6 +531,9 @@ def test_cca_crnet_returns_candidate_and_mask_when_requested() -> None:
             return_mask=True,
         )
 
+    prediction = output["prediction"]
+    candidate = output["candidate"]
+    mask = output["mask"]
     assert prediction.shape == cloudy.shape
     assert candidate.shape == cloudy.shape
     assert mask.shape == cloudy.shape
@@ -556,12 +588,24 @@ def test_fdt_crnet_cca_returns_clear_cloud_contract() -> None:
     with torch.no_grad():
         outputs = model(sar, cloudy)
 
-    assert len(outputs) == 6
-    prediction, candidate, mask, sar_feat, cld_clear, cld_cloud = outputs
+    assert set(outputs) == {
+        "prediction",
+        "candidate",
+        "mask",
+        "sar_feat",
+        "clear_feat",
+        "cloud_feat",
+    }
+    prediction = outputs["prediction"]
+    candidate = outputs["candidate"]
+    mask = outputs["mask"]
+    sar_feat = outputs["sar_feat"]
+    clear_feat = outputs["clear_feat"]
+    cloud_feat = outputs["cloud_feat"]
     assert prediction.shape == cloudy.shape
     assert candidate.shape == cloudy.shape
     assert mask.shape == cloudy.shape
-    for feature in (sar_feat, cld_clear, cld_cloud):
+    for feature in (sar_feat, clear_feat, cloud_feat):
         assert feature.shape == (1, 128, 16, 16)
 
 
