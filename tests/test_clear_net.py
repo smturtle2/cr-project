@@ -172,7 +172,7 @@ def test_clear_net_loss_penalizes_candidate_and_aux_range_violations() -> None:
     model_output = (prediction, candidate, None, None, None, None, aux_prediction)
 
     loss = loss_fn(model_output, target)
-    expected = 0.01 * (
+    expected = (
         loss_fn.range_loss(candidate)
         + loss_fn.range_loss(aux_prediction)
     )

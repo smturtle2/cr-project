@@ -21,7 +21,7 @@ class CLEAR_NetLoss(nn.Module):
         l1_weight: float = 0.9,
         ssim_weight: float = 0.1,
         aux_ssim_weight: float = 0.05,
-        range_weight: float = 0.01,
+        range_weight: float = 1.0,
         data_range: float = 5.0,
     ) -> None:
         super().__init__()
@@ -64,9 +64,8 @@ class CLEAR_NetLoss(nn.Module):
 
     def range_loss(self, prediction: torch.Tensor) -> torch.Tensor:
         prediction = prediction.float()
-        below_range = F.relu(-prediction).square().mean()
-        above_range = F.relu(prediction - self.range_max).square().mean()
-        return below_range + above_range
+        clipped = prediction.clamp(0.0, self.range_max)
+        return (prediction - clipped).square().mean()
 
 
 def make_clear_net_loss_fn(
@@ -74,7 +73,7 @@ def make_clear_net_loss_fn(
     l1_weight: float = 0.9,
     ssim_weight: float = 0.1,
     aux_ssim_weight: float = 0.05,
-    range_weight: float = 0.01,
+    range_weight: float = 1.0,
     data_range: float = 5.0,
 ) -> Callable[[Any, Mapping[str, torch.Tensor]], torch.Tensor]:
     criterion = CLEAR_NetLoss(
