@@ -187,7 +187,7 @@ class DySample(nn.Module):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         batch, _, height, width = x.shape
         offset = self.offset(x) * self.scope(x).sigmoid() * 0.5 + self.init_pos
-        offset = offset.view(batch, 2, -1, height, width)
+        offset = offset.reshape(batch, 2, -1, height, width)
 
         coords_h = torch.arange(height, dtype=x.dtype, device=x.device) + 0.5
         coords_w = torch.arange(width, dtype=x.dtype, device=x.device) + 0.5
@@ -195,9 +195,9 @@ class DySample(nn.Module):
         coords = coords.unsqueeze(1).unsqueeze(0)
         normalizer = x.new_tensor([width, height]).view(1, 2, 1, 1, 1)
         coords = 2.0 * (coords + offset) / normalizer - 1.0
-        coords = F.pixel_shuffle(coords.view(batch, -1, height, width), self.scale)
+        coords = F.pixel_shuffle(coords.reshape(batch, -1, height, width), self.scale)
         coords = (
-            coords.view(batch, 2, -1, self.scale * height, self.scale * width)
+            coords.reshape(batch, 2, -1, self.scale * height, self.scale * width)
             .permute(0, 2, 3, 4, 1)
             .contiguous()
             .flatten(0, 1)
@@ -208,7 +208,7 @@ class DySample(nn.Module):
             mode="bilinear",
             align_corners=False,
             padding_mode="border",
-        ).view(batch, -1, self.scale * height, self.scale * width)
+        ).reshape(batch, -1, self.scale * height, self.scale * width)
 
 
 class SampleUp(nn.Module):
@@ -389,4 +389,3 @@ class Extractor(nn.Module):
         for layer in self.layers:
             x = layer(x)
         return x
-
