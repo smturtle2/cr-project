@@ -89,6 +89,28 @@ def test_clear_net_owns_feature_paths_directly() -> None:
     assert bool(torch.isfinite(clear_feat).all().item())
 
 
+def test_clear_net_defaults_use_half_width() -> None:
+    model = CLEAR_Net(
+        feature_layers=1,
+        extractor_layers=1,
+        cr_layers=0,
+        return_decomposition=True,
+    ).eval()
+    sar = torch.randn(1, 2, 8, 8)
+    cloudy = torch.randn(1, 13, 8, 8)
+
+    with torch.no_grad():
+        outputs = model(sar, cloudy)
+
+    assert model.dim == 128
+    assert model.extractor_dims == (64, 128, 256)
+    assert model.fused_extractor_dims == (128, 256, 512)
+    assert model.feature_channels == 64
+    assert outputs["prediction"].shape == cloudy.shape
+    assert outputs["sar_feat"].shape == (1, 64, 8, 8)
+    assert outputs["clear_feat"].shape == (1, 64, 8, 8)
+
+
 def test_aca_crnet_blends_cloudy_with_raw_candidate() -> None:
     model = ACA_CRNet(out_channels=1, num_layers=0, feature_sizes=2, cloud_channels=2).eval()
     model.candidate_head = ConstantImage(out_channels=1, value=8.0)

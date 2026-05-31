@@ -353,7 +353,7 @@ class ExtractorLayer(nn.Module):
     def __init__(
         self,
         dim: int,
-        dims: tuple[int, ...] | list[int] = (128, 256, 512),
+        dims: tuple[int, ...] | list[int] = (64, 128, 256),
         num_layers: int = 2,
         heads: int = 4,
     ):
@@ -371,7 +371,7 @@ class Extractor(nn.Module):
     def __init__(
         self,
         dim: int,
-        dims: tuple[int, ...] | list[int] = (128, 256, 512),
+        dims: tuple[int, ...] | list[int] = (64, 128, 256),
         layer_count: int = 1,
         num_layers: int = 2,
         heads: int = 4,

@@ -103,7 +103,7 @@ class ACA_CRNet(nn.Module):
         out_channels: int = 13,
         alpha: float = 0.1,
         num_layers: int = 16,
-        feature_sizes: int = 256,
+        feature_sizes: int = 128,
         cloud_channels: int | None = None,
         ca=ConAttn,
         ca_kwargs=None,
