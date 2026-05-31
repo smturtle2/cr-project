@@ -11,6 +11,7 @@ from torch import nn
 
 from main import _save_example_figure, normalize_rgb_triplet
 from modules.util.fdt_visualization import (
+    _weighted_pca_map,
     build_fdt_example_panels,
     load_fdt_checkpoint_model,
     save_fdt_tsne_scatter,
@@ -112,18 +113,40 @@ class MainVisualizationTest(unittest.TestCase):
                 "Prediction RGB",
                 "Target RGB",
                 "SAR Mean",
-                "Mask",
+                "Mask PCA",
                 "Prediction PCA",
                 "Target PCA",
                 "Candidate RGB",
-                "SAR Feat",
-                "CLD Feat",
-                "CLD Clean",
-                "CLD Cloudy",
+                "SAR Feat PCA",
+                "CLD Feat PCA",
+                "CLD Clean PCA",
+                "CLD Cloudy PCA",
             ],
         )
         for index in (4, 5, 6, 8, 9, 10, 11):
             self.assertEqual(panels[index][2], "magma")
+
+    def test_weighted_pca_map_uses_variance_weighted_components(self) -> None:
+        feature = torch.tensor(
+            [
+                [[1.0, -1.0], [0.0, 0.0]],
+                [[0.0, 0.0], [2.0, -2.0]],
+            ]
+        )
+
+        def identity_map(tensor):
+            return tensor.numpy()
+
+        actual = _weighted_pca_map(feature, identity_map)
+        expected = np.array(
+            [
+                [np.sqrt(0.2), -np.sqrt(0.2)],
+                [2.0 * np.sqrt(0.8), -2.0 * np.sqrt(0.8)],
+            ],
+            dtype=np.float32,
+        )
+
+        self.assertTrue(np.allclose(actual, expected, atol=1e-6))
 
     def test_fdt_tsne_scatter_uses_dataloader_and_predict_fn(self) -> None:
         captured = {}

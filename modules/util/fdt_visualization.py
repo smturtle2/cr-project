@@ -35,7 +35,7 @@ def _decomposition_from_fdt_output(
     }
 
 
-def _pc1_map(
+def _weighted_pca_map(
     feature: torch.Tensor,
     normalize_map: Callable[[torch.Tensor], np.ndarray],
 ) -> np.ndarray:
@@ -45,11 +45,16 @@ def _pc1_map(
     if channels == 1:
         scores = tokens[:, 0]
     else:
-        _, _, vh = torch.linalg.svd(tokens, full_matrices=False)
-        component = vh[0]
-        if component.sum() < 0:
-            component = -component
-        scores = tokens @ component
+        _, singular_values, components = torch.linalg.svd(tokens, full_matrices=False)
+        variances = singular_values.square()
+        if torch.count_nonzero(variances) == 0:
+            scores = tokens.new_zeros(tokens.shape[0])
+        else:
+            signs = torch.sign(components.sum(dim=1))
+            signs = torch.where(signs == 0, torch.ones_like(signs), signs)
+            scores = tokens @ (components * signs[:, None]).transpose(0, 1)
+            weights = torch.sqrt(variances / variances.sum())
+            scores = scores @ weights
     return normalize_map(scores.reshape(height, width))
 
 
@@ -84,14 +89,14 @@ def build_fdt_example_panels(
         ("Prediction RGB", prediction_rgb, None),
         ("Target RGB", target_rgb, None),
         ("SAR Mean", normalize_map(sar.mean(dim=0)), "gray"),
-        ("Mask", _pc1_map(mask, normalize_map), "magma"),
-        ("Prediction PCA", _pc1_map(prediction, normalize_map), "magma"),
-        ("Target PCA", _pc1_map(target, normalize_map), "magma"),
+        ("Mask PCA", _weighted_pca_map(mask, normalize_map), "magma"),
+        ("Prediction PCA", _weighted_pca_map(prediction, normalize_map), "magma"),
+        ("Target PCA", _weighted_pca_map(target, normalize_map), "magma"),
         ("Candidate RGB", candidate_rgb, None),
-        ("SAR Feat", _pc1_map(sar_feat, normalize_map), "magma"),
-        ("CLD Feat", _pc1_map(cld_feat, normalize_map), "magma"),
-        ("CLD Clean", _pc1_map(clear_feat, normalize_map), "magma"),
-        ("CLD Cloudy", _pc1_map(cloud_feat, normalize_map), "magma"),
+        ("SAR Feat PCA", _weighted_pca_map(sar_feat, normalize_map), "magma"),
+        ("CLD Feat PCA", _weighted_pca_map(cld_feat, normalize_map), "magma"),
+        ("CLD Clean PCA", _weighted_pca_map(clear_feat, normalize_map), "magma"),
+        ("CLD Cloudy PCA", _weighted_pca_map(cloud_feat, normalize_map), "magma"),
     )
 
 
