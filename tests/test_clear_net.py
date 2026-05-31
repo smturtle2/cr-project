@@ -11,6 +11,8 @@ from modules.loss_fn import CLEAR_NetLoss, make_clear_net_loss_fn
 from modules.model.CLEAR_Net import (
     ACA_CRNet,
     CLEAR_Net,
+    SampleDown,
+    SampleUp,
 )
 
 
@@ -38,6 +40,22 @@ class ConstantImage(nn.Module):
             (x.shape[0], self.out_channels, x.shape[-2], x.shape[-1]),
             self.value,
         )
+
+
+def test_sample_blocks_resize_and_project_without_attention_modules() -> None:
+    down = SampleDown(4, 8).eval()
+    up = SampleUp(8, 4).eval()
+    x = torch.randn(1, 4, 8, 8)
+
+    with torch.no_grad():
+        low = down(x)
+        high = up(low)
+
+    assert low.shape == (1, 8, 4, 4)
+    assert high.shape == x.shape
+    module_names = {module.__class__.__name__ for module in [*down.modules(), *up.modules()]}
+    assert "ChannelAttention" not in module_names
+    assert "SpatialAttention" not in module_names
 
 
 def test_clear_net_owns_feature_paths_directly() -> None:

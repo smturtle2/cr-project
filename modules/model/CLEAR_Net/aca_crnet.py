@@ -5,7 +5,7 @@ from torch import nn
 from torch.nn import init
 
 from .ca_flash import ConAttn
-from .clear import Residual3x3Block
+from .clear import Residual3x3Block, SampleUp
 
 
 class ResBlock(nn.Module):
@@ -74,16 +74,12 @@ class AttentionResBlock(nn.Module):
                 **ca_kwargs,
             ),
         )
+        self.up = SampleUp(channels, channels)
         self.alpha = alpha
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         out = self.net(x)
-        out = torch.nn.functional.interpolate(
-            out,
-            scale_factor=2,
-            mode="bilinear",
-            align_corners=True,
-        )
+        out = self.up(out)
         return x + self.alpha * out
 
 
@@ -183,4 +179,3 @@ def init_weights(net: nn.Module, init_type: str = "kaiming-uniform", gain: float
 def init_net(net: nn.Module, init_type: str = "kaiming-uniform") -> nn.Module:
     init_weights(net, init_type=init_type)
     return net
-

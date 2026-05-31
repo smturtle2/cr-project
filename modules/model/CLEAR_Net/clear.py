@@ -124,46 +124,6 @@ class RMSNorm2d(nn.Module):
         return x * torch.rsqrt(rms + self.eps) * self.weight
 
 
-class ChannelAttention(nn.Module):
-    def __init__(self, channels: int, ratio: int = 16):
-        super().__init__()
-        hidden = max(channels // ratio, 1)
-        self.avg_pool = nn.AdaptiveAvgPool2d(1)
-        self.max_pool = nn.AdaptiveMaxPool2d(1)
-        self.fc = nn.Sequential(
-            nn.Conv2d(channels, hidden, kernel_size=1, bias=False),
-            nn.GELU(),
-            nn.Conv2d(hidden, channels, kernel_size=1, bias=False),
-        )
-        self.sigmoid = nn.Sigmoid()
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        avg_out = self.fc(self.avg_pool(x))
-        max_out = self.fc(self.max_pool(x))
-        return self.sigmoid(avg_out + max_out) * x
-
-
-class SpatialAttention(nn.Module):
-    def __init__(self, kernel_size: int = 7):
-        super().__init__()
-        padding = kernel_size // 2
-        self.conv = nn.Conv2d(
-            2,
-            1,
-            kernel_size=kernel_size,
-            padding=padding,
-            padding_mode="reflect",
-            bias=False,
-        )
-        self.sigmoid = nn.Sigmoid()
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        avg_out = torch.mean(x, dim=1, keepdim=True)
-        max_out, _ = torch.max(x, dim=1, keepdim=True)
-        attn = self.sigmoid(self.conv(torch.cat((avg_out, max_out), dim=1)))
-        return attn * x
-
-
 class Residual3x3Block(nn.Module):
     def __init__(self, channels: int):
         super().__init__()
@@ -180,7 +140,7 @@ class Residual3x3Block(nn.Module):
         return x + self.net(self.norm(x))
 
 
-class PixelUnshuffleDown(nn.Module):
+class SampleDown(nn.Module):
     def __init__(self, in_channels: int, out_channels: int):
         super().__init__()
         self.proj = nn.Sequential(
@@ -194,8 +154,6 @@ class PixelUnshuffleDown(nn.Module):
             ),
             nn.PixelUnshuffle(2),
             Residual3x3Block(out_channels),
-            ChannelAttention(out_channels),
-            SpatialAttention(),
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -253,7 +211,7 @@ class DySample(nn.Module):
         ).view(batch, -1, self.scale * height, self.scale * width)
 
 
-class PixelShuffleUp(nn.Module):
+class SampleUp(nn.Module):
     def __init__(self, in_channels: int, out_channels: int):
         super().__init__()
         self.proj = nn.Sequential(
@@ -267,8 +225,6 @@ class PixelShuffleUp(nn.Module):
                 bias=False,
             ),
             Residual3x3Block(out_channels),
-            ChannelAttention(out_channels),
-            SpatialAttention(),
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -341,21 +297,12 @@ class Stem(nn.Module):
         return self.blocks(self.proj(x))
 
 
-class ResizeProjectUp(nn.Module):
-    def __init__(self, in_channels: int, out_channels: int):
-        super().__init__()
-        self.up = PixelShuffleUp(in_channels, out_channels)
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.up(x)
-
-
 class DownLevels(nn.Module):
     def __init__(self, in_channels: int, dims: tuple[int, ...]):
         super().__init__()
         self.stem = _conv_block(in_channels, dims[0])
         self.downs = nn.ModuleList(
-            [PixelUnshuffleDown(dims[i], dims[i + 1]) for i in range(len(dims) - 1)]
+            [SampleDown(dims[i], dims[i + 1]) for i in range(len(dims) - 1)]
         )
 
     def forward(self, x: torch.Tensor) -> list[torch.Tensor]:
@@ -374,13 +321,13 @@ class UpLevels(nn.Module):
             [FeatureEncoder(dim, num_layers, heads) for dim in reversed(dims[1:])]
         )
         self.ups = nn.ModuleList(
-            [ResizeProjectUp(dims[i], dims[i - 1]) for i in range(len(dims) - 1, 0, -1)]
+            [SampleUp(dims[i], dims[i - 1]) for i in range(len(dims) - 1, 0, -1)]
         )
         self.up_norms = nn.ModuleList(
             [RMSNorm2d(dims[i]) for i in range(len(dims) - 1, 0, -1)]
         )
         self.recons = nn.ModuleList(
-            [ResizeProjectUp(dims[i + 1], dims[i]) for i in range(len(dims) - 1)]
+            [SampleUp(dims[i + 1], dims[i]) for i in range(len(dims) - 1)]
         )
 
     def forward(self, levels: list[torch.Tensor]) -> torch.Tensor:
@@ -442,5 +389,4 @@ class Extractor(nn.Module):
         for layer in self.layers:
             x = layer(x)
         return x
-
 
