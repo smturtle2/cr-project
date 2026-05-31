@@ -18,18 +18,17 @@ class CLEAR_NetLoss(nn.Module):
     def __init__(
         self,
         *,
-        l1_weight: float = 0.9,
         ssim_weight: float = 0.1,
-        aux_weight: float = 0.05,
-        range_weight: float = 1.0,
+        prediction_weight: float = 1.0,
+        candidate_weight: float = 0.1,
+        aux_weight: float = 0.1,
         data_range: float = 5.0,
     ) -> None:
         super().__init__()
-        self.output_weights = (float(l1_weight), float(ssim_weight))
+        self.ssim_weight = float(ssim_weight)
+        self.prediction_weight = float(prediction_weight)
+        self.candidate_weight = float(candidate_weight)
         self.aux_weight = float(aux_weight)
-        self.aux_weights = (1.0, 1.0)
-        self.range_weight = float(range_weight)
-        self.range_max = float(data_range)
         self.ssim = GaussianSSIM(data_range=data_range)
 
     def forward(self, model_output: Any, target: torch.Tensor) -> torch.Tensor:
@@ -46,59 +45,56 @@ class CLEAR_NetLoss(nn.Module):
         prediction = prediction.float()
         target = target.float()
 
-        loss = self.output_loss(prediction, target)
-        if aux_prediction is not None:
-            loss = loss + self.aux_weight * self.aux_loss(aux_prediction, target)
+        loss = self.prediction_weight * self.reconstruction_loss(prediction, target)
         if candidate is not None:
-            loss = loss + self.range_weight * self.range_loss(candidate)
+            loss = loss + self.candidate_weight * self.reconstruction_loss(
+                candidate,
+                target,
+            )
         if aux_prediction is not None:
-            loss = loss + self.range_weight * self.range_loss(aux_prediction)
+            loss = loss + self.aux_weight * self.reconstruction_loss(
+                aux_prediction,
+                target,
+            )
         return loss
 
     def output_loss(self, prediction: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
-        return self.reconstruction_loss(prediction, target, self.output_weights)
+        return self.reconstruction_loss(prediction, target)
 
     def aux_loss(self, prediction: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
-        return self.reconstruction_loss(prediction, target, self.aux_weights)
+        return self.reconstruction_loss(prediction, target)
 
     def reconstruction_loss(
         self,
         prediction: torch.Tensor,
         target: torch.Tensor,
-        weights: tuple[float, float],
     ) -> torch.Tensor:
         _check_same_shape(prediction, target)
         prediction = prediction.float()
         target = target.float()
-        l1_weight, ssim_weight = weights
-        return (
-            l1_weight * F.l1_loss(prediction, target)
-            + ssim_weight * self.ssim_loss(prediction, target)
+        return F.l1_loss(prediction, target) + self.ssim_weight * self.ssim_loss(
+            prediction,
+            target,
         )
 
     def ssim_loss(self, prediction: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
         _check_same_shape(prediction, target)
         return 1.0 - self.ssim(prediction.float(), target.float())
 
-    def range_loss(self, prediction: torch.Tensor) -> torch.Tensor:
-        prediction = prediction.float()
-        clipped = prediction.clamp(0.0, self.range_max)
-        return (prediction - clipped).square().mean()
-
 
 def make_clear_net_loss_fn(
     *,
-    l1_weight: float = 0.9,
     ssim_weight: float = 0.1,
-    aux_weight: float = 0.05,
-    range_weight: float = 1.0,
+    prediction_weight: float = 1.0,
+    candidate_weight: float = 0.1,
+    aux_weight: float = 0.1,
     data_range: float = 5.0,
 ) -> Callable[[Any, Mapping[str, torch.Tensor]], torch.Tensor]:
     criterion = CLEAR_NetLoss(
-        l1_weight=l1_weight,
         ssim_weight=ssim_weight,
+        prediction_weight=prediction_weight,
+        candidate_weight=candidate_weight,
         aux_weight=aux_weight,
-        range_weight=range_weight,
         data_range=data_range,
     )
 
