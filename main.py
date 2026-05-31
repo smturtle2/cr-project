@@ -1010,6 +1010,8 @@ def build_example_output(trainer: Trainer, batch: Batch) -> Any:
 
 
 def build_example_prediction(model_output: Any) -> torch.Tensor:
+    if isinstance(model_output, Mapping):
+        return model_output["prediction"]
     if not isinstance(model_output, torch.Tensor):
         raise TypeError("build_example_prediction() must return a torch.Tensor")
     return model_output
