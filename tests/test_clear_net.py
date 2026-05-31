@@ -11,22 +11,10 @@ from modules.loss_fn import CLEAR_NetLoss, make_clear_net_loss_fn
 from modules.model.CLEAR_Net import (
     ACA_CRNet,
     CLEAR_Net,
+    RefineHead,
     SampleDown,
     SampleUp,
 )
-
-
-class FixedMask(nn.Module):
-    def __init__(self, value: float, out_channels: int):
-        super().__init__()
-        self.value = value
-        self.out_channels = out_channels
-
-    def forward(self, cloud_feat: torch.Tensor) -> torch.Tensor:
-        return cloud_feat.new_full(
-            (cloud_feat.shape[0], self.out_channels, cloud_feat.shape[-2], cloud_feat.shape[-1]),
-            self.value,
-        )
 
 
 class ConstantImage(nn.Module):
@@ -78,6 +66,10 @@ def test_clear_net_owns_feature_paths_directly() -> None:
     assert hasattr(model, "cloudy_stem")
     assert hasattr(model, "clear_extractor")
     assert hasattr(model, "aux_head")
+    assert isinstance(model.aux_head, RefineHead)
+    assert isinstance(model.aca_crnet.candidate_head, RefineHead)
+    assert isinstance(model.aca_crnet.mask_head, RefineHead)
+    assert not any(isinstance(module, nn.Sigmoid) for module in model.aca_crnet.modules())
     sar_feat = outputs["sar_feat"]
     clear_feat = outputs["clear_feat"]
     cloud_feat = outputs["cloud_feat"]
@@ -152,7 +144,9 @@ def test_clear_net_defaults_use_half_width() -> None:
 def test_aca_crnet_blends_cloudy_with_raw_candidate() -> None:
     model = ACA_CRNet(out_channels=1, num_layers=0, feature_sizes=2, cloud_channels=2).eval()
     model.candidate_head = ConstantImage(out_channels=1, value=8.0)
-    model.mask = FixedMask(value=0.25, out_channels=1)
+    mask_value = 0.25
+    mask_logit = torch.logit(torch.tensor(mask_value)).item()
+    model.mask_head = ConstantImage(out_channels=1, value=mask_logit)
     fused = torch.zeros(1, 2, 4, 4)
     cloud_feat = torch.randn(1, 2, 4, 4)
     cloudy = torch.full((1, 1, 4, 4), 1.0)
@@ -164,8 +158,10 @@ def test_aca_crnet_blends_cloudy_with_raw_candidate() -> None:
     candidate = output["candidate"]
     mask = output["mask"]
     expected_candidate = torch.full_like(candidate, 8.0)
+    expected_mask = torch.full_like(mask, mask_value)
     expected_prediction = cloudy * (1.0 - mask) + expected_candidate * mask
     assert torch.allclose(candidate, expected_candidate)
+    assert torch.allclose(mask, expected_mask)
     assert torch.allclose(prediction, expected_prediction)
 
 

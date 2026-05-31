@@ -140,6 +140,20 @@ class Residual3x3Block(nn.Module):
         return x + self.net(self.norm(x))
 
 
+class RefineHead(nn.Module):
+    def __init__(self, channels: int, out_channels: int):
+        super().__init__()
+        self.body = nn.Sequential(
+            Residual3x3Block(channels),
+            Residual3x3Block(channels),
+        )
+        self.norm = RMSNorm2d(channels)
+        self.proj = nn.Conv2d(channels, out_channels, kernel_size=1)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.proj(self.norm(self.body(x)))
+
+
 class SampleDown(nn.Module):
     def __init__(self, in_channels: int, out_channels: int):
         super().__init__()

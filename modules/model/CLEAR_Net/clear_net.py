@@ -4,17 +4,7 @@ import torch
 from torch import nn
 
 from .aca_crnet import ACA_CRNet, init_net
-from .clear import Extractor, Residual3x3Block, Stem
-
-
-class AuxHead(nn.Module):
-    def __init__(self, in_channels: int, out_channels: int):
-        super().__init__()
-        self.body = Residual3x3Block(in_channels)
-        self.proj = nn.Conv2d(in_channels, out_channels, kernel_size=1)
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.proj(self.body(x))
+from .clear import Extractor, RefineHead, Stem
 
 
 class CLEAR_Net(nn.Module):
@@ -79,7 +69,7 @@ class CLEAR_Net(nn.Module):
             num_layers=feature_layers,
             heads=num_heads,
         )
-        self.aux_head = AuxHead(self.dim, out_channels)
+        self.aux_head = RefineHead(self.dim, out_channels)
 
         decoder_kwargs = {}
         if ca is not None:

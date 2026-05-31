@@ -5,7 +5,7 @@ from torch import nn
 from torch.nn import init
 
 from .ca_flash import ConAttn
-from .clear import Residual3x3Block, SampleUp
+from .clear import RefineHead, SampleUp
 
 
 class ResBlock(nn.Module):
@@ -83,20 +83,6 @@ class AttentionResBlock(nn.Module):
         return x + self.alpha * out
 
 
-class CloudMask(nn.Module):
-    def __init__(self, cloud_channels: int, mask_channels: int):
-        super().__init__()
-        self.body = nn.Sequential(
-            Residual3x3Block(cloud_channels),
-            Residual3x3Block(cloud_channels),
-        )
-        self.head = nn.Conv2d(cloud_channels, mask_channels, kernel_size=1)
-        self.activation = nn.Sigmoid()
-
-    def forward(self, cloud_feat: torch.Tensor) -> torch.Tensor:
-        return self.activation(self.head(self.body(cloud_feat)))
-
-
 class ACA_CRNet(nn.Module):
     def __init__(
         self,
@@ -124,14 +110,8 @@ class ACA_CRNet(nn.Module):
                 for index in range(num_layers)
             ]
         )
-        self.candidate_head = nn.Conv2d(
-            feature_sizes,
-            out_channels,
-            kernel_size=3,
-            padding=1,
-            padding_mode="reflect",
-        )
-        self.mask = CloudMask(
+        self.candidate_head = RefineHead(feature_sizes, out_channels)
+        self.mask_head = RefineHead(
             feature_sizes // 2 if cloud_channels is None else cloud_channels,
             out_channels,
         )
@@ -147,7 +127,7 @@ class ACA_CRNet(nn.Module):
             z = layer(z)
 
         candidate = self.candidate_head(z)
-        mask = self.mask(cloud_feat)
+        mask = torch.sigmoid(self.mask_head(cloud_feat))
         prediction = cloudy * (1.0 - mask) + candidate * mask
         return {
             "prediction": prediction,
