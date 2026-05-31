@@ -167,7 +167,7 @@ def test_clear_net_loss_combines_l1_and_ssim() -> None:
     assert torch.allclose(loss, expected)
 
 
-def test_clear_net_loss_adds_aux_ssim_when_present() -> None:
+def test_clear_net_loss_adds_aux_reconstruction_loss_when_present() -> None:
     loss_fn = CLEAR_NetLoss()
     prediction = torch.rand(2, 13, 16, 16) * 5.0
     aux_prediction = torch.rand(2, 13, 16, 16) * 5.0
@@ -178,14 +178,18 @@ def test_clear_net_loss_adds_aux_ssim_when_present() -> None:
     expected = (
         0.9 * F.l1_loss(prediction, target)
         + 0.1 * loss_fn.ssim_loss(prediction, target)
-        + 0.05 * loss_fn.ssim_loss(aux_prediction, target)
+        + 0.1
+        * (
+            F.l1_loss(aux_prediction, target)
+            + loss_fn.ssim_loss(aux_prediction, target)
+        )
     )
 
     assert torch.allclose(loss, expected)
 
 
 def test_clear_net_loss_penalizes_candidate_and_aux_range_violations() -> None:
-    loss_fn = CLEAR_NetLoss(aux_ssim_weight=0.0)
+    loss_fn = CLEAR_NetLoss(aux_weight=0.0)
     prediction = torch.zeros(1, 1, 4, 4)
     target = torch.zeros_like(prediction)
     candidate = torch.full_like(prediction, -1.0)
