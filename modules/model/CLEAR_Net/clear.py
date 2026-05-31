@@ -238,7 +238,7 @@ class FeatureTransformerBase(nn.Module):
 
     @staticmethod
     def _to_feature(tokens: torch.Tensor, height: int, width: int) -> torch.Tensor:
-        return tokens.transpose(1, 2).reshape(tokens.shape[0], tokens.shape[2], height, width)
+        return tokens.transpose(1, 2).reshape(tokens.shape[0], tokens.shape[2], height, width).contiguous()
 
 
 class FeatureEncoder(FeatureTransformerBase):
