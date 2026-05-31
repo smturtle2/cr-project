@@ -239,7 +239,7 @@ def test_clear_net_loss_adds_candidate_and_aux_reconstruction_losses() -> None:
     expected = (
         F.l1_loss(prediction, target)
         + 0.1 * loss_fn.ssim_loss(prediction, target)
-        + 0.1
+        + 0.2
         * (
             F.l1_loss(candidate, target)
             + 0.1 * loss_fn.ssim_loss(candidate, target)

@@ -20,7 +20,7 @@ class CLEAR_NetLoss(nn.Module):
         *,
         ssim_weight: float = 0.1,
         prediction_weight: float = 1.0,
-        candidate_weight: float = 0.1,
+        candidate_weight: float = 0.2,
         aux_weight: float = 0.1,
         data_range: float = 5.0,
     ) -> None:
@@ -86,7 +86,7 @@ def make_clear_net_loss_fn(
     *,
     ssim_weight: float = 0.1,
     prediction_weight: float = 1.0,
-    candidate_weight: float = 0.1,
+    candidate_weight: float = 0.2,
     aux_weight: float = 0.1,
     data_range: float = 5.0,
 ) -> Callable[[Any, Mapping[str, torch.Tensor]], torch.Tensor]:
