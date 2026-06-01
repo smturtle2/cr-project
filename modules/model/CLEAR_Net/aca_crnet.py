@@ -127,12 +127,14 @@ class ACA_CRNet(nn.Module):
             z = layer(z)
 
         candidate = self.candidate_head(z)
-        mask = self.mask_router(cloud_feat)
+        mask_output = self.mask_router(cloud_feat)
+        mask = mask_output["mask"]
         prediction = cloudy * (1.0 - mask) + candidate * mask
         return {
             "prediction": prediction,
             "candidate": candidate,
             "mask": mask,
+            "route_weights": mask_output["route_weights"],
         }
 
 

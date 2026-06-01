@@ -22,6 +22,7 @@ class CLEAR_NetLoss(nn.Module):
         prediction_weight: float = 1.0,
         candidate_weight: float = 0.5,
         aux_weight: float = 0.2,
+        route_balance_weight: float = 0.001,
         data_range: float = 5.0,
     ) -> None:
         super().__init__()
@@ -29,6 +30,7 @@ class CLEAR_NetLoss(nn.Module):
         self.prediction_weight = float(prediction_weight)
         self.candidate_weight = float(candidate_weight)
         self.aux_weight = float(aux_weight)
+        self.route_balance_weight = float(route_balance_weight)
         self.ssim = GaussianSSIM(data_range=data_range)
 
     def forward(self, model_output: Any, target: torch.Tensor) -> torch.Tensor:
@@ -36,10 +38,12 @@ class CLEAR_NetLoss(nn.Module):
             prediction = model_output["prediction"]
             candidate = model_output.get("candidate")
             aux_prediction = model_output.get("aux_clear")
+            route_weights = model_output.get("route_weights")
         else:
             prediction = model_output
             candidate = None
             aux_prediction = None
+            route_weights = None
 
         _check_same_shape(prediction, target)
         prediction = prediction.float()
@@ -56,6 +60,8 @@ class CLEAR_NetLoss(nn.Module):
                 aux_prediction,
                 target,
             )
+        if route_weights is not None:
+            loss = loss + self.route_balance_weight * self.route_balance_loss(route_weights)
         return loss
 
     def output_loss(self, prediction: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
@@ -63,6 +69,15 @@ class CLEAR_NetLoss(nn.Module):
 
     def aux_loss(self, prediction: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
         return self.reconstruction_loss(prediction, target)
+
+    def route_balance_loss(self, route_weights: torch.Tensor) -> torch.Tensor:
+        route_weights = route_weights.float()
+        route_count = route_weights.size(1)
+        router_prob_per_route = route_weights.mean(dim=(0, 2, 3))
+        selected_routes = route_weights.argmax(dim=1)
+        route_usage = F.one_hot(selected_routes, num_classes=route_count).float()
+        route_usage = route_usage.mean(dim=(0, 1, 2)).detach()
+        return route_count * (route_usage * router_prob_per_route).sum()
 
     def reconstruction_loss(
         self,
@@ -88,6 +103,7 @@ def make_clear_net_loss_fn(
     prediction_weight: float = 1.0,
     candidate_weight: float = 0.5,
     aux_weight: float = 0.2,
+    route_balance_weight: float = 0.001,
     data_range: float = 5.0,
 ) -> Callable[[Any, Mapping[str, torch.Tensor]], torch.Tensor]:
     criterion = CLEAR_NetLoss(
@@ -95,6 +111,7 @@ def make_clear_net_loss_fn(
         prediction_weight=prediction_weight,
         candidate_weight=candidate_weight,
         aux_weight=aux_weight,
+        route_balance_weight=route_balance_weight,
         data_range=data_range,
     )
 

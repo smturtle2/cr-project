@@ -105,6 +105,7 @@ class CLEAR_Net(nn.Module):
                 "prediction": prediction,
                 "candidate": cr_output["candidate"],
                 "mask": cr_output["mask"],
+                "route_weights": cr_output["route_weights"],
                 "sar_feat": sar_feat,
                 "clear_feat": clear_feat,
                 "cloud_feat": cloud_feat,

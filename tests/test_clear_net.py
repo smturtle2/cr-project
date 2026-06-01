@@ -31,6 +31,24 @@ class ConstantImage(nn.Module):
         )
 
 
+class ConstantMaskRouter(nn.Module):
+    def __init__(self, out_channels: int, value: float):
+        super().__init__()
+        self.out_channels = out_channels
+        self.value = value
+
+    def forward(self, x: torch.Tensor) -> dict[str, torch.Tensor]:
+        mask = x.new_full(
+            (x.shape[0], self.out_channels, x.shape[-2], x.shape[-1]),
+            self.value,
+        )
+        route_weights = x.new_full((x.shape[0], 1, x.shape[-2], x.shape[-1]), 1.0)
+        return {
+            "mask": mask,
+            "route_weights": route_weights,
+        }
+
+
 def test_sample_blocks_resize_and_project_without_attention_modules() -> None:
     down = SampleDown(4, 8).eval()
     up = SampleUp(8, 4).eval()
@@ -52,16 +70,20 @@ def test_spectral_mask_router_uses_routed_channel_logits() -> None:
     x = torch.randn(2, 4, 5, 6)
 
     with torch.no_grad():
-        mask = router(x)
+        output = router(x)
 
     parameters = dict(router.named_parameters())
-    assert router.num_routes == 32
+    mask = output["mask"]
+    route_weights = output["route_weights"]
+    assert router.num_routes == 64
     assert not hasattr(router, "zero_route")
     assert not hasattr(router, "opacity_head")
     assert isinstance(router.route_head, RefineHead)
-    assert router.channel_routes.shape == (32, 3)
+    assert router.channel_routes.shape == (64, 3)
     assert parameters["channel_routes"] is router.channel_routes
     assert mask.shape == (2, 3, 5, 6)
+    assert route_weights.shape == (2, 64, 5, 6)
+    assert torch.allclose(route_weights.sum(dim=1), torch.ones_like(route_weights[:, 0]))
     assert torch.all(mask >= 0.0)
     assert torch.all(mask <= 1.0)
 
@@ -165,7 +187,7 @@ def test_aca_crnet_blends_cloudy_with_raw_candidate() -> None:
     model = ACA_CRNet(out_channels=1, num_layers=0, feature_sizes=2, cloud_channels=2).eval()
     model.candidate_head = ConstantImage(out_channels=1, value=8.0)
     mask_value = 0.25
-    model.mask_router = ConstantImage(out_channels=1, value=mask_value)
+    model.mask_router = ConstantMaskRouter(out_channels=1, value=mask_value)
     fused = torch.zeros(1, 2, 4, 4)
     cloud_feat = torch.randn(1, 2, 4, 4)
     cloudy = torch.full((1, 1, 4, 4), 1.0)
@@ -176,11 +198,13 @@ def test_aca_crnet_blends_cloudy_with_raw_candidate() -> None:
     prediction = output["prediction"]
     candidate = output["candidate"]
     mask = output["mask"]
+    route_weights = output["route_weights"]
     expected_candidate = torch.full_like(candidate, 8.0)
     expected_mask = torch.full_like(mask, mask_value)
     expected_prediction = cloudy * (1.0 - mask) + expected_candidate * mask
     assert torch.allclose(candidate, expected_candidate)
     assert torch.allclose(mask, expected_mask)
+    assert route_weights.shape == (1, 1, 4, 4)
     assert torch.allclose(prediction, expected_prediction)
 
 
@@ -204,6 +228,7 @@ def test_clear_net_forward_and_decomposition_contract() -> None:
         "prediction",
         "candidate",
         "mask",
+        "route_weights",
         "sar_feat",
         "clear_feat",
         "cloud_feat",
@@ -212,6 +237,7 @@ def test_clear_net_forward_and_decomposition_contract() -> None:
     prediction = outputs["prediction"]
     candidate = outputs["candidate"]
     mask = outputs["mask"]
+    route_weights = outputs["route_weights"]
     sar_feat = outputs["sar_feat"]
     clear_feat = outputs["clear_feat"]
     cloud_feat = outputs["cloud_feat"]
@@ -219,11 +245,13 @@ def test_clear_net_forward_and_decomposition_contract() -> None:
     assert prediction.shape == cloudy.shape
     assert candidate.shape == cloudy.shape
     assert mask.shape == cloudy.shape
+    assert route_weights.shape == (1, 64, 8, 8)
     assert aux_clear.shape == cloudy.shape
     for feature in (sar_feat, clear_feat, cloud_feat):
         assert feature.shape == (1, 4, 8, 8)
     assert torch.all(mask >= 0.0)
     assert torch.all(mask <= 1.0)
+    assert torch.allclose(route_weights.sum(dim=1), torch.ones_like(route_weights[:, 0]))
     assert bool(torch.isfinite(candidate).all().item())
     assert bool(torch.isfinite(aux_clear).all().item())
 
@@ -285,6 +313,29 @@ def test_clear_net_loss_candidate_weight_can_be_disabled() -> None:
 
     loss = loss_fn(model_output, target)
     expected = loss_fn.reconstruction_loss(prediction, target)
+
+    assert torch.allclose(loss, expected)
+
+
+def test_clear_net_loss_adds_route_balance_loss() -> None:
+    loss_fn = CLEAR_NetLoss(route_balance_weight=0.05)
+    prediction = torch.zeros(2, 1, 4, 4)
+    target = torch.zeros_like(prediction)
+    route_weights = torch.zeros(2, 4, 4, 4)
+    route_weights[:, 0] = 1.0
+    model_output = {
+        "prediction": prediction,
+        "route_weights": route_weights,
+    }
+
+    loss = loss_fn(model_output, target)
+    route_count = route_weights.size(1)
+    router_prob_per_route = route_weights.mean(dim=(0, 2, 3))
+    selected_routes = route_weights.argmax(dim=1)
+    route_usage = F.one_hot(selected_routes, num_classes=route_count).float()
+    route_usage = route_usage.mean(dim=(0, 1, 2)).detach()
+    expected = loss_fn.reconstruction_loss(prediction, target)
+    expected = expected + 0.05 * route_count * (route_usage * router_prob_per_route).sum()
 
     assert torch.allclose(loss, expected)
 
