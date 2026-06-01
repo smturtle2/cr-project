@@ -56,10 +56,10 @@ def test_spectral_mask_router_uses_zero_route_and_learnable_routes() -> None:
 
     buffers = dict(router.named_buffers())
     parameters = dict(router.named_parameters())
-    assert router.num_routes == 32
+    assert router.num_routes == 8
     assert buffers["zero_route"].shape == (1, 3)
     assert "zero_route" not in parameters
-    assert router.spectral_routes.weight.shape == (31, 3)
+    assert router.spectral_routes.weight.shape == (7, 3)
     assert isinstance(router.router, RefineHead)
     assert mask.shape == (2, 3, 5, 6)
     assert torch.all(mask >= 0.0)
