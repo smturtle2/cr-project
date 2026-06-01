@@ -155,21 +155,20 @@ class RefineHead(nn.Module):
 
 
 class SpectralMaskRouter(nn.Module):
-    def __init__(self, channels: int, out_channels: int, num_routes: int = 16):
+    def __init__(self, channels: int, out_channels: int, num_routes: int = 32):
         super().__init__()
         self.num_routes = num_routes
         self.out_channels = out_channels
-        self.opacity_head = RefineHead(channels, 1)
         self.route_head = RefineHead(channels, num_routes)
-        self.channel_routes = nn.Embedding(num_routes, out_channels)
+        self.channel_routes = nn.Parameter(torch.empty(num_routes, out_channels))
+        init.normal_(self.channel_routes)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        opacity = torch.sigmoid(self.opacity_head(x))
         route_logits = self.route_head(x)
         route_weights = torch.softmax(route_logits, dim=1)
-        channel_routes = torch.sigmoid(self.channel_routes.weight).to(dtype=route_weights.dtype)
-        spectral_mask = torch.einsum("bkhw,kc->bchw", route_weights, channel_routes)
-        return opacity * spectral_mask
+        channel_routes = self.channel_routes.to(dtype=route_weights.dtype)
+        mask_logits = torch.einsum("bkhw,kc->bchw", route_weights, channel_routes)
+        return torch.sigmoid(mask_logits)
 
 
 class SampleDown(nn.Module):
