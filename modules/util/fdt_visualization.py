@@ -89,7 +89,7 @@ def build_fdt_example_panels(
         ("Prediction RGB", prediction_rgb, None),
         ("Target RGB", target_rgb, None),
         ("SAR Mean", normalize_map(sar.mean(dim=0)), "gray"),
-        ("Mask PCA", _weighted_pca_map(mask, normalize_map), "magma"),
+        ("Mask Mean", normalize_map(mask.mean(dim=0)), "magma"),
         ("Prediction PCA", _weighted_pca_map(prediction, normalize_map), "magma"),
         ("Target PCA", _weighted_pca_map(target, normalize_map), "magma"),
         ("Candidate RGB", candidate_rgb, None),

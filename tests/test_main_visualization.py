@@ -78,15 +78,18 @@ class MainVisualizationTest(unittest.TestCase):
         self.assertEqual(captured_kwargs[1]["vmin"], -1.0)
         self.assertEqual(captured_kwargs[1]["vmax"], 1.0)
 
-    def test_fdt_example_panels_use_pca_mask_candidate_rows(self) -> None:
+    def test_fdt_example_panels_use_mean_mask_and_pca_feature_rows(self) -> None:
+        normalized_maps = []
+
         def normalize_triplet(*_):
             return tuple(np.zeros((4, 4, 3), dtype=np.float32) for _ in range(3))
 
         def normalize_map(tensor):
+            normalized_maps.append(tensor.detach().clone())
             return np.zeros(tuple(tensor.shape), dtype=np.float32)
 
         feature = torch.randn(8, 4, 4)
-        mask = torch.full((13, 4, 4), 0.25)
+        mask = torch.arange(13, dtype=torch.float32).view(13, 1, 1).expand(13, 4, 4)
         model_output = {
             "prediction": torch.zeros(13, 4, 4),
             "candidate": torch.zeros(13, 4, 4),
@@ -113,7 +116,7 @@ class MainVisualizationTest(unittest.TestCase):
                 "Prediction RGB",
                 "Target RGB",
                 "SAR Mean",
-                "Mask PCA",
+                "Mask Mean",
                 "Prediction PCA",
                 "Target PCA",
                 "Candidate RGB",
@@ -123,6 +126,7 @@ class MainVisualizationTest(unittest.TestCase):
                 "CLD Cloudy PCA",
             ],
         )
+        self.assertTrue(torch.allclose(normalized_maps[1], mask.mean(dim=0)))
         for index in (4, 5, 6, 8, 9, 10, 11):
             self.assertEqual(panels[index][2], "magma")
 
