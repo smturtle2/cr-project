@@ -162,20 +162,7 @@ class SpectralMaskRouter(nn.Module):
         self.register_buffer("zero_route", torch.zeros(1, out_channels))
         self.spectral_routes = nn.Parameter(torch.empty(num_routes - 1, out_channels))
         init.normal_(self.spectral_routes, mean=0.0, std=0.02)
-        self.router = nn.Sequential(
-            RMSNorm2d(channels),
-            nn.Conv2d(
-                channels,
-                channels,
-                kernel_size=3,
-                padding=1,
-                padding_mode="reflect",
-                groups=channels,
-                bias=False,
-            ),
-            nn.GELU(),
-            nn.Conv2d(channels, num_routes, kernel_size=1),
-        )
+        self.router = RefineHead(channels, num_routes)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         route_logits = self.router(x)
