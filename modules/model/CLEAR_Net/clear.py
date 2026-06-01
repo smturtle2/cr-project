@@ -154,6 +154,38 @@ class RefineHead(nn.Module):
         return self.proj(self.norm(self.body(x)))
 
 
+class SpectralMaskRouter(nn.Module):
+    def __init__(self, channels: int, out_channels: int, num_routes: int = 32):
+        super().__init__()
+        self.num_routes = num_routes
+        self.out_channels = out_channels
+        self.register_buffer("zero_route", torch.zeros(1, out_channels))
+        self.spectral_routes = nn.Parameter(torch.empty(num_routes - 1, out_channels))
+        init.normal_(self.spectral_routes, mean=0.0, std=0.02)
+        self.router = nn.Sequential(
+            RMSNorm2d(channels),
+            nn.Conv2d(
+                channels,
+                channels,
+                kernel_size=3,
+                padding=1,
+                padding_mode="reflect",
+                groups=channels,
+                bias=False,
+            ),
+            nn.GELU(),
+            nn.Conv2d(channels, num_routes, kernel_size=1),
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        route_logits = self.router(x)
+        route_weights = torch.softmax(route_logits, dim=1)
+        learned_routes = torch.sigmoid(self.spectral_routes).to(dtype=route_weights.dtype)
+        zero_route = self.zero_route.to(dtype=route_weights.dtype)
+        routes = torch.cat((zero_route, learned_routes), dim=0)
+        return torch.einsum("bkhw,kc->bchw", route_weights, routes)
+
+
 class SampleDown(nn.Module):
     def __init__(self, in_channels: int, out_channels: int):
         super().__init__()

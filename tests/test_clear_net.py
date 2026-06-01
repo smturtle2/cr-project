@@ -14,6 +14,7 @@ from modules.model.CLEAR_Net import (
     RefineHead,
     SampleDown,
     SampleUp,
+    SpectralMaskRouter,
 )
 
 
@@ -46,6 +47,24 @@ def test_sample_blocks_resize_and_project_without_attention_modules() -> None:
     assert "SpatialAttention" not in module_names
 
 
+def test_spectral_mask_router_uses_zero_route_and_learnable_routes() -> None:
+    router = SpectralMaskRouter(channels=4, out_channels=3).eval()
+    x = torch.randn(2, 4, 5, 6)
+
+    with torch.no_grad():
+        mask = router(x)
+
+    buffers = dict(router.named_buffers())
+    parameters = dict(router.named_parameters())
+    assert router.num_routes == 32
+    assert buffers["zero_route"].shape == (1, 3)
+    assert "zero_route" not in parameters
+    assert router.spectral_routes.shape == (31, 3)
+    assert mask.shape == (2, 3, 5, 6)
+    assert torch.all(mask >= 0.0)
+    assert torch.all(mask <= 1.0)
+
+
 def test_clear_net_owns_feature_paths_directly() -> None:
     model = CLEAR_Net(
         dim=8,
@@ -68,7 +87,7 @@ def test_clear_net_owns_feature_paths_directly() -> None:
     assert hasattr(model, "aux_head")
     assert isinstance(model.aux_head, RefineHead)
     assert isinstance(model.aca_crnet.candidate_head, RefineHead)
-    assert isinstance(model.aca_crnet.mask_head, RefineHead)
+    assert isinstance(model.aca_crnet.mask_router, SpectralMaskRouter)
     assert not any(isinstance(module, nn.Sigmoid) for module in model.aca_crnet.modules())
     sar_feat = outputs["sar_feat"]
     clear_feat = outputs["clear_feat"]
@@ -145,8 +164,7 @@ def test_aca_crnet_blends_cloudy_with_raw_candidate() -> None:
     model = ACA_CRNet(out_channels=1, num_layers=0, feature_sizes=2, cloud_channels=2).eval()
     model.candidate_head = ConstantImage(out_channels=1, value=8.0)
     mask_value = 0.25
-    mask_logit = torch.logit(torch.tensor(mask_value)).item()
-    model.mask_head = ConstantImage(out_channels=1, value=mask_logit)
+    model.mask_router = ConstantImage(out_channels=1, value=mask_value)
     fused = torch.zeros(1, 2, 4, 4)
     cloud_feat = torch.randn(1, 2, 4, 4)
     cloudy = torch.full((1, 1, 4, 4), 1.0)

@@ -8,6 +8,7 @@ from .clear import (
     Residual3x3Block,
     SampleDown,
     SampleUp,
+    SpectralMaskRouter,
     Stem,
 )
 from .clear_net import CLEAR_Net
@@ -23,5 +24,6 @@ __all__ = [
     "Residual3x3Block",
     "SampleDown",
     "SampleUp",
+    "SpectralMaskRouter",
     "Stem",
 ]

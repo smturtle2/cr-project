@@ -5,7 +5,7 @@ from torch import nn
 from torch.nn import init
 
 from .ca_flash import ConAttn
-from .clear import RMSNorm2d, RefineHead, SampleUp
+from .clear import RMSNorm2d, RefineHead, SampleUp, SpectralMaskRouter
 
 
 class ResBlock(nn.Module):
@@ -111,7 +111,7 @@ class ACA_CRNet(nn.Module):
             ]
         )
         self.candidate_head = RefineHead(feature_sizes, out_channels)
-        self.mask_head = RefineHead(
+        self.mask_router = SpectralMaskRouter(
             feature_sizes // 2 if cloud_channels is None else cloud_channels,
             out_channels,
         )
@@ -127,7 +127,7 @@ class ACA_CRNet(nn.Module):
             z = layer(z)
 
         candidate = self.candidate_head(z)
-        mask = torch.sigmoid(self.mask_head(cloud_feat))
+        mask = self.mask_router(cloud_feat)
         prediction = cloudy * (1.0 - mask) + candidate * mask
         return {
             "prediction": prediction,
