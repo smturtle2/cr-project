@@ -5,12 +5,13 @@ from torch import nn
 from torch.nn import init
 
 from .ca_flash import ConAttn
-from .clear import RefineHead, SampleUp
+from .clear import RMSNorm2d, RefineHead, SampleUp
 
 
 class ResBlock(nn.Module):
     def __init__(self, channels: int, alpha: float = 0.1):
         super().__init__()
+        self.norm = RMSNorm2d(channels)
         self.net = nn.Sequential(
             nn.Conv2d(
                 channels,
@@ -30,10 +31,9 @@ class ResBlock(nn.Module):
                 padding_mode="reflect",
             ),
         )
-        self.alpha = alpha
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return x + self.alpha * self.net(x)
+        return x + self.net(self.norm(x))
 
 
 class AttentionResBlock(nn.Module):
@@ -46,6 +46,7 @@ class AttentionResBlock(nn.Module):
     ):
         super().__init__()
         ca_kwargs = {} if ca_kwargs is None else dict(ca_kwargs)
+        self.norm = RMSNorm2d(channels)
         self.net = nn.Sequential(
             nn.Conv2d(
                 channels,
@@ -75,12 +76,11 @@ class AttentionResBlock(nn.Module):
             ),
         )
         self.up = SampleUp(channels, channels)
-        self.alpha = alpha
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        out = self.net(x)
+        out = self.net(self.norm(x))
         out = self.up(out)
-        return x + self.alpha * out
+        return x + out
 
 
 class ACA_CRNet(nn.Module):
