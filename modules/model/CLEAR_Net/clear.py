@@ -155,21 +155,21 @@ class RefineHead(nn.Module):
 
 
 class SpectralMaskRouter(nn.Module):
-    def __init__(self, channels: int, out_channels: int, num_routes: int = 8):
+    def __init__(self, channels: int, out_channels: int, num_routes: int = 16):
         super().__init__()
         self.num_routes = num_routes
         self.out_channels = out_channels
-        self.register_buffer("zero_route", torch.zeros(1, out_channels))
-        self.spectral_routes = nn.Embedding(num_routes - 1, out_channels)
-        self.router = RefineHead(channels, num_routes)
+        self.opacity_head = RefineHead(channels, 1)
+        self.route_head = RefineHead(channels, num_routes)
+        self.channel_routes = nn.Embedding(num_routes, out_channels)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        route_logits = self.router(x)
+        opacity = torch.sigmoid(self.opacity_head(x))
+        route_logits = self.route_head(x)
         route_weights = torch.softmax(route_logits, dim=1)
-        learned_routes = torch.sigmoid(self.spectral_routes.weight).to(dtype=route_weights.dtype)
-        zero_route = self.zero_route.to(dtype=route_weights.dtype)
-        routes = torch.cat((zero_route, learned_routes), dim=0)
-        return torch.einsum("bkhw,kc->bchw", route_weights, routes)
+        channel_routes = torch.sigmoid(self.channel_routes.weight).to(dtype=route_weights.dtype)
+        spectral_mask = torch.einsum("bkhw,kc->bchw", route_weights, channel_routes)
+        return opacity * spectral_mask
 
 
 class SampleDown(nn.Module):

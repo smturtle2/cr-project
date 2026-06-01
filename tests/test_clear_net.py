@@ -47,20 +47,18 @@ def test_sample_blocks_resize_and_project_without_attention_modules() -> None:
     assert "SpatialAttention" not in module_names
 
 
-def test_spectral_mask_router_uses_zero_route_and_learnable_routes() -> None:
+def test_spectral_mask_router_uses_opacity_route_and_channel_routes() -> None:
     router = SpectralMaskRouter(channels=4, out_channels=3).eval()
     x = torch.randn(2, 4, 5, 6)
 
     with torch.no_grad():
         mask = router(x)
 
-    buffers = dict(router.named_buffers())
-    parameters = dict(router.named_parameters())
-    assert router.num_routes == 8
-    assert buffers["zero_route"].shape == (1, 3)
-    assert "zero_route" not in parameters
-    assert router.spectral_routes.weight.shape == (7, 3)
-    assert isinstance(router.router, RefineHead)
+    assert router.num_routes == 16
+    assert not hasattr(router, "zero_route")
+    assert isinstance(router.opacity_head, RefineHead)
+    assert isinstance(router.route_head, RefineHead)
+    assert router.channel_routes.weight.shape == (16, 3)
     assert mask.shape == (2, 3, 5, 6)
     assert torch.all(mask >= 0.0)
     assert torch.all(mask <= 1.0)
