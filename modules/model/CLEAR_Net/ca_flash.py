@@ -55,7 +55,8 @@ class ConAttn(nn.Module):
         self.softmax_scale = softmax_scale
         self.num_heads = num_heads
         self.flash_dtype = flash_dtype
-        self.lambda_scale = nn.Parameter(torch.tensor(float(lambda_init)))
+        self.lambda_init = float(lambda_init)
+        self.lambda_scale = nn.Parameter(torch.zeros(()))
 
         self.linear_weight = nn.Sequential(
             nn.Conv2d(
@@ -157,17 +158,20 @@ class ConAttn(nn.Module):
         k = k.to(attn_dtype)
         v_attn = v.to(attn_dtype)
         weighted_v = (weight.to(attn_dtype) * v_attn).contiguous()
+        bias_attn = bias.to(attn_dtype).expand(-1, self.num_heads, -1, query_head_dim).contiguous()
 
         with self._attention_context(q):
             y = _sdpa(q, k, v_attn, scale=self.softmax_scale)
             yw = _sdpa(q, k, weighted_v, scale=self.softmax_scale)
+            bias_value = _sdpa(q, k, bias_attn, scale=self.softmax_scale)[..., :1]
 
         y = y.to(v.dtype)
         yw = yw.to(v.dtype)
+        bias_value = bias_value.to(v.dtype)
         background = yw.mean(dim=2, keepdim=True)
-        bias_value = (bias.to(v.dtype) * v).mean(dim=2, keepdim=True)
         gate = F.relu(yw - background + bias_value)
-        out = y + F.relu(self.lambda_scale).to(y.dtype) * gate
+        lambda_scale = self.lambda_init * (1.0 + F.gelu(self.lambda_scale))
+        out = y + lambda_scale.to(y.dtype) * gate
 
         out = out.transpose(1, 2).reshape(batch, num_tokens, value_channels)
         out = out.transpose(1, 2).reshape(batch, value_channels, height, width).contiguous()

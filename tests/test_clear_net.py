@@ -3,6 +3,7 @@ from __future__ import annotations
 import ast
 from pathlib import Path
 
+import pytest
 import torch
 from torch import nn
 from torch.nn import functional as F
@@ -11,6 +12,7 @@ from modules.loss_fn import CLEAR_NetLoss, make_clear_net_loss_fn
 from modules.model.CLEAR_Net import (
     ACA_CRNet,
     CLEAR_Net,
+    ConAttn,
     RefineHead,
     SampleDown,
     SampleUp,
@@ -287,6 +289,27 @@ def test_clear_net_forward_and_decomposition_contract() -> None:
     assert torch.allclose(route_weights.sum(dim=1), torch.ones_like(route_weights[:, 0]))
     assert bool(torch.isfinite(candidate).all().item())
     assert bool(torch.isfinite(aux_clear).all().item())
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required for FlashAttention")
+def test_clear_net_flash_conattn_cuda_forward_backward() -> None:
+    model = ConAttn(
+        input_channels=128,
+        output_channels=128,
+        num_heads=4,
+        flash_dtype=torch.float16,
+    ).cuda().half()
+    x = torch.randn(1, 128, 16, 16, device="cuda", dtype=torch.float16, requires_grad=True)
+
+    y = model(x)
+    loss = y.float().square().mean()
+    loss.backward()
+    torch.cuda.synchronize()
+
+    assert y.shape == x.shape
+    assert bool(torch.isfinite(y).all().item())
+    assert x.grad is not None
+    assert bool(torch.isfinite(x.grad).all().item())
 
 
 def test_clear_net_loss_combines_l1_and_ssim() -> None:
