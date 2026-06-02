@@ -346,6 +346,27 @@ def test_clear_net_loss_candidate_weight_can_be_disabled() -> None:
     assert torch.allclose(loss, expected)
 
 
+def test_clear_net_loss_adds_detached_mask_reconstruction_loss() -> None:
+    loss_fn = CLEAR_NetLoss(ssim_weight=0.0)
+    prediction = torch.tensor([[[[1.0, 2.0]]]], requires_grad=True)
+    target = torch.zeros_like(prediction)
+    mask = torch.tensor([[[[0.0, 1.0]]]], requires_grad=True)
+    model_output = {
+        "prediction": prediction,
+        "mask": mask,
+    }
+
+    loss = loss_fn(model_output, target)
+
+    global_l1 = F.l1_loss(prediction, target)
+    mask_l1 = ((prediction - target).abs() * mask.detach()).sum() / mask.detach().sum()
+    expected = global_l1 + 0.5 * mask_l1
+    assert torch.allclose(loss, expected)
+    loss.backward()
+    assert prediction.grad is not None
+    assert mask.grad is None
+
+
 def test_clear_net_loss_adds_route_balance_loss() -> None:
     loss_fn = CLEAR_NetLoss(route_balance_weight=0.05)
     prediction = torch.zeros(2, 1, 4, 4)
@@ -375,6 +396,35 @@ def test_clear_net_loss_default_route_balance_weight_is_two_thousandths() -> Non
     assert loss_fn.route_balance_weight == 0.002
 
 
+def test_clear_net_loss_default_mask_reconstruction_weight_is_half() -> None:
+    loss_fn = CLEAR_NetLoss()
+
+    assert loss_fn.mask_reconstruction_weight == 0.5
+
+
+def test_clear_net_loss_caps_small_mask_region_relative_weight_at_ten() -> None:
+    loss_fn = CLEAR_NetLoss(
+        ssim_weight=0.0,
+        mask_reconstruction_weight=0.5,
+        mask_reconstruction_max_ratio=10.0,
+    )
+    prediction = torch.ones(1, 1, 1, 20, requires_grad=True)
+    target = torch.zeros_like(prediction)
+    mask = torch.zeros_like(prediction)
+    mask[..., 0] = 1.0
+    model_output = {
+        "prediction": prediction,
+        "mask": mask,
+    }
+
+    loss = loss_fn(model_output, target)
+    loss.backward()
+
+    masked_grad = prediction.grad[..., 0]
+    unmasked_grad = prediction.grad[..., 1]
+    assert torch.allclose(masked_grad / unmasked_grad, torch.tensor(10.0))
+
+
 def test_clear_net_loss_factory_accepts_training_batch_contract() -> None:
     loss_fn = make_clear_net_loss_fn()
     criterion = CLEAR_NetLoss()
@@ -384,6 +434,29 @@ def test_clear_net_loss_factory_accepts_training_batch_contract() -> None:
     loss = loss_fn({"prediction": prediction}, {"target": target})
 
     assert torch.allclose(loss, criterion(prediction, target))
+
+
+def test_clear_net_loss_factory_preserves_model_mask_reconstruction_loss() -> None:
+    loss_fn = make_clear_net_loss_fn(
+        ssim_weight=0.0,
+        mask_reconstruction_weight=0.5,
+    )
+    criterion = CLEAR_NetLoss(
+        ssim_weight=0.0,
+        mask_reconstruction_weight=0.5,
+    )
+    prediction = torch.tensor([[[[1.0, 2.0]]]])
+    target = torch.zeros_like(prediction)
+    mask = torch.tensor([[[[0.0, 1.0]]]])
+    model_output = {
+        "prediction": prediction,
+        "mask": mask,
+    }
+
+    loss = loss_fn(model_output, {"target": target})
+
+    expected = criterion(model_output, target)
+    assert torch.allclose(loss, expected)
 
 
 def test_clear_net_ssim_data_range_matches_five_unit_inputs() -> None:
