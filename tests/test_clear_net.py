@@ -291,7 +291,7 @@ def test_clear_net_loss_combines_l1_and_ssim() -> None:
     target = torch.rand(2, 13, 16, 16) * 5.0
     model_output = {"prediction": prediction}
 
-    loss = loss_fn(model_output, target)
+    loss = loss_fn(model_output, target, cloudy=target)
     expected = F.l1_loss(prediction, target) + 0.1 * (
         1.0 - loss_fn.ssim(prediction, target)
     )
@@ -311,7 +311,7 @@ def test_clear_net_loss_adds_candidate_and_aux_reconstruction_losses() -> None:
         "aux_clear": aux_prediction,
     }
 
-    loss = loss_fn(model_output, target)
+    loss = loss_fn(model_output, target, cloudy=target)
     expected = (
         F.l1_loss(prediction, target)
         + 0.1 * loss_fn.ssim_loss(prediction, target)
@@ -340,31 +340,42 @@ def test_clear_net_loss_candidate_weight_can_be_disabled() -> None:
         "candidate": candidate,
     }
 
-    loss = loss_fn(model_output, target)
+    loss = loss_fn(model_output, target, cloudy=target)
     expected = loss_fn.reconstruction_loss(prediction, target)
 
     assert torch.allclose(loss, expected)
 
 
-def test_clear_net_loss_adds_detached_mask_reconstruction_loss() -> None:
+def test_clear_net_loss_builds_pseudo_mask_from_cloudy_target_residual() -> None:
+    loss_fn = CLEAR_NetLoss()
+    target = torch.zeros(1, 1, 1, 3)
+    cloudy = torch.tensor([[[[0.0, 2.0, 4.0]]]])
+
+    pseudo_mask = loss_fn.pseudo_cloud_mask(cloudy, target)
+
+    expected = torch.tensor([[[[0.0, 0.2, 0.8]]]])
+    assert torch.allclose(pseudo_mask, expected)
+
+
+def test_clear_net_loss_adds_pseudo_mask_reconstruction_loss() -> None:
     loss_fn = CLEAR_NetLoss(ssim_weight=0.0)
     prediction = torch.tensor([[[[1.0, 2.0]]]], requires_grad=True)
     target = torch.zeros_like(prediction)
-    mask = torch.tensor([[[[0.0, 1.0]]]], requires_grad=True)
+    cloudy = torch.tensor([[[[0.0, 1.0]]]])
+    model_mask = torch.tensor([[[[1.0, 0.0]]]], requires_grad=True)
     model_output = {
         "prediction": prediction,
-        "mask": mask,
+        "mask": model_mask,
     }
 
-    loss = loss_fn(model_output, target)
+    loss = loss_fn(model_output, target, cloudy=cloudy)
 
-    global_l1 = F.l1_loss(prediction, target)
-    mask_l1 = ((prediction - target).abs() * mask.detach()).sum() / mask.detach().sum()
-    expected = global_l1 + 0.5 * mask_l1
+    pseudo_cloud_mask = loss_fn.pseudo_cloud_mask(cloudy, target)
+    expected = ((prediction - target).abs() * (1.0 + pseudo_cloud_mask)).mean()
     assert torch.allclose(loss, expected)
     loss.backward()
     assert prediction.grad is not None
-    assert mask.grad is None
+    assert model_mask.grad is None
 
 
 def test_clear_net_loss_adds_route_balance_loss() -> None:
@@ -378,7 +389,7 @@ def test_clear_net_loss_adds_route_balance_loss() -> None:
         "route_weights": route_weights,
     }
 
-    loss = loss_fn(model_output, target)
+    loss = loss_fn(model_output, target, cloudy=target)
     route_count = route_weights.size(1)
     router_prob_per_route = route_weights.mean(dim=(0, 2, 3))
     selected_routes = route_weights.argmax(dim=1)
@@ -396,33 +407,32 @@ def test_clear_net_loss_default_route_balance_weight_is_two_thousandths() -> Non
     assert loss_fn.route_balance_weight == 0.002
 
 
-def test_clear_net_loss_default_mask_reconstruction_weight_is_half() -> None:
+def test_clear_net_loss_does_not_amplify_small_absolute_noise_by_relative_max() -> None:
     loss_fn = CLEAR_NetLoss()
+    target = torch.zeros(1, 1, 1, 2)
+    cloudy = torch.tensor([[[[0.001, 0.002]]]])
 
-    assert loss_fn.mask_reconstruction_weight == 0.5
+    pseudo_mask = loss_fn.pseudo_cloud_mask(cloudy, target)
+
+    expected = torch.tensor([[[[0.0001, 0.0004]]]])
+    assert torch.allclose(pseudo_mask, expected)
 
 
-def test_clear_net_loss_caps_small_mask_region_relative_weight_at_four() -> None:
+def test_clear_net_loss_bounds_pseudo_multiplier_at_two() -> None:
     loss_fn = CLEAR_NetLoss(
         ssim_weight=0.0,
-        mask_reconstruction_weight=0.5,
-        mask_reconstruction_max_ratio=4.0,
     )
-    prediction = torch.ones(1, 1, 1, 20, requires_grad=True)
+    prediction = torch.ones(1, 1, 1, 1)
     target = torch.zeros_like(prediction)
-    mask = torch.zeros_like(prediction)
-    mask[..., 0] = 1.0
+    cloudy = torch.full_like(prediction, 10.0)
     model_output = {
         "prediction": prediction,
-        "mask": mask,
     }
 
-    loss = loss_fn(model_output, target)
-    loss.backward()
+    loss = loss_fn(model_output, target, cloudy=cloudy)
+    expected = torch.tensor(2.0)
 
-    masked_grad = prediction.grad[..., 0]
-    unmasked_grad = prediction.grad[..., 1]
-    assert torch.allclose(masked_grad / unmasked_grad, torch.tensor(4.0))
+    assert torch.allclose(loss, expected)
 
 
 def test_clear_net_loss_factory_accepts_training_batch_contract() -> None:
@@ -430,32 +440,30 @@ def test_clear_net_loss_factory_accepts_training_batch_contract() -> None:
     criterion = CLEAR_NetLoss()
     prediction = torch.rand(2, 13, 16, 16) * 5.0
     target = torch.rand(2, 13, 16, 16) * 5.0
+    cloudy = target.clone()
 
-    loss = loss_fn({"prediction": prediction}, {"target": target})
+    loss = loss_fn({"prediction": prediction}, {"target": target, "cloudy": cloudy})
 
-    assert torch.allclose(loss, criterion(prediction, target))
+    assert torch.allclose(loss, criterion(prediction, target, cloudy=cloudy))
 
 
-def test_clear_net_loss_factory_preserves_model_mask_reconstruction_loss() -> None:
+def test_clear_net_loss_factory_passes_cloudy_for_pseudo_mask_reconstruction_loss() -> None:
     loss_fn = make_clear_net_loss_fn(
         ssim_weight=0.0,
-        mask_reconstruction_weight=0.5,
     )
     criterion = CLEAR_NetLoss(
         ssim_weight=0.0,
-        mask_reconstruction_weight=0.5,
     )
     prediction = torch.tensor([[[[1.0, 2.0]]]])
     target = torch.zeros_like(prediction)
-    mask = torch.tensor([[[[0.0, 1.0]]]])
+    cloudy = torch.tensor([[[[0.0, 1.0]]]])
     model_output = {
         "prediction": prediction,
-        "mask": mask,
     }
 
-    loss = loss_fn(model_output, {"target": target})
+    loss = loss_fn(model_output, {"target": target, "cloudy": cloudy})
 
-    expected = criterion(model_output, target)
+    expected = criterion(model_output, target, cloudy=cloudy)
     assert torch.allclose(loss, expected)
 
 

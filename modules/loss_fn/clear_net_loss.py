@@ -23,8 +23,6 @@ class CLEAR_NetLoss(nn.Module):
         candidate_weight: float = 0.5,
         aux_weight: float = 0.2,
         route_balance_weight: float = 0.002,
-        mask_reconstruction_weight: float = 0.5,
-        mask_reconstruction_max_ratio: float = 4.0,
         data_range: float = 5.0,
         eps: float = 1e-6,
     ) -> None:
@@ -34,8 +32,7 @@ class CLEAR_NetLoss(nn.Module):
         self.candidate_weight = float(candidate_weight)
         self.aux_weight = float(aux_weight)
         self.route_balance_weight = float(route_balance_weight)
-        self.mask_reconstruction_weight = float(mask_reconstruction_weight)
-        self.mask_reconstruction_max_ratio = float(mask_reconstruction_max_ratio)
+        self.data_range = float(data_range)
         self.eps = float(eps)
         self.ssim = GaussianSSIM(data_range=data_range)
 
@@ -43,49 +40,41 @@ class CLEAR_NetLoss(nn.Module):
         self,
         model_output: Any,
         target: torch.Tensor,
+        *,
+        cloudy: torch.Tensor,
     ) -> torch.Tensor:
         if isinstance(model_output, Mapping):
             prediction = model_output["prediction"]
             candidate = model_output.get("candidate")
             aux_prediction = model_output.get("aux_clear")
-            mask = model_output.get("mask")
             route_weights = model_output.get("route_weights")
         else:
             prediction = model_output
             candidate = None
             aux_prediction = None
-            mask = None
             route_weights = None
 
         _check_same_shape(prediction, target)
         prediction = prediction.float()
         target = target.float()
-        mask_weight = None
-        if mask is not None and self.mask_reconstruction_weight != 0.0:
-            mask_weight = mask.detach().float().clamp(0.0, 1.0)
-            min_mask_sum = (
-                mask_weight.numel()
-                * self.mask_reconstruction_weight
-                / (self.mask_reconstruction_max_ratio - 1.0)
-            )
-            mask_weight = mask_weight / mask_weight.sum().clamp_min(min_mask_sum)
+        pseudo_cloud_mask = self.pseudo_cloud_mask(cloudy, target)
 
         loss = self.prediction_weight * self.reconstruction_loss(
             prediction,
             target,
-            mask_weight=mask_weight,
+            pseudo_cloud_mask=pseudo_cloud_mask,
         )
         if candidate is not None:
             loss = loss + self.candidate_weight * self.reconstruction_loss(
                 candidate,
                 target,
-                mask_weight=mask_weight,
+                pseudo_cloud_mask=pseudo_cloud_mask,
             )
         if aux_prediction is not None:
             loss = loss + self.aux_weight * self.reconstruction_loss(
                 aux_prediction,
                 target,
-                mask_weight=mask_weight,
+                pseudo_cloud_mask=pseudo_cloud_mask,
             )
         if route_weights is not None:
             loss = loss + self.route_balance_weight * self.route_balance_loss(route_weights)
@@ -96,18 +85,26 @@ class CLEAR_NetLoss(nn.Module):
         prediction: torch.Tensor,
         target: torch.Tensor,
         *,
-        mask_weight: torch.Tensor | None = None,
+        pseudo_cloud_mask: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        return self.reconstruction_loss(prediction, target, mask_weight=mask_weight)
+        return self.reconstruction_loss(
+            prediction,
+            target,
+            pseudo_cloud_mask=pseudo_cloud_mask,
+        )
 
     def aux_loss(
         self,
         prediction: torch.Tensor,
         target: torch.Tensor,
         *,
-        mask_weight: torch.Tensor | None = None,
+        pseudo_cloud_mask: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        return self.reconstruction_loss(prediction, target, mask_weight=mask_weight)
+        return self.reconstruction_loss(
+            prediction,
+            target,
+            pseudo_cloud_mask=pseudo_cloud_mask,
+        )
 
     def route_balance_loss(self, route_weights: torch.Tensor) -> torch.Tensor:
         route_weights = route_weights.float()
@@ -123,28 +120,30 @@ class CLEAR_NetLoss(nn.Module):
         prediction: torch.Tensor,
         target: torch.Tensor,
         *,
-        mask_weight: torch.Tensor | None = None,
+        pseudo_cloud_mask: torch.Tensor | None = None,
     ) -> torch.Tensor:
         _check_same_shape(prediction, target)
         prediction = prediction.float()
         target = target.float()
         error = (prediction - target).abs()
+        if pseudo_cloud_mask is not None:
+            _check_same_shape(pseudo_cloud_mask, target)
+            error = error * (1.0 + pseudo_cloud_mask.float())
         loss = error.mean()
-        if mask_weight is not None and self.mask_reconstruction_weight != 0.0:
-            loss = loss + self.mask_reconstruction_weight * self.mask_l1_loss(
-                error,
-                mask_weight,
-            )
         if self.ssim_weight != 0.0:
             loss = loss + self.ssim_weight * self.ssim_loss(prediction, target)
         return loss
 
-    def mask_l1_loss(
+    def pseudo_cloud_mask(
         self,
-        error: torch.Tensor,
-        mask_weight: torch.Tensor,
+        cloudy: torch.Tensor,
+        target: torch.Tensor,
     ) -> torch.Tensor:
-        return (error * mask_weight).sum()
+        _check_same_shape(cloudy, target)
+        residual = (cloudy.float() - target.float()).abs().mean(dim=1, keepdim=True)
+        relative = residual / residual.amax(dim=(1, 2, 3), keepdim=True).clamp_min(self.eps)
+        absolute = (residual / self.data_range).clamp(0.0, 1.0)
+        return (relative * absolute).expand_as(target)
 
     def ssim_loss(self, prediction: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
         _check_same_shape(prediction, target)
@@ -158,8 +157,6 @@ def make_clear_net_loss_fn(
     candidate_weight: float = 0.5,
     aux_weight: float = 0.2,
     route_balance_weight: float = 0.002,
-    mask_reconstruction_weight: float = 0.5,
-    mask_reconstruction_max_ratio: float = 4.0,
     data_range: float = 5.0,
 ) -> Callable[[Any, Mapping[str, torch.Tensor]], torch.Tensor]:
     criterion = CLEAR_NetLoss(
@@ -168,13 +165,11 @@ def make_clear_net_loss_fn(
         candidate_weight=candidate_weight,
         aux_weight=aux_weight,
         route_balance_weight=route_balance_weight,
-        mask_reconstruction_weight=mask_reconstruction_weight,
-        mask_reconstruction_max_ratio=mask_reconstruction_max_ratio,
         data_range=data_range,
     )
 
     def loss_fn(model_output: Any, batch: Mapping[str, torch.Tensor]) -> torch.Tensor:
-        return criterion(model_output, batch["target"])
+        return criterion(model_output, batch["target"], cloudy=batch["cloudy"])
 
     return loss_fn
 
