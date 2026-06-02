@@ -24,7 +24,7 @@ class CLEAR_NetLoss(nn.Module):
         aux_weight: float = 0.2,
         route_balance_weight: float = 0.002,
         mask_reconstruction_weight: float = 0.5,
-        mask_reconstruction_max_ratio: float = 10.0,
+        mask_reconstruction_max_ratio: float = 4.0,
         data_range: float = 5.0,
         eps: float = 1e-6,
     ) -> None:
@@ -159,7 +159,7 @@ def make_clear_net_loss_fn(
     aux_weight: float = 0.2,
     route_balance_weight: float = 0.002,
     mask_reconstruction_weight: float = 0.5,
-    mask_reconstruction_max_ratio: float = 10.0,
+    mask_reconstruction_max_ratio: float = 4.0,
     data_range: float = 5.0,
 ) -> Callable[[Any, Mapping[str, torch.Tensor]], torch.Tensor]:
     criterion = CLEAR_NetLoss(

@@ -75,14 +75,14 @@ def test_spectral_mask_router_uses_routed_channel_logits() -> None:
     parameters = dict(router.named_parameters())
     mask = output["mask"]
     route_weights = output["route_weights"]
-    assert router.num_routes == 32
+    assert router.num_routes == 64
     assert not hasattr(router, "zero_route")
     assert not hasattr(router, "opacity_head")
     assert isinstance(router.route_head, RefineHead)
-    assert router.channel_routes.shape == (32, 3)
+    assert router.channel_routes.shape == (64, 3)
     assert parameters["channel_routes"] is router.channel_routes
     assert mask.shape == (2, 3, 5, 6)
-    assert route_weights.shape == (2, 32, 5, 6)
+    assert route_weights.shape == (2, 64, 5, 6)
     assert torch.allclose(route_weights.sum(dim=1), torch.ones_like(route_weights[:, 0]))
     assert torch.all(mask >= 0.0)
     assert torch.all(mask <= 1.0)
@@ -117,7 +117,7 @@ def test_clear_net_owns_feature_paths_directly() -> None:
     assert isinstance(model.aux_head, RefineHead)
     assert isinstance(model.aca_crnet.candidate_head, RefineHead)
     assert isinstance(model.mask_router, SpectralMaskRouter)
-    assert model.mask_router.num_routes == 32
+    assert model.mask_router.num_routes == 64
     assert not hasattr(model.aca_crnet, "mask_router")
     assert not any(isinstance(module, nn.Sigmoid) for module in model.aca_crnet.modules())
     sar_feat = outputs["sar_feat"]
@@ -274,7 +274,7 @@ def test_clear_net_forward_and_decomposition_contract() -> None:
     assert prediction.shape == cloudy.shape
     assert candidate.shape == cloudy.shape
     assert mask.shape == cloudy.shape
-    assert route_weights.shape == (1, 32, 8, 8)
+    assert route_weights.shape == (1, 64, 8, 8)
     assert aux_clear.shape == cloudy.shape
     for feature in (sar_feat, cld_feat, cld_clean, cld_cloudy):
         assert feature.shape == (1, 4, 8, 8)
@@ -402,11 +402,11 @@ def test_clear_net_loss_default_mask_reconstruction_weight_is_half() -> None:
     assert loss_fn.mask_reconstruction_weight == 0.5
 
 
-def test_clear_net_loss_caps_small_mask_region_relative_weight_at_ten() -> None:
+def test_clear_net_loss_caps_small_mask_region_relative_weight_at_four() -> None:
     loss_fn = CLEAR_NetLoss(
         ssim_weight=0.0,
         mask_reconstruction_weight=0.5,
-        mask_reconstruction_max_ratio=10.0,
+        mask_reconstruction_max_ratio=4.0,
     )
     prediction = torch.ones(1, 1, 1, 20, requires_grad=True)
     target = torch.zeros_like(prediction)
@@ -422,7 +422,7 @@ def test_clear_net_loss_caps_small_mask_region_relative_weight_at_ten() -> None:
 
     masked_grad = prediction.grad[..., 0]
     unmasked_grad = prediction.grad[..., 1]
-    assert torch.allclose(masked_grad / unmasked_grad, torch.tensor(10.0))
+    assert torch.allclose(masked_grad / unmasked_grad, torch.tensor(4.0))
 
 
 def test_clear_net_loss_factory_accepts_training_batch_contract() -> None:

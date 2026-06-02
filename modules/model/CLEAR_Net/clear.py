@@ -155,7 +155,7 @@ class RefineHead(nn.Module):
 
 
 class SpectralMaskRouter(nn.Module):
-    def __init__(self, channels: int, out_channels: int, num_routes: int = 32):
+    def __init__(self, channels: int, out_channels: int, num_routes: int = 64):
         super().__init__()
         self.num_routes = num_routes
         self.out_channels = out_channels
