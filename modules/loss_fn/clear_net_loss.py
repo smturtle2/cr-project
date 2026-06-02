@@ -127,7 +127,7 @@ class CLEAR_NetLoss(nn.Module):
         error = (prediction - target).abs()
         if pseudo_cloud_mask is not None:
             _check_same_shape(pseudo_cloud_mask, target)
-            error = error * (1.0 + pseudo_cloud_mask.float())
+            error = error * (1.0 + pseudo_cloud_mask.float()).clamp(max=10.0)
         loss = error.mean()
         if self.ssim_weight != 0.0:
             loss = loss + self.ssim_weight * self.ssim_loss(prediction, target)

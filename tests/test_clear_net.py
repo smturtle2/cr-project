@@ -437,6 +437,23 @@ def test_clear_net_loss_can_amplify_above_average_residual_beyond_two() -> None:
     assert torch.allclose(loss, expected)
 
 
+def test_clear_net_loss_caps_pseudo_multiplier_at_ten() -> None:
+    loss_fn = CLEAR_NetLoss(
+        ssim_weight=0.0,
+    )
+    prediction = torch.ones(1, 1, 1, 20)
+    target = torch.zeros_like(prediction)
+    cloudy = torch.zeros_like(prediction)
+    cloudy[..., 0] = 1.0
+    model_output = {
+        "prediction": prediction,
+    }
+
+    loss = loss_fn(model_output, target, cloudy=cloudy)
+
+    assert torch.allclose(loss, torch.tensor(1.45))
+
+
 def test_clear_net_loss_factory_accepts_training_batch_contract() -> None:
     loss_fn = make_clear_net_loss_fn()
     criterion = CLEAR_NetLoss()
