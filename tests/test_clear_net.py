@@ -315,12 +315,9 @@ def test_clear_net_loss_adds_candidate_and_aux_reconstruction_losses() -> None:
     expected = (
         F.l1_loss(prediction, target)
         + 0.1 * loss_fn.ssim_loss(prediction, target)
-        + 0.5
-        * (
-            F.l1_loss(candidate, target)
-            + 0.1 * loss_fn.ssim_loss(candidate, target)
-        )
-        + 0.2
+        + F.l1_loss(candidate, target)
+        + 0.1 * loss_fn.ssim_loss(candidate, target)
+        + 0.1
         * (
             F.l1_loss(aux_prediction, target)
             + 0.1 * loss_fn.ssim_loss(aux_prediction, target)
@@ -371,7 +368,7 @@ def test_clear_net_loss_adds_pseudo_mask_reconstruction_loss() -> None:
     loss = loss_fn(model_output, target, cloudy=cloudy)
 
     pseudo_cloud_mask = loss_fn.pseudo_cloud_mask(cloudy, target)
-    expected = ((prediction - target).abs() * (1.0 + pseudo_cloud_mask)).mean()
+    expected = ((prediction - target).abs() * (1.0 + pseudo_cloud_mask).clamp(max=2.0)).mean()
     assert torch.allclose(loss, expected)
     loss.backward()
     assert prediction.grad is not None
@@ -418,7 +415,7 @@ def test_clear_net_loss_uses_mean_relative_scale_instead_of_max_scale() -> None:
     assert torch.allclose(pseudo_mask, expected)
 
 
-def test_clear_net_loss_can_amplify_above_average_residual_beyond_two() -> None:
+def test_clear_net_loss_caps_pseudo_multiplier_at_two() -> None:
     loss_fn = CLEAR_NetLoss(
         ssim_weight=0.0,
     )
@@ -431,13 +428,13 @@ def test_clear_net_loss_can_amplify_above_average_residual_beyond_two() -> None:
 
     loss = loss_fn(model_output, target, cloudy=cloudy)
     pseudo_mask = loss_fn.pseudo_cloud_mask(cloudy, target)
-    expected = ((prediction - target).abs() * (1.0 + pseudo_mask)).mean()
+    expected = ((prediction - target).abs() * (1.0 + pseudo_mask).clamp(max=2.0)).mean()
 
     assert torch.allclose(1.0 + pseudo_mask[..., -1], torch.tensor(3.0))
     assert torch.allclose(loss, expected)
 
 
-def test_clear_net_loss_caps_pseudo_multiplier_at_ten() -> None:
+def test_clear_net_loss_caps_sparse_pseudo_multiplier_at_two() -> None:
     loss_fn = CLEAR_NetLoss(
         ssim_weight=0.0,
     )
@@ -451,7 +448,7 @@ def test_clear_net_loss_caps_pseudo_multiplier_at_ten() -> None:
 
     loss = loss_fn(model_output, target, cloudy=cloudy)
 
-    assert torch.allclose(loss, torch.tensor(1.45))
+    assert torch.allclose(loss, torch.tensor(1.05))
 
 
 def test_clear_net_loss_factory_accepts_training_batch_contract() -> None:

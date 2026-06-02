@@ -20,8 +20,8 @@ class CLEAR_NetLoss(nn.Module):
         *,
         ssim_weight: float = 0.1,
         prediction_weight: float = 1.0,
-        candidate_weight: float = 0.5,
-        aux_weight: float = 0.2,
+        candidate_weight: float = 1.0,
+        aux_weight: float = 0.1,
         route_balance_weight: float = 0.002,
         data_range: float = 5.0,
         eps: float = 1e-6,
@@ -127,7 +127,7 @@ class CLEAR_NetLoss(nn.Module):
         error = (prediction - target).abs()
         if pseudo_cloud_mask is not None:
             _check_same_shape(pseudo_cloud_mask, target)
-            error = error * (1.0 + pseudo_cloud_mask.float()).clamp(max=10.0)
+            error = error * (1.0 + pseudo_cloud_mask.float()).clamp(max=2.0)
         loss = error.mean()
         if self.ssim_weight != 0.0:
             loss = loss + self.ssim_weight * self.ssim_loss(prediction, target)
@@ -152,8 +152,8 @@ def make_clear_net_loss_fn(
     *,
     ssim_weight: float = 0.1,
     prediction_weight: float = 1.0,
-    candidate_weight: float = 0.5,
-    aux_weight: float = 0.2,
+    candidate_weight: float = 1.0,
+    aux_weight: float = 0.1,
     route_balance_weight: float = 0.002,
     data_range: float = 5.0,
 ) -> Callable[[Any, Mapping[str, torch.Tensor]], torch.Tensor]:
