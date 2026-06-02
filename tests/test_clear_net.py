@@ -110,10 +110,13 @@ def test_clear_net_owns_feature_paths_directly() -> None:
     assert hasattr(model, "cld_extractor")
     assert hasattr(model, "cld_clean_extractor")
     assert hasattr(model, "cld_cloudy_extractor")
+    assert hasattr(model, "fused_refiner")
     assert hasattr(model, "aux_head")
     assert model.cld_stem_channels == 2
     assert model.cld_sar_stem.proj[0].out_channels == 2
     assert model.cld_hsi_stem.proj[0].out_channels == 2
+    assert not hasattr(model, "fused_extractor")
+    assert isinstance(model.fused_refiner, RefineHead)
     assert isinstance(model.aux_head, RefineHead)
     assert isinstance(model.aca_crnet.candidate_head, RefineHead)
     assert isinstance(model.mask_router, SpectralMaskRouter)
@@ -186,7 +189,8 @@ def test_clear_net_defaults_use_half_width() -> None:
 
     assert model.dim == 128
     assert model.extractor_dims == (64, 128, 256)
-    assert model.fused_extractor_dims == (128, 256, 512)
+    assert not hasattr(model, "fused_extractor_dims")
+    assert isinstance(model.fused_refiner, RefineHead)
     assert model.feature_channels == 64
     assert model.cld_stem_channels == 32
     assert outputs["prediction"].shape == cloudy.shape

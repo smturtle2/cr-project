@@ -36,7 +36,6 @@ class CLEAR_Net(nn.Module):
         self.return_decomposition = return_decomposition
         self.dim = dim
         self.extractor_dims = extractor_dims
-        self.fused_extractor_dims = tuple(channel * 2 for channel in extractor_dims)
         self.feature_channels = extractor_dims[0]
         if self.feature_channels % 2 != 0:
             raise ValueError("extractor_dims[0] must be even for CLD stem concat")
@@ -80,13 +79,7 @@ class CLEAR_Net(nn.Module):
         )
 
         # feat 결합
-        self.fused_extractor = Extractor(
-            self.dim,
-            dims=self.fused_extractor_dims,
-            layer_count=extractor_layers,
-            num_layers=feature_layers,
-            heads=num_heads,
-        )
+        self.fused_refiner = RefineHead(self.dim, self.dim)
 
         # 복원 생성
         self.aux_head = RefineHead(self.dim, out_channels)
@@ -128,7 +121,7 @@ class CLEAR_Net(nn.Module):
 
         # feat 결합
         fused = torch.cat((sar_feat, cld_clean), dim=1)
-        fused = self.fused_extractor(fused)
+        fused = self.fused_refiner(fused)
 
         # 복원 생성
         aux_clear = self.aux_head(fused)
