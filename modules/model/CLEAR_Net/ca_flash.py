@@ -32,6 +32,7 @@ class ConAttn(nn.Module):
         num_heads=4,
         flash_dtype=None,
         lambda_init=1e-3,
+        lambda_max=0.1,
     ):
         super().__init__()
         if ksize != 1:
@@ -51,12 +52,16 @@ class ConAttn(nn.Module):
             raise ValueError("query channels must be divisible by num_heads")
         if hidden_channels <= 0:
             raise ValueError("hidden channels must be positive")
+        if lambda_init <= 0.0 or lambda_max <= lambda_init:
+            raise ValueError("lambda_init must be greater than zero and smaller than lambda_max")
 
         self.softmax_scale = softmax_scale
         self.num_heads = num_heads
         self.flash_dtype = flash_dtype
         self.lambda_init = float(lambda_init)
-        self.lambda_scale = nn.Parameter(torch.zeros(()))
+        self.lambda_max = float(lambda_max)
+        lambda_ratio = torch.tensor(self.lambda_init / self.lambda_max, dtype=torch.float32)
+        self.lambda_logit = nn.Parameter(torch.logit(lambda_ratio))
 
         self.linear_weight = nn.Sequential(
             nn.Conv2d(
@@ -115,6 +120,9 @@ class ConAttn(nn.Module):
             return sdpa_kernel(SDPBackend.FLASH_ATTENTION)
         return nullcontext()
 
+    def _gate_scale(self) -> torch.Tensor:
+        return self.lambda_max * torch.sigmoid(self.lambda_logit)
+
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         q_features = self.query(x.contiguous())
         v_features = self.value(x.contiguous())
@@ -170,8 +178,7 @@ class ConAttn(nn.Module):
         bias_value = bias_value.to(v.dtype)
         background = yw.mean(dim=2, keepdim=True)
         gate = F.relu(yw - background + bias_value)
-        lambda_scale = self.lambda_init * (1.0 + F.gelu(self.lambda_scale))
-        out = y + lambda_scale.to(y.dtype) * gate
+        out = y + self._gate_scale().to(y.dtype) * gate
 
         out = out.transpose(1, 2).reshape(batch, num_tokens, value_channels)
         out = out.transpose(1, 2).reshape(batch, value_channels, height, width).contiguous()

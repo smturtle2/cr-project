@@ -312,6 +312,27 @@ def test_clear_net_flash_conattn_cuda_forward_backward() -> None:
     assert bool(torch.isfinite(x.grad).all().item())
 
 
+def test_clear_net_flash_conattn_gate_scale_is_capped_and_suppressible() -> None:
+    model = ConAttn(
+        input_channels=8,
+        output_channels=8,
+        num_heads=1,
+        lambda_init=1e-3,
+        lambda_max=0.1,
+    )
+
+    assert torch.allclose(model._gate_scale(), torch.tensor(1e-3), atol=1e-7)
+
+    with torch.no_grad():
+        model.lambda_logit.fill_(-80.0)
+    assert model._gate_scale().item() < 1e-6
+
+    with torch.no_grad():
+        model.lambda_logit.fill_(80.0)
+    assert model._gate_scale().item() <= model.lambda_max + 1e-6
+    assert model._gate_scale().item() > 0.099
+
+
 def test_clear_net_loss_combines_l1_and_ssim() -> None:
     loss_fn = CLEAR_NetLoss()
     prediction = torch.rand(2, 13, 16, 16) * 5.0
