@@ -5,7 +5,7 @@ from torch import nn
 from torch.nn import init
 
 from .ca_flash import ConAttn
-from .clear import RMSNorm2d, RefineHead, SampleUp, SpectralMaskRouter
+from .clear import RMSNorm2d, RefineHead, SampleUp
 
 
 class ResBlock(nn.Module):
@@ -90,7 +90,6 @@ class ACA_CRNet(nn.Module):
         alpha: float = 0.1,
         num_layers: int = 16,
         feature_sizes: int = 128,
-        cloud_channels: int | None = None,
         ca=ConAttn,
         ca_kwargs=None,
     ):
@@ -111,31 +110,13 @@ class ACA_CRNet(nn.Module):
             ]
         )
         self.candidate_head = RefineHead(feature_sizes, out_channels)
-        self.mask_router = SpectralMaskRouter(
-            feature_sizes // 2 if cloud_channels is None else cloud_channels,
-            out_channels,
-        )
 
-    def forward(
-        self,
-        fused_feature: torch.Tensor,
-        cloud_feat: torch.Tensor,
-        cloudy: torch.Tensor,
-    ) -> dict[str, torch.Tensor]:
+    def forward(self, fused_feature: torch.Tensor) -> torch.Tensor:
         z = fused_feature
         for layer in self.body:
             z = layer(z)
 
-        candidate = self.candidate_head(z)
-        mask_output = self.mask_router(cloud_feat)
-        mask = mask_output["mask"]
-        prediction = cloudy * (1.0 - mask) + candidate * mask
-        return {
-            "prediction": prediction,
-            "candidate": candidate,
-            "mask": mask,
-            "route_weights": mask_output["route_weights"],
-        }
+        return self.candidate_head(z)
 
 
 def init_weights(net: nn.Module, init_type: str = "kaiming-uniform", gain: float = 0.02):

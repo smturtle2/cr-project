@@ -4,7 +4,7 @@ import torch
 from torch import nn
 
 from .aca_crnet import ACA_CRNet, init_net
-from .clear import Extractor, RefineHead, Stem
+from .clear import Extractor, RefineHead, SpectralMaskRouter, Stem
 
 
 class CLEAR_Net(nn.Module):
@@ -38,9 +38,16 @@ class CLEAR_Net(nn.Module):
         self.extractor_dims = extractor_dims
         self.fused_extractor_dims = tuple(channel * 2 for channel in extractor_dims)
         self.feature_channels = extractor_dims[0]
+        if self.feature_channels % 2 != 0:
+            raise ValueError("extractor_dims[0] must be even for CLD stem concat")
+        self.cld_stem_channels = self.feature_channels // 2
 
+        # stem 생성
         self.sar_stem = Stem(sar_channels, self.feature_channels)
-        self.cloudy_stem = Stem(cloudy_channels + sar_channels, self.feature_channels)
+        self.cld_sar_stem = Stem(sar_channels, self.cld_stem_channels)
+        self.cld_hsi_stem = Stem(cloudy_channels, self.cld_stem_channels)
+
+        # feat 생성
         self.sar_extractor = Extractor(
             self.feature_channels,
             dims=extractor_dims,
@@ -48,20 +55,31 @@ class CLEAR_Net(nn.Module):
             num_layers=feature_layers,
             heads=num_heads,
         )
-        self.cloudy_extractor = Extractor(
+        self.cld_extractor = Extractor(
             self.feature_channels,
             dims=extractor_dims,
             layer_count=extractor_layers,
             num_layers=feature_layers,
             heads=num_heads,
         )
-        self.clear_extractor = Extractor(
+
+        # feat 분리
+        self.cld_clean_extractor = Extractor(
             self.feature_channels,
             dims=extractor_dims,
             layer_count=extractor_layers,
             num_layers=feature_layers,
             heads=num_heads,
         )
+        self.cld_cloudy_extractor = Extractor(
+            self.feature_channels,
+            dims=extractor_dims,
+            layer_count=extractor_layers,
+            num_layers=feature_layers,
+            heads=num_heads,
+        )
+
+        # feat 결합
         self.fused_extractor = Extractor(
             self.dim,
             dims=self.fused_extractor_dims,
@@ -69,6 +87,8 @@ class CLEAR_Net(nn.Module):
             num_layers=feature_layers,
             heads=num_heads,
         )
+
+        # 복원 생성
         self.aux_head = RefineHead(self.dim, out_channels)
 
         decoder_kwargs = {}
@@ -80,35 +100,52 @@ class CLEAR_Net(nn.Module):
                 alpha=alpha,
                 num_layers=cr_layers,
                 feature_sizes=self.dim,
-                cloud_channels=self.feature_channels,
                 ca_kwargs=ca_kwargs,
                 **decoder_kwargs,
             ),
             init_type=init_type,
         )
+        self.mask_router = init_net(
+            SpectralMaskRouter(self.feature_channels, out_channels),
+            init_type=init_type,
+        )
 
     def forward(self, sar: torch.Tensor, cloudy: torch.Tensor):
-        sar_feat = self.sar_extractor(self.sar_stem(sar))
-        cloudy_feat = self.cloudy_extractor(
-            self.cloudy_stem(torch.cat((sar, cloudy), dim=1))
-        )
-        clear_feat = self.clear_extractor(cloudy_feat)
-        cloud_feat = cloudy_feat - clear_feat
-        fused = torch.cat((sar_feat, clear_feat), dim=1)
+        # stem 생성
+        sar_stem = self.sar_stem(sar)
+        cld_sar_stem = self.cld_sar_stem(sar)
+        cld_hsi_stem = self.cld_hsi_stem(cloudy)
+        cld_stem = torch.cat((cld_sar_stem, cld_hsi_stem), dim=1)
+
+        # feat 생성
+        sar_feat = self.sar_extractor(sar_stem)
+        cld_feat = self.cld_extractor(cld_stem)
+
+        # feat 분리
+        cld_clean = self.cld_clean_extractor(cld_feat)
+        cld_cloudy_raw = cld_feat - cld_clean
+        cld_cloudy = self.cld_cloudy_extractor(cld_cloudy_raw)
+
+        # feat 결합
+        fused = torch.cat((sar_feat, cld_clean), dim=1)
         fused = self.fused_extractor(fused)
 
+        # 복원 생성
         aux_clear = self.aux_head(fused)
-        cr_output = self.aca_crnet(fused, cloud_feat, cloudy)
-        prediction = cr_output["prediction"]
+        candidate = self.aca_crnet(fused)
+        mask_output = self.mask_router(cld_cloudy)
+        mask = mask_output["mask"]
+        prediction = cloudy * (1.0 - mask) + candidate * mask
         if self.return_decomposition:
             return {
                 "prediction": prediction,
-                "candidate": cr_output["candidate"],
-                "mask": cr_output["mask"],
-                "route_weights": cr_output["route_weights"],
+                "candidate": candidate,
+                "mask": mask,
+                "route_weights": mask_output["route_weights"],
                 "sar_feat": sar_feat,
-                "clear_feat": clear_feat,
-                "cloud_feat": cloud_feat,
+                "cld_feat": cld_feat,
+                "cld_clean": cld_clean,
+                "cld_cloudy": cld_cloudy,
                 "aux_clear": aux_clear,
             }
         return prediction

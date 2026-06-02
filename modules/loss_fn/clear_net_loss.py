@@ -22,7 +22,7 @@ class CLEAR_NetLoss(nn.Module):
         prediction_weight: float = 1.0,
         candidate_weight: float = 0.5,
         aux_weight: float = 0.2,
-        route_balance_weight: float = 0.001,
+        route_balance_weight: float = 0.002,
         data_range: float = 5.0,
     ) -> None:
         super().__init__()
@@ -103,7 +103,7 @@ def make_clear_net_loss_fn(
     prediction_weight: float = 1.0,
     candidate_weight: float = 0.5,
     aux_weight: float = 0.2,
-    route_balance_weight: float = 0.001,
+    route_balance_weight: float = 0.002,
     data_range: float = 5.0,
 ) -> Callable[[Any, Mapping[str, torch.Tensor]], torch.Tensor]:
     criterion = CLEAR_NetLoss(

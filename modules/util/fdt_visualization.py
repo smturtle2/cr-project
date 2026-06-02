@@ -25,13 +25,27 @@ def prediction_from_fdt_output(model_output: Any) -> torch.Tensor:
 def _decomposition_from_fdt_output(
     model_output: Mapping[str, torch.Tensor],
 ) -> Mapping[str, torch.Tensor]:
+    cld_cloudy = model_output.get(
+        "cld_cloudy",
+        model_output.get("cloudy_feat", model_output.get("cloud_feat")),
+    )
+    if cld_cloudy is None:
+        raise KeyError("model_output must contain cld_cloudy, cloudy_feat, or cloud_feat")
+    cld_clean = model_output.get("cld_clean", model_output.get("clear_feat"))
+    if cld_clean is None:
+        raise KeyError("model_output must contain cld_clean or clear_feat")
+    cld_feat = model_output.get(
+        "cld_feat",
+        model_output.get("hsi_feat", model_output.get("feature", cld_clean + cld_cloudy)),
+    )
     return {
         "prediction": model_output["prediction"],
         "candidate": model_output["candidate"],
         "mask": model_output["mask"],
         "sar_feat": model_output["sar_feat"],
-        "clear_feat": model_output["clear_feat"],
-        "cloud_feat": model_output["cloud_feat"],
+        "cld_feat": cld_feat,
+        "cld_clean": cld_clean,
+        "cld_cloudy": cld_cloudy,
     }
 
 
@@ -75,9 +89,9 @@ def build_fdt_example_panels(
     candidate = decomposition["candidate"]
     mask = decomposition["mask"]
     sar_feat = decomposition["sar_feat"]
-    clear_feat = decomposition["clear_feat"]
-    cloud_feat = decomposition["cloud_feat"]
-    cld_feat = clear_feat + cloud_feat
+    cld_feat = decomposition["cld_feat"]
+    cld_clean = decomposition["cld_clean"]
+    cld_cloudy = decomposition["cld_cloudy"]
     cloudy_rgb, prediction_rgb, target_rgb = normalize_rgb_triplet(
         cloudy,
         prediction,
@@ -95,8 +109,8 @@ def build_fdt_example_panels(
         ("Candidate RGB", candidate_rgb, None),
         ("SAR Feat PCA", _weighted_pca_map(sar_feat, normalize_map), "magma"),
         ("CLD Feat PCA", _weighted_pca_map(cld_feat, normalize_map), "magma"),
-        ("CLD Clean PCA", _weighted_pca_map(clear_feat, normalize_map), "magma"),
-        ("CLD Cloudy PCA", _weighted_pca_map(cloud_feat, normalize_map), "magma"),
+        ("CLD Clean PCA", _weighted_pca_map(cld_clean, normalize_map), "magma"),
+        ("CLD Cloudy PCA", _weighted_pca_map(cld_cloudy, normalize_map), "magma"),
     )
 
 
@@ -188,9 +202,9 @@ def _collect_tsne_features(
                 model_output = predict_fn(batch)
                 decomposition = _decomposition_from_fdt_output(model_output)
                 sar_feat = decomposition["sar_feat"]
-                clear_feat = decomposition["clear_feat"]
-                cloud_feat = decomposition["cloud_feat"]
-                cld_feat = clear_feat + cloud_feat
+                cld_feat = decomposition["cld_feat"]
+                cld_clean = decomposition["cld_clean"]
+                cld_cloudy = decomposition["cld_cloudy"]
                 batch_size = sar_feat.shape[0]
                 for batch_index in range(batch_size):
                     if samples_seen >= sample_count:
@@ -199,8 +213,8 @@ def _collect_tsne_features(
                         grouped_features,
                         sar_feat=sar_feat[batch_index],
                         cld_feat=cld_feat[batch_index],
-                        cld_clear=clear_feat[batch_index],
-                        cld_cloud=cloud_feat[batch_index],
+                        cld_clear=cld_clean[batch_index],
+                        cld_cloud=cld_cloudy[batch_index],
                         rng=rng,
                         points_per_sample=points_per_sample,
                     )
