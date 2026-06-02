@@ -32,7 +32,6 @@ class CLEAR_NetLoss(nn.Module):
         self.candidate_weight = float(candidate_weight)
         self.aux_weight = float(aux_weight)
         self.route_balance_weight = float(route_balance_weight)
-        self.data_range = float(data_range)
         self.eps = float(eps)
         self.ssim = GaussianSSIM(data_range=data_range)
 
@@ -141,9 +140,8 @@ class CLEAR_NetLoss(nn.Module):
     ) -> torch.Tensor:
         _check_same_shape(cloudy, target)
         residual = (cloudy.float() - target.float()).abs().mean(dim=1, keepdim=True)
-        relative = residual / residual.amax(dim=(1, 2, 3), keepdim=True).clamp_min(self.eps)
-        absolute = (residual / self.data_range).clamp(0.0, 1.0)
-        return (relative * absolute).expand_as(target)
+        scale = residual.mean(dim=(1, 2, 3), keepdim=True).clamp_min(self.eps)
+        return (residual / scale).expand_as(target)
 
     def ssim_loss(self, prediction: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
         _check_same_shape(prediction, target)

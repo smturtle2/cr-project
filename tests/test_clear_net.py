@@ -353,7 +353,7 @@ def test_clear_net_loss_builds_pseudo_mask_from_cloudy_target_residual() -> None
 
     pseudo_mask = loss_fn.pseudo_cloud_mask(cloudy, target)
 
-    expected = torch.tensor([[[[0.0, 0.2, 0.8]]]])
+    expected = torch.tensor([[[[0.0, 1.0, 2.0]]]])
     assert torch.allclose(pseudo_mask, expected)
 
 
@@ -407,31 +407,33 @@ def test_clear_net_loss_default_route_balance_weight_is_two_thousandths() -> Non
     assert loss_fn.route_balance_weight == 0.002
 
 
-def test_clear_net_loss_does_not_amplify_small_absolute_noise_by_relative_max() -> None:
+def test_clear_net_loss_uses_mean_relative_scale_instead_of_max_scale() -> None:
     loss_fn = CLEAR_NetLoss()
-    target = torch.zeros(1, 1, 1, 2)
-    cloudy = torch.tensor([[[[0.001, 0.002]]]])
+    target = torch.zeros(1, 1, 1, 3)
+    cloudy = torch.tensor([[[[0.0, 2.0, 4.0]]]])
 
     pseudo_mask = loss_fn.pseudo_cloud_mask(cloudy, target)
 
-    expected = torch.tensor([[[[0.0001, 0.0004]]]])
+    expected = torch.tensor([[[[0.0, 1.0, 2.0]]]])
     assert torch.allclose(pseudo_mask, expected)
 
 
-def test_clear_net_loss_bounds_pseudo_multiplier_at_two() -> None:
+def test_clear_net_loss_can_amplify_above_average_residual_beyond_two() -> None:
     loss_fn = CLEAR_NetLoss(
         ssim_weight=0.0,
     )
-    prediction = torch.ones(1, 1, 1, 1)
+    prediction = torch.ones(1, 1, 1, 3)
     target = torch.zeros_like(prediction)
-    cloudy = torch.full_like(prediction, 10.0)
+    cloudy = torch.tensor([[[[0.0, 2.0, 4.0]]]])
     model_output = {
         "prediction": prediction,
     }
 
     loss = loss_fn(model_output, target, cloudy=cloudy)
-    expected = torch.tensor(2.0)
+    pseudo_mask = loss_fn.pseudo_cloud_mask(cloudy, target)
+    expected = ((prediction - target).abs() * (1.0 + pseudo_mask)).mean()
 
+    assert torch.allclose(1.0 + pseudo_mask[..., -1], torch.tensor(3.0))
     assert torch.allclose(loss, expected)
 
 
