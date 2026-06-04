@@ -13,6 +13,7 @@ from modules.model.CLEAR_Net import (
     ACA_CRNet,
     CLEAR_Net,
     ConAttn,
+    Extractor,
     RefineHead,
     SampleDown,
     SampleUp,
@@ -49,6 +50,21 @@ class ConstantMaskRouter(nn.Module):
             "mask": mask,
             "route_weights": route_weights,
         }
+
+
+class InputCapture(nn.Module):
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        self.input = x
+        return x
+
+
+class AddFeatureDelta(nn.Module):
+    def __init__(self, delta: float):
+        super().__init__()
+        self.delta = delta
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return x + self.delta
 
 
 def test_sample_blocks_resize_and_project_without_attention_modules() -> None:
@@ -112,12 +128,14 @@ def test_clear_net_owns_feature_paths_directly() -> None:
     assert hasattr(model, "cld_extractor")
     assert hasattr(model, "cld_clean_extractor")
     assert hasattr(model, "cld_cloudy_extractor")
+    assert hasattr(model, "fused_extractor")
     assert hasattr(model, "fused_refiner")
     assert hasattr(model, "aux_head")
     assert model.cld_stem_channels == 2
     assert model.cld_sar_stem.proj[0].out_channels == 2
     assert model.cld_hsi_stem.proj[0].out_channels == 2
-    assert not hasattr(model, "fused_extractor")
+    assert model.fused_extractor_dims == (8, 16)
+    assert isinstance(model.fused_extractor, Extractor)
     assert isinstance(model.fused_refiner, RefineHead)
     assert isinstance(model.aux_head, RefineHead)
     assert isinstance(model.aca_crnet.candidate_head, RefineHead)
@@ -191,13 +209,39 @@ def test_clear_net_defaults_use_half_width() -> None:
 
     assert model.dim == 128
     assert model.extractor_dims == (64, 128, 256)
-    assert not hasattr(model, "fused_extractor_dims")
+    assert model.fused_extractor_dims == (128, 256, 512)
+    assert isinstance(model.fused_extractor, Extractor)
     assert isinstance(model.fused_refiner, RefineHead)
     assert model.feature_channels == 64
     assert model.cld_stem_channels == 32
     assert outputs["prediction"].shape == cloudy.shape
     assert outputs["sar_feat"].shape == (1, 64, 8, 8)
     assert outputs["cld_clean"].shape == (1, 64, 8, 8)
+
+
+def test_clear_net_extracts_fused_features_before_refine() -> None:
+    model = CLEAR_Net(
+        dim=8,
+        feature_layers=1,
+        extractor_layers=1,
+        cr_layers=0,
+        num_heads=1,
+        extractor_dims=(4, 8),
+        return_decomposition=True,
+    ).eval()
+    model.fused_extractor = AddFeatureDelta(1.0)
+    model.fused_refiner = InputCapture()
+    sar = torch.randn(1, 2, 8, 8)
+    cloudy = torch.randn(1, 13, 8, 8)
+
+    with torch.no_grad():
+        outputs = model(sar, cloudy)
+
+    expected_refiner_input = torch.cat(
+        (outputs["sar_feat"], outputs["cld_clean"]),
+        dim=1,
+    ) + 1.0
+    assert torch.allclose(model.fused_refiner.input, expected_refiner_input)
 
 
 def test_aca_crnet_returns_candidate_only() -> None:
