@@ -36,7 +36,15 @@ class CLEAR_Net(nn.Module):
         self.return_decomposition = return_decomposition
         self.dim = dim
         self.extractor_dims = extractor_dims
-        self.fused_extractor_dims = tuple(dim * 2 for dim in extractor_dims)
+        if len(extractor_dims) == 1:
+            self.fused_extractor_dims = (dim,)
+        else:
+            fused_depth = len(extractor_dims)
+            fused_last_dim = extractor_dims[-1]
+            self.fused_extractor_dims = tuple(
+                dim + (fused_last_dim - dim) * level // (fused_depth - 1)
+                for level in range(fused_depth)
+            )
         self.feature_channels = extractor_dims[0]
         if self.feature_channels % 2 != 0:
             raise ValueError("extractor_dims[0] must be even for CLD stem concat")

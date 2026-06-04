@@ -134,7 +134,7 @@ def test_clear_net_owns_feature_paths_directly() -> None:
     assert model.cld_stem_channels == 2
     assert model.cld_sar_stem.proj[0].out_channels == 2
     assert model.cld_hsi_stem.proj[0].out_channels == 2
-    assert model.fused_extractor_dims == (8, 16)
+    assert model.fused_extractor_dims == (8, 8)
     assert isinstance(model.fused_extractor, Extractor)
     assert isinstance(model.fused_refiner, RefineHead)
     assert isinstance(model.aux_head, RefineHead)
@@ -209,7 +209,7 @@ def test_clear_net_defaults_use_half_width() -> None:
 
     assert model.dim == 128
     assert model.extractor_dims == (64, 128, 256)
-    assert model.fused_extractor_dims == (128, 256, 512)
+    assert model.fused_extractor_dims == (128, 192, 256)
     assert isinstance(model.fused_extractor, Extractor)
     assert isinstance(model.fused_refiner, RefineHead)
     assert model.feature_channels == 64
