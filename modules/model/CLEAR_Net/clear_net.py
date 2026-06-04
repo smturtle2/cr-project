@@ -23,7 +23,7 @@ class CLEAR_Net(nn.Module):
         ca=None,
         ca_kwargs=None,
         return_decomposition: bool = False,
-        extractor_dims: tuple[int, ...] | list[int] = (64, 96, 128),
+        extractor_dims: tuple[int, ...] | list[int] = (64, 128, 160),
     ):
         super().__init__()
         if out_channels != cloudy_channels:

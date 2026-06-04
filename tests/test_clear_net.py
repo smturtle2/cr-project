@@ -208,8 +208,8 @@ def test_clear_net_defaults_use_half_width() -> None:
         outputs = model(sar, cloudy)
 
     assert model.dim == 128
-    assert model.extractor_dims == (64, 96, 128)
-    assert model.fused_extractor_dims == (128, 192, 256)
+    assert model.extractor_dims == (64, 128, 160)
+    assert model.fused_extractor_dims == (128, 256, 320)
     assert isinstance(model.fused_extractor, Extractor)
     assert isinstance(model.fused_refiner, RefineHead)
     assert model.feature_channels == 64
