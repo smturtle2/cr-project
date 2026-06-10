@@ -12,10 +12,12 @@ from .clear import (
     Stem,
 )
 from .clear_net import CLEAR_Net
+from .clear_net_new import CLEAR_Net_New
 
 __all__ = [
     "ACA_CRNet",
     "CLEAR_Net",
+    "CLEAR_Net_New",
     "ConAttn",
     "DySample",
     "Extractor",
