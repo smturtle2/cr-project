@@ -186,12 +186,15 @@ hf download Hermanni/clear-net-sen12mscr best.pt --local-dir artifacts/3.CLEAR-N
 
 ## 🎬 Demo
 
-<!-- TODO: 데모 영상 추가 예정.
-     GitHub 웹 에디터에서 이 위치에 mp4를 드래그&드롭하면
-     https://github.com/user-attachments/assets/xxxxxxxx 형태의 링크가
-     자동 생성됩니다. 생성된 링크로 아래 인용문을 교체하세요. -->
 
-> 🎥 데모 영상이 곧 추가될 예정입니다.
+
+https://github.com/user-attachments/assets/428fc689-df62-44b7-9c35-e83a34459da1
+
+
+
+https://github.com/user-attachments/assets/710a687d-b07b-4fca-be08-af5d3660f921
+
+
 
 학습된 체크포인트로 전체 scene 단위 복원 결과를 브라우저에서 확인할 수 있는 인터랙티브 데모를 제공합니다. 가장 간단한 방법은 런처 스크립트입니다.
 
