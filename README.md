@@ -161,6 +161,12 @@ TRAIN_TARGET=other_runner.py ./train.sh --gpu 0
 - 기본 precision은 `bf16` AMP이며, `main(...)` 인자로 `mixed_precision="off"` / `"fp16"` 변경이 가능합니다.
 - 데이터 로딩은 기본 `streaming=True`이고, 로컬 데이터셋은 `streaming=False, dataset_dir=...`로 지정합니다.
 
+**에이전트용 학습 세션 프롬프트**
+
+```text
+In https://github.com/smturtle2/cr-project, follow the README Training workflow and prepare a user-runnable CLEAR-Net training guide: explain how to create tmp_main.py from tmp_main_base.py, use CLEAR_Net + make_clear_net_loss_fn, choose ./train.sh options, and tell the user the exact command and expected checkpoint path.
+```
+
 ### 3. (한 번만) git hook 설정
 
 `main.py` 보호용 pre-commit 훅을 활성화합니다.
@@ -233,6 +239,12 @@ uv run python modules/util/clear_net_scene_demo.py \
 | `--device` | `auto` | `auto` / `cpu` / `cuda` |
 | `--port` | `8797` | 서버 포트 |
 | `--streaming` | off | 스트리밍 데이터 로딩 사용 |
+
+**에이전트용 추론 세션 프롬프트**
+
+```text
+In https://github.com/smturtle2/cr-project, follow the README Demo workflow and prepare a user-runnable CLEAR-Net inference guide: explain how to get Hermanni/clear-net-sen12mscr best.pt, choose ./inference.sh options, select split/season/scene, and tell the user the exact command, local URL, and dataset root.
+```
 
 ## 🧪 Tests
 
