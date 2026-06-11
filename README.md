@@ -2,7 +2,9 @@
 
 # CLEAR-Net
 
-**SAR-Optical Multimodal Fusion for Satellite Image Cloud Removal**
+**Cloud Layer Estimation and Adaptive Restoration Network**
+
+*SAR-Optical Multimodal Fusion for Satellite Image Cloud Removal*
 
 [![Python](https://img.shields.io/badge/Python-3.12+-3776AB?logo=python&logoColor=white)](https://www.python.org/)
 [![PyTorch](https://img.shields.io/badge/PyTorch-2.6+-EE4C2C?logo=pytorch&logoColor=white)](https://pytorch.org/)
@@ -16,7 +18,7 @@
 
 ## 🛰️ Overview
 
-**CLEAR-Net**은 SAR(Sentinel-1)과 구름 낀 광학 영상(Sentinel-2)을 함께 입력받아 구름이 제거된 광학 영상을 복원하는 멀티모달 딥러닝 모델입니다.
+**CLEAR-Net**(**C**loud **L**ayer **E**stimation and **A**daptive **R**estoration)은 SAR(Sentinel-1)과 구름 낀 광학 영상(Sentinel-2)을 함께 입력받아 구름이 제거된 광학 영상을 복원하는 멀티모달 딥러닝 모델입니다.
 
 핵심 아이디어는 **특징 분해(Feature Decomposition)** 와 **마스크 기반 선택적 복원**입니다.
 
