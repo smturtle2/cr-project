@@ -85,10 +85,7 @@ cr-project/
 │   ├── loss_fn/                # CLEAR_NetLoss, Focal Frequency Loss 등
 │   ├── metrics/                # PSNR, SSIM 등 평가 지표
 │   ├── scheduler/              # LR 스케줄러 (LCR warmup-cosine)
-│   └── util/                   # 시각화 유틸리티
-├── artifacts/
-│   └── 0.show/
-│       └── clear_net_scene_demo.py   # 🎬 인터랙티브 데모 서버
+│   └── util/                   # 시각화 유틸리티, 🎬 인터랙티브 데모 서버
 └── tests/                      # 단위 테스트
 ```
 
@@ -189,11 +186,7 @@ hf download Hermanni/clear-net-sen12mscr best.pt --local-dir artifacts/3.CLEAR-N
 
 ## 🎬 Demo
 
-전체 scene 단위 복원 데모 영상입니다. (30× 배속)
-
-[▶ Demo 1](assets/demo_1.mp4) · [▶ Demo 2](assets/demo_2.mp4)
-
-학습된 체크포인트로 같은 데모를 브라우저에서 직접 실행할 수도 있습니다. 가장 간단한 방법은 런처 스크립트입니다.
+학습된 체크포인트로 전체 scene 단위 복원 결과를 브라우저에서 확인할 수 있는 인터랙티브 데모를 제공합니다. 가장 간단한 방법은 런처 스크립트입니다.
 
 ```bash
 # 기본 체크포인트(artifacts/3.CLEAR-Net/v4/best.pt)로 실행
@@ -211,7 +204,7 @@ HOST=0.0.0.0 PORT=8080 OPEN_BROWSER=1 ./inference.sh
 데모 스크립트를 직접 실행할 수도 있습니다. 이 경우 브라우저가 자동으로 열립니다.
 
 ```bash
-uv run python artifacts/0.show/clear_net_scene_demo.py \
+uv run python modules/util/clear_net_scene_demo.py \
     --checkpoint artifacts/3.CLEAR-Net/v4/best.pt \
     --dataset-root /path/to/cr-train-cache \
     --split validation \
