@@ -26,7 +26,7 @@ if [[ "${OPEN_BROWSER:-0}" != "1" ]]; then
   browser_args+=(--no-open-browser)
 fi
 
-exec "${python_bin}" artifacts/0.show/clear_net_scene_demo.py \
+exec "${python_bin}" modules/util/clear_net_scene_demo.py \
   --host "${host}" \
   --port "${port}" \
   --model-path "${model_path}" \
