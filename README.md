@@ -28,7 +28,7 @@
 4. **Spectral Mask Routing** — cloud 성분으로부터 채널별 구름 마스크를 추정하여, 구름 영역만 복원 결과로 교체합니다.
 
 ```
-prediction = cloudy × (1 − mask) + candidate × mask
+prediction = cloudy ⊙ (1 − mask) + candidate ⊙ mask
 ```
 
 구름이 없는 영역은 원본 화소를 그대로 보존하고, 구름 영역만 복원하기 때문에 불필요한 왜곡 없이 안정적인 복원이 가능합니다.
@@ -93,6 +93,8 @@ cr-project/
 
 ### 에이전트용 간단 프롬프트
 
+Codex, Claude Code, Antigravity 같은 코딩 에이전트에게 이 저장소의 설치 절차를 해석시키고, 사용자 환경에 맞는 실행 명령을 정리하게 하는 프롬프트입니다.
+
 ```text
 In https://github.com/smturtle2/cr-project, follow the README Installation workflow and prepare a user-runnable setup guide: choose the right uv torch extra, install dependencies, verify torch, and tell the user the exact commands to run.
 ```
@@ -121,6 +123,8 @@ uv run python -c "import torch; print(torch.__version__)"
 ## 🚀 Training
 
 ### 에이전트용 간단 프롬프트
+
+Codex, Claude Code, Antigravity 같은 코딩 에이전트에게 이 저장소의 학습 흐름을 해석시키고, 사용자가 실행할 학습 준비 과정과 명령을 정리하게 하는 프롬프트입니다.
 
 ```text
 In https://github.com/smturtle2/cr-project, follow the README Training workflow and prepare a user-runnable CLEAR-Net training guide: explain how to create tmp_main.py from tmp_main_base.py, use CLEAR_Net + make_clear_net_loss_fn, choose ./train.sh options, and tell the user the exact command and expected checkpoint path.
@@ -199,6 +203,8 @@ hf download Hermanni/clear-net-sen12mscr best.pt --local-dir artifacts/3.CLEAR-N
 ## 🎬 Demo
 
 ### 에이전트용 간단 프롬프트
+
+Codex, Claude Code, Antigravity 같은 코딩 에이전트에게 이 저장소의 데모 흐름을 해석시키고, 사용자가 실행할 체크포인트 준비와 추론 명령을 정리하게 하는 프롬프트입니다.
 
 ```text
 In https://github.com/smturtle2/cr-project, follow the README Demo workflow and prepare a user-runnable CLEAR-Net inference guide: explain how to get Hermanni/clear-net-sen12mscr best.pt, choose ./inference.sh options, select split/season/scene, and tell the user the exact command, local URL, and dataset root.
