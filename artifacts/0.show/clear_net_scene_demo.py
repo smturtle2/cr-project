@@ -402,6 +402,17 @@ class SceneRenderer:
             state["active_layer"] = "prediction"
         return state
 
+    def clear_prediction_cache(self, render_id: str) -> None:
+        render_dir = self.render_dir(render_id)
+        (render_dir / "prediction.png").unlink(missing_ok=True)
+        shutil.rmtree(render_dir / "tiles", ignore_errors=True)
+        state_path = self.state_path(render_id)
+        if state_path.is_file():
+            state = read_json(state_path)
+            state["has_prediction"] = False
+            state["active_layer"] = "cloudy"
+            atomic_write_json(state_path, state)
+
     def render_scene(
         self,
         *,
@@ -479,12 +490,16 @@ class SceneRenderer:
         season: str,
         scene: str,
         send_event,
+        force: bool = False,
     ) -> dict[str, Any]:
         render_id = self.render_id(split=split, season=season, scene=scene)
-        cached = self.cached_state(render_id, require_prediction=True)
-        if cached is not None:
-            send_event({"type": "cached", "render": cached})
-            return cached
+        if force:
+            self.clear_prediction_cache(render_id)
+        else:
+            cached = self.cached_state(render_id, require_prediction=True)
+            if cached is not None:
+                send_event({"type": "cached", "render": cached})
+                return cached
 
         started_at = time.perf_counter()
         send_event({"type": "status", "message": f"{scene_label(scene)} loading scene rows"})
@@ -719,10 +734,12 @@ class InferenceJob:
         job_id: str,
         renderer: SceneRenderer,
         item: dict[str, Any],
+        force: bool,
     ) -> None:
         self.job_id = job_id
         self.renderer = renderer
         self.item = item
+        self.force = bool(force)
         self.events: queue.Queue[dict[str, Any]] = queue.Queue()
         self.done = threading.Event()
         self.thread = threading.Thread(target=self._run, name=f"infer-{job_id}", daemon=True)
@@ -742,6 +759,7 @@ class InferenceJob:
                 season=str(self.item["season"]),
                 scene=str(self.item["scene"]),
                 send_event=self.emit,
+                force=self.force,
             )
         except Exception as exc:
             self.emit({"type": "error", "error": str(exc)})
@@ -756,13 +774,13 @@ class InferenceJobManager:
         self.jobs: dict[str, InferenceJob] = {}
         self.lock = threading.Lock()
 
-    def start_job(self, item: dict[str, Any]) -> InferenceJob:
+    def start_job(self, item: dict[str, Any], *, force: bool = False) -> InferenceJob:
         stable = (
             f"{item['split']}:{item['season']}:{normalize_scene_value(str(item['scene']))}:"
             f"{time.time_ns()}"
         )
         job_id = hashlib.sha1(stable.encode("utf-8")).hexdigest()[:16]
-        job = InferenceJob(job_id=job_id, renderer=self.renderer, item=item)
+        job = InferenceJob(job_id=job_id, renderer=self.renderer, item=item, force=force)
         with self.lock:
             self.jobs[job_id] = job
         job.start()
@@ -1614,7 +1632,7 @@ WEB_HTML = r"""<!doctype html>
     }
 
     async function streamInference(scene) {
-      const start = await postJson("/api/infer-start", scene);
+      const start = await postJson("/api/infer-start", {...scene, force: true});
       const params = new URLSearchParams({job_id: start.job_id});
       return new Promise((resolve, reject) => {
         const source = new EventSource(`/api/infer-events?${params.toString()}`);
@@ -1916,6 +1934,7 @@ class DemoServer:
                                 season=str(item["season"]),
                                 scene=str(item["scene"]),
                                 send_event=self.send_sse_event,
+                                force=str(payload.get("force", "")).lower() in {"1", "true", "yes", "on"},
                             )
                         except BrokenPipeError:
                             return
@@ -1976,7 +1995,7 @@ class DemoServer:
                     payload = self.read_body_json()
                     if parsed.path == "/api/infer-start":
                         item = server_state.payload_item(payload)
-                        job = server_state.jobs.start_job(item)
+                        job = server_state.jobs.start_job(item, force=bool(payload.get("force")))
                         self.send_json({"job_id": job.job_id})
                         return
                     if parsed.path in {"/api/scene", "/api/infer"}:
@@ -2008,7 +2027,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--port", type=int, default=8797)
     parser.add_argument("--cache-dir", type=Path, default=DEFAULT_CACHE_DIR)
     parser.add_argument("--dataset-root", type=Path, default=DEFAULT_DATASET_ROOT)
-    parser.add_argument("--checkpoint", type=Path, default=DEFAULT_CHECKPOINT)
+    parser.add_argument(
+        "--checkpoint",
+        "--model-path",
+        "--model",
+        dest="checkpoint",
+        type=Path,
+        default=DEFAULT_CHECKPOINT,
+        help="Path to a CLEAR-Net checkpoint .pt file. Aliases: --model-path, --model.",
+    )
     parser.add_argument("--split", choices=SPLITS, default="validation")
     parser.add_argument("--season", choices=SEASONS, default="spring")
     parser.add_argument("--scenes", default=None, help="Comma-separated scene ids. Defaults to the first scenes.")
@@ -2024,6 +2051,7 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
+    args.checkpoint = args.checkpoint.expanduser().resolve()
     if args.tile_size <= 0:
         raise DemoError("--tile-size must be greater than zero")
     if args.infer_batch_size <= 0:
